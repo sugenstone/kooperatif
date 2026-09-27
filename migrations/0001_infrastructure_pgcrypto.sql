@@ -1,0 +1,13 @@
+-- STEP-001 infrastructure baseline.
+--
+-- Enables the pgcrypto extension for the infrastructure needs referenced
+-- by the specification:
+--   - gen_random_uuid() for robust technical UUID identifiers (docs/20),
+--     kept consistent even on PostgreSQL versions where it is not core;
+--   - digest() for SHA-256 integrity checksums required by ADR-007
+--     (file/object storage metadata).
+--
+-- Deliberately creates NO domain, tenant or financial schema: financial
+-- migrations belong to the financial domain STEP after ADR-003/ADR-004
+-- implementation review (STEP-001 §11).
+CREATE EXTENSION IF NOT EXISTS pgcrypto;

@@ -1,0 +1,13 @@
+# Normalize all text files to LF in the repository and working tree so
+# git diff --check, prettier and rustfmt behave identically on every OS.
+* text=auto eol=lf
+
+# Binaries
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

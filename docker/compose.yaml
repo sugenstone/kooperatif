@@ -1,0 +1,33 @@
+# Local development infrastructure for the Kooperatif monorepo.
+#
+# STEP-001 scope: PostgreSQL only — the minimal infrastructure the
+# development/testing environment requires. Application containers are a
+# later concern (ADR-012 production topology).
+#
+# Usage:
+#   docker compose -f docker/compose.yaml up -d
+#   # PostgreSQL listens on host port 5494 (avoids clashes with a native
+#   # install); credentials are development-only.
+name: kooperatif-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kooperatif}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kooperatif_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-kooperatif}
+    ports:
+      - "${POSTGRES_PORT:-5494}:5432"
+    volumes:
+      - kooperatif_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kooperatif} -d ${POSTGRES_DB:-kooperatif}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  kooperatif_pgdata:

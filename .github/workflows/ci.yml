@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend:
+    name: Frontend (format, lint, typecheck, test, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check (prettier)
+        run: pnpm --dir apps/web exec prettier --check .
+
+      - name: Lint (eslint)
+        run: pnpm --dir apps/web run lint
+
+      - name: Typecheck (contracts + svelte-check)
+        run: pnpm run check
+
+      - name: Unit/component tests (vitest)
+        run: pnpm --dir apps/web run test
+
+      - name: Production build (adapter-node)
+        run: pnpm --dir apps/web run build
+        env:
+          PUBLIC_API_BASE_URL: http://localhost:8080
+
+  backend:
+    name: Backend (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+
+      - name: Format check
+        run: cargo fmt --manifest-path apps/server/Cargo.toml --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --manifest-path apps/server/Cargo.toml --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --manifest-path apps/server/Cargo.toml
+
+  database:
+    name: Database (clean-database migration + readiness)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: kooperatif
+          POSTGRES_PASSWORD: kooperatif_ci_password
+          POSTGRES_DB: kooperatif_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kooperatif -d kooperatif_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      KOOPERATIF_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+
+      - name: Apply migrations to the clean service database
+        run: cargo run --manifest-path apps/server/Cargo.toml -- migrate
+
+      - name: Re-run migrations (idempotency)
+        run: cargo run --manifest-path apps/server/Cargo.toml -- migrate
+
+      - name: Migration ledger records every migration
+        run: |
+          count=$(docker run --rm --network host postgres:17-alpine \
+            psql "$KOOPERATIF_DATABASE_URL" -t -A -c "SELECT count(*) FROM _sqlx_migrations;")
+          echo "recorded migrations: ${count}"
+          test "$count" -ge 1
+
+      - name: DB-gated integration tests
+        run: cargo test --manifest-path apps/server/Cargo.toml --test db -- --nocapture
+        env:
+          KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci

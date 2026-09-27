@@ -1,0 +1,65 @@
+//! HTTP layer: router, middleware and infrastructure endpoints.
+
+pub mod error;
+pub mod health;
+
+use axum::routing::get;
+use axum::Router;
+use health::{health, ready};
+use sqlx::PgPool;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::TraceLayer;
+
+use crate::http::error::fallback;
+
+/// Shared application state (grows with later domain modules).
+#[derive(Clone)]
+pub struct AppState {
+    /// `None` means the server runs without a configured database;
+    /// `/ready` then reports `unconfigured` (and answers 503).
+    pub db: Option<PgPool>,
+}
+
+pub const HEALTH_PATH: &str = "/health";
+pub const READY_PATH: &str = "/ready";
+
+/// CORS policy for the given allowlist. An empty allowlist produces a
+/// layer that answers no cross-origin requests: same-origin only
+/// (the production topology of ADR-012).
+pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
+    use tower_http::cors::CorsLayer;
+
+    let layer = CorsLayer::new();
+    if origins.is_empty() {
+        return layer;
+    }
+    let allowed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    layer.allow_origin(allowed)
+}
+
+/// Build the application router with observability middleware.
+pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
+    let trace = TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+        let request_id = request
+            .headers()
+            .get(axum::http::HeaderName::from_static("x-request-id"))
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("-");
+        tracing::info_span!(
+            "http_request",
+            method = %request.method(),
+            path = %request.uri().path(),
+            request_id = %request_id,
+        )
+    });
+
+    Router::new()
+        .route(HEALTH_PATH, get(health))
+        .route(READY_PATH, get(ready))
+        .fallback(fallback)
+        .layer(trace)
+        .layer(cors)
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .with_state(state)
+}

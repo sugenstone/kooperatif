@@ -1,0 +1,30 @@
+[package]
+name = "kooperatif-server"
+version = "0.1.0"
+edition = "2021"
+description = "Kooperatif backend API server (STEP-001 infrastructure baseline)"
+publish = false
+
+[dependencies]
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6", features = ["cors", "request-id", "trace", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+# The future Rust worker process (ADR-009, ADR-012) will join this Cargo
+# workspace as a sibling binary/crate sharing this package's library
+# (domain/application/infrastructure code), NOT a second backend codebase.
