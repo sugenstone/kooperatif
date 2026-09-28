@@ -62,6 +62,13 @@ superseded.
   ADR-012                 Docker Compose          Accepted
                           single-node/VDS initial 
                           production topology     
+
+  ADR-013                 Backup, Restore &       Accepted
+                          Disaster Recovery:      (v0.8)
+                          PITR/off-site,
+                          restore verification
+                          & Backup Readiness
+                          Gate
   -----------------------------------------------------------------------
 
 ## Reserved ADR-001

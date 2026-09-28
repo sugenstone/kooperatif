@@ -112,3 +112,16 @@ Optimize after measuring: - indexes; - pagination; - materialized/cached
 reporting; - background exports; - real-time fanout.
 
 Do not sacrifice financial integrity for premature optimization.
+
+
+## Backup / Disaster Recovery
+
+ADR-013 is authoritative for production recovery architecture.
+
+The production topology must support PostgreSQL full/base backups plus WAL archiving/PITR, encrypted off-site storage, protected object-storage recovery, documented restore procedures, and periodic isolated restore verification.
+
+Initial objectives are RPO <= 15 minutes and RTO <= 4 hours.
+
+A backup stored only on the production VDS is not sufficient disaster-recovery protection.
+
+Backup tooling/provider remains an implementation choice; the recovery and verification requirements do not.

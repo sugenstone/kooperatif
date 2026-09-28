@@ -110,3 +110,20 @@ migration safety.
 
 Done means specified behavior + automated evidence + clean scoped diff +
 closure report.
+
+
+## Backup Readiness Gate
+
+For any milestone intended to introduce material financial data into production, feature/test completion alone is insufficient.
+
+Before that milestone may be declared production-ready, ADR-013 requires evidence of:
+- configured production backup architecture;
+- encrypted off-site recoverable backup;
+- PostgreSQL WAL/PITR recovery capability where applicable;
+- successful restore verification in an isolated environment;
+- documented recovery procedure;
+- observable backup/restore failures.
+
+This gate becomes mandatory before production use of authoritative Payments, Allocations, Ledger records, or equivalent material financial state.
+
+Ordinary business corrections must use domain reversal/correction mechanisms, not disaster-recovery rollback.

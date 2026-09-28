@@ -12,8 +12,9 @@ baseline plus identity, authentication and server-side sessions
 implementation proceeds one reviewed STEP at a time.
 
 The authoritative project specification lives in
-[docs/](docs/) (package `kooperatif-agent-spec-v0.7`), with binding
-architecture decisions in [docs/adr/](docs/adr/). Start with
+[docs/](docs/) (**specification baseline: v0.8**, package
+`kooperatif-agent-spec-v0.8`), with binding architecture decisions in
+[docs/adr/](docs/adr/). Start with
 [docs/00-PROJECT-CHARTER.md](docs/00-PROJECT-CHARTER.md),
 [docs/15-INVARIANTS.md](docs/15-INVARIANTS.md) and
 [docs/28-ADR-INDEX.md](docs/28-ADR-INDEX.md). Working rules for agents:
@@ -24,6 +25,19 @@ The application architecture baseline is decided by
 a **modular monolith** — SvelteKit web, Rust/Axum API, one PostgreSQL
 database, a future Rust worker sharing the backend library — in this
 monorepo.
+
+Production backup and disaster recovery are governed by
+[ADR-013](docs/adr/ADR-013-BACKUP-RESTORE-DISASTER-RECOVERY.md)
+(v0.8): PostgreSQL full/base backups + WAL/PITR, an encrypted off-site
+copy (a backup stored only on the production host is not sufficient),
+protected object-storage recovery, periodic isolated restore
+verification ("untested backup is not a verified backup"), and a
+**Backup Readiness Gate** — milestones introducing material financial
+production data (Payments, Allocations, Ledger) cannot be declared
+production-ready without verified backup/restore evidence. Ordinary
+business mistakes use reversal/correction, never disaster-recovery
+rollback. Concrete backup tooling is a future implementation STEP; no
+backup infrastructure is configured in this repository yet.
 
 Default product language/locale: **Turkish (`tr-TR`)**. Localization is
 presentation-only and built in from the start.

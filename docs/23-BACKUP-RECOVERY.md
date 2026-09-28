@@ -75,3 +75,20 @@ Before production, document: 1. incident declaration; 2. write freeze if
 needed; 3. backup selection; 4. restore; 5. migrations; 6.
 reconciliation; 7. file verification; 8. smoke tests; 9. controlled
 reopening.
+
+
+## Accepted Disaster-Recovery Architecture
+
+ADR-013 is authoritative for production backup and disaster recovery.
+
+Initial objectives:
+- RPO <= 15 minutes;
+- RTO <= 4 hours;
+- PostgreSQL full/base backup plus WAL/PITR;
+- encrypted off-site recovery copy;
+- object-storage recovery protection;
+- periodic isolated restore verification.
+
+A backup stored only on the production host is not sufficient. An untested backup is not a verified backup.
+
+Ordinary business errors use reversal/correction workflows rather than database rollback.

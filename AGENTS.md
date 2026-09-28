@@ -133,3 +133,14 @@ where practical.
 Compiling is not closure. A completed step must pass the project's
 formatting, linting, typechecking, testing, migration, build, E2E and
 repository-cleanliness gates applicable to that step.
+
+
+## Backup / Disaster Recovery Gate
+
+ADR-013 is binding.
+
+Before declaring a milestone involving material financial production data production-ready, verify the Backup Readiness Gate in `docs/26-TESTING-QUALITY-GATES.md`.
+
+Do not treat a successful backup command/job as proof of recoverability. Restore verification evidence is required.
+
+Do not use disaster-recovery rollback to correct ordinary business mistakes; use the specified reversal/correction model.
