@@ -24,8 +24,11 @@ async fn main() -> ExitCode {
         .nth(1)
         .unwrap_or_else(|| "serve".to_string());
 
-    if !matches!(command.as_str(), "serve" | "migrate" | "create-user") {
-        eprintln!("usage: kooperatif-server [serve|migrate|create-user]");
+    if !matches!(
+        command.as_str(),
+        "serve" | "migrate" | "create-user" | "grant-role"
+    ) {
+        eprintln!("usage: kooperatif-server [serve|migrate|create-user|grant-role]");
         return ExitCode::FAILURE;
     }
 
@@ -33,6 +36,12 @@ async fn main() -> ExitCode {
         // Bootstrap runs before any observability/log setup: nothing the
         // operator types may ever reach a log sink (STEP-002 §7/§8).
         return run_create_user(std::env::args().skip(2)).await;
+    }
+
+    if command == "grant-role" {
+        // Deliberately privileged operator recovery/bootstrap path
+        // (STEP-003 §14/§28): NOT reachable over HTTP, audited.
+        return run_grant_role(std::env::args().skip(2)).await;
     }
 
     let config = match Config::from_env() {
@@ -279,6 +288,132 @@ async fn run_create_user(args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Bootstrap authorization (STEP-003 §14): explicitly grant a role to a
+/// user, by exact (case-insensitive-normalized) username and role name.
+///
+///   kooperatif-server grant-role --username yonetici --role "Sistem Yöneticisi"
+///
+/// This is the documented transition from STEP-002's permission-less
+/// bootstrap user to RBAC administration. It is an out-of-band operator
+/// command (never an HTTP endpoint), audited as
+/// `bootstrap_role_granted`. The granted role is not special-cased: its
+/// power is exactly its permission set. It also serves as the documented
+/// recovery path should every administration path ever be lost through
+/// application bugs (the last-admin guard makes that hard).
+async fn run_grant_role(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut username_arg: Option<String> = None;
+    let mut role_arg: Option<String> = None;
+
+    let mut iter = args.peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--username" => username_arg = iter.next(),
+            "--role" => role_arg = iter.next(),
+            other => {
+                eprintln!("bilinmeyen argüman: {other}");
+                eprintln!(
+                    "kullanım: kooperatif-server grant-role --username AD --role \"ROL ADI\""
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let (Some(raw_username), Some(raw_role)) = (username_arg, role_arg) else {
+        eprintln!("--username ve --role gereklidir");
+        return ExitCode::FAILURE;
+    };
+
+    let username = match identity::normalize_and_validate_username(&raw_username) {
+        Ok(username) => username,
+        Err(_) => {
+            eprintln!("Geçersiz kullanıcı adı: {raw_username}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(url) = config.database_url.as_deref() else {
+        eprintln!("grant-role requires KOOPERATIF_DATABASE_URL");
+        return ExitCode::FAILURE;
+    };
+    let pool = match db::connect(url).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("veritabanına bağlanılamadı: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let user = match users::find_by_normalized_username(&pool, &username).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            eprintln!("'{username}' kullanıcı adı bulunamadı.");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("kullanıcı sorgulanamadı: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let role_name = raw_role.trim();
+    let role_row = match sqlx::query_as::<_, (uuid::Uuid, String)>(
+        "SELECT id, name FROM roles WHERE lower(name) = lower($1)",
+    )
+    .bind(role_name)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            eprintln!("rol sorgulanamadı: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((role_id, actual_name)) = role_row else {
+        eprintln!("'{role_name}' rolü bulunamadı.");
+        return ExitCode::FAILURE;
+    };
+
+    let assigned = sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role_id) VALUES ($1, $2) \
+         ON CONFLICT (user_id, role_id) DO NOTHING",
+    )
+    .bind(user.id)
+    .bind(role_id)
+    .execute(&pool)
+    .await
+    .map(|result| result.rows_affected() > 0)
+    .unwrap_or(false);
+    if !assigned {
+        eprintln!("Bilgi: '{username}' kullanıcısına '{actual_name}' rolü zaten atanmış.");
+        return ExitCode::SUCCESS;
+    }
+
+    audit::record(
+        &pool,
+        audit::SecurityEventType::BootstrapRoleGranted,
+        Some(user.id),
+        None,
+        serde_json::json!({
+            "target_user_id": user.id,
+            "username": username,
+            "role_id": role_id,
+            "role_name": actual_name,
+            "source": "cli"
+        }),
+    )
+    .await;
+    eprintln!("'{actual_name}' rolü '{username}' kullanıcısına tanımlandı.");
+    ExitCode::SUCCESS
 }
 
 async fn run_migrate(config: &Config) -> ExitCode {

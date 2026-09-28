@@ -9,11 +9,13 @@
 //! passkeys, OAuth/SSO, invitation or public registration flows.
 
 pub mod audit;
+pub mod authz;
 pub mod cookies;
 pub mod csrf;
 pub mod extractor;
 pub mod identity;
 pub mod limiter;
+pub mod rbac;
 pub mod routes;
 pub mod session;
 pub mod token;

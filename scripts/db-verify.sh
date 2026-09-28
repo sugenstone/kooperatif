@@ -44,6 +44,14 @@ done
 [ "${status}" = "healthy" ] || { log "ERROR: postgres did not become healthy (status: ${status})"; exit 1; }
 log "postgres is healthy"
 
+log "sweeping per-test databases from failed runs (kooperatif_test_*)"
+for leftover in $(docker compose -f "${COMPOSE_FILE}" exec -T postgres \
+  psql -U "${POSTGRES_USER}" -d postgres -t -A \
+  -c "SELECT datname FROM pg_database WHERE datname LIKE 'kooperatif_test_%';"); do
+  docker compose -f "${COMPOSE_FILE}" exec -T postgres \
+    psql -U "${POSTGRES_USER}" -d postgres -c "DROP DATABASE IF EXISTS ${leftover} WITH (FORCE);" >/dev/null
+done
+
 log "recreating clean verification database ${VERIFY_DB}"
 # WITH (FORCE) drops stray connections (e.g. a locally running dev
 # server) so the gate is reproducible without manual cleanup.

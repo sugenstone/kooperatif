@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::auth::rbac::rbac_router;
 use crate::auth::routes::auth_router;
 use crate::auth::AuthRuntime;
 use crate::http::error::fallback;
@@ -52,6 +53,8 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
         ])
 }
@@ -76,6 +79,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
         .merge(auth_router())
+        .merge(rbac_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

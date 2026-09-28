@@ -18,6 +18,7 @@ export { asDecimalString, isDecimalString } from './decimal';
 export type {
 	AuthResponse,
 	LoginRequest,
+	RoleSummary,
 	SessionInfo,
 	SessionSummary,
 	SessionsResponse,
@@ -31,6 +32,29 @@ export {
 	SESSIONS_PATH,
 	sessionPath
 } from './auth';
+export type {
+	AssignedRole,
+	CreateRoleRequest,
+	Permission,
+	PermissionKey,
+	PermissionSetRequest,
+	Role,
+	RoleStatus,
+	UpdateRoleRequest,
+	UserRoleSetRequest,
+	UserWithRoles
+} from './rbac';
+export {
+	PERMISSION_KEYS,
+	PERMISSIONS_PATH,
+	ROLES_PATH,
+	USERS_PATH,
+	roleDisablePath,
+	roleEnablePath,
+	rolePath,
+	rolePermissionsPath,
+	userRolesPath
+} from './rbac';
 export type {
 	ApiErrorBody,
 	ApiErrorCode,

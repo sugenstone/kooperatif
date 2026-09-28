@@ -20,5 +20,10 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'auth.login.submit': 'Sign in',
 	'auth.shell.logout': 'Sign out',
 	'auth.shell.sessions': 'My sessions',
-	'auth.sessions.title': 'My sessions'
+	'auth.sessions.title': 'My sessions',
+	'nav.roles': 'Roles',
+	'nav.users': 'Users',
+	'roles.title': 'Roles',
+	'users.title': 'Users',
+	'errors.permission_denied': 'You do not have permission for this action.'
 };

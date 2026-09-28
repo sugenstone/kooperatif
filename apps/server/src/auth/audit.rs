@@ -17,6 +17,15 @@ pub enum SecurityEventType {
     SessionRevoked,
     SessionsRevokedAllOthers,
     UserCreated,
+    RoleCreated,
+    RoleUpdated,
+    RoleEnabled,
+    RoleDisabled,
+    RolePermissionsChanged,
+    RoleAssigned,
+    RoleUnassigned,
+    BootstrapRoleGranted,
+    LockoutPrevented,
 }
 
 impl SecurityEventType {
@@ -28,6 +37,15 @@ impl SecurityEventType {
             Self::SessionRevoked => "session_revoked",
             Self::SessionsRevokedAllOthers => "sessions_revoked_all_others",
             Self::UserCreated => "user_created",
+            Self::RoleCreated => "role_created",
+            Self::RoleUpdated => "role_updated",
+            Self::RoleEnabled => "role_enabled",
+            Self::RoleDisabled => "role_disabled",
+            Self::RolePermissionsChanged => "role_permissions_changed",
+            Self::RoleAssigned => "role_assigned",
+            Self::RoleUnassigned => "role_unassigned",
+            Self::BootstrapRoleGranted => "bootstrap_role_granted",
+            Self::LockoutPrevented => "lockout_prevented",
         }
     }
 }

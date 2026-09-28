@@ -17,7 +17,7 @@ export class ApiError extends Error {
 }
 
 interface ApiFetchOptions {
-	method?: 'GET' | 'POST' | 'DELETE';
+	method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 	csrfToken?: string | null;
 	body?: unknown;
 }

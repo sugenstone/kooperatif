@@ -5,9 +5,10 @@ tracked shares, period obligations, collections, financial accounts,
 investments, assets, governance, versioned policies, reporting, and a
 financially isolated Social Aid subsystem.
 
-**This repository is at the STEP-002 stage: repository/architecture
-baseline plus identity, authentication and server-side sessions
-(ADR-002).** No cooperative business domain is implemented yet. See
+**This repository is at the STEP-003 stage: repository/architecture
+baseline, identity/authentication/sessions (ADR-002) and the RBAC
+authorization foundation.** No cooperative business domain is implemented
+yet. See
 [docs/29-IMPLEMENTATION-ROADMAP.md](docs/29-IMPLEMENTATION-ROADMAP.md) —
 implementation proceeds one reviewed STEP at a time.
 
@@ -170,6 +171,62 @@ Durable `security_events` rows (audit — distinct from observability
 logs per ADR-011) record login succeeded/failed (with safe reason
 categories), logout, session revocations and CLI user creation. No
 passwords, tokens, cookie values or CSRF secrets ever reach them.
+
+## Authorization (STEP-003, docs/18)
+
+RBAC: **User → UserRoleAssignment → Role → RolePermission → Permission**.
+Effective permissions are the union over a user's **active** roles;
+absence means denial. No `is_admin`-style shortcuts, no name-based logic
+(renaming a role never changes its behavior), no wildcard permissions,
+and nothing authorization-related ever enters the session cookie.
+
+- **Permission catalog** is application-owned: the four STEP-003 keys
+  (`users.read`, `users.manage`, `roles.read`, `roles.manage`) are seeded
+  by migration 0003 and mirrored in `apps/server/src/auth/authz.rs` and
+  `@kooperatif/contracts`. There is deliberately no API to create
+  permission keys — future STEPs add permissions via migration + catalog
+  constant + contract update. No financial/production-restore
+  permissions exist yet (ADR-013 keeps restore operator-privileged).
+- **Freshness**: permissions are resolved server-side from PostgreSQL on
+  every protected request — grants/revocations/role-disabling take
+  effect immediately, no re-login needed.
+- **Bootstrap authorization**: migration 0003 seeds the
+  `Sistem Yöneticisi` role (explicitly granted the four permissions; the
+  name is not special). Give the STEP-002 operator its administration:
+  ```bash
+  KOOPERATIF_DATABASE_URL=... cargo run --manifest-path apps/server/Cargo.toml -- \
+    grant-role --username yonetici --role "Sistem Yöneticisi"
+  ```
+  (out-of-band operator command, audited as `bootstrap_role_granted`;
+  it is also the documented recovery path if every administration path
+  is ever lost).
+- **Last-administration-path protection**: a mutation that would leave
+  zero active users holding an active role with `roles.manage` is
+  rejected with `409 lockout_prevented`. Lockout-sensitive mutations are
+  serialized by a PostgreSQL advisory transaction lock, so concurrent
+  removals cannot both succeed (proven by an HTTP-level concurrency
+  test). No hidden superuser bypass exists.
+- **APIs** (all server-side authorized, CSRF-protected, `no-store`):
+  `GET /api/permissions` (roles.read) · `GET/POST /api/roles`,
+  `GET/PATCH /api/roles/{id}`, `disable`/`enable` actions,
+  `GET/PUT /api/roles/{id}/permissions` (roles.read/roles.manage) ·
+  `GET /api/users`, `GET/PUT /api/users/{id}/roles`
+  (users.read/users.manage). Replace-set PUT semantics are idempotent;
+  unknown permission keys and disabled-role assignments are rejected;
+  role names are unique case-insensitively.
+- **Frontend**: `/me` returns the authoritative permission set; the
+  `can()` helper drives permission-aware navigation (Roller/Kullanıcılar
+  entries) — UX only, the backend enforces every endpoint. `/roller`
+  manages roles/permissions (grouped catalog, Turkish labels);
+  `/kullanicilar` manages user role assignments.
+- **Audit** (`security_events`): role created/updated/enabled/disabled,
+  permission-set changes (before/after), role assigned/unassigned (with
+  actor), bootstrap grants and lockout-prevention rejections.
+- **Running RBAC tests**: `pnpm db:verify` executes the whole Rust suite
+  against a clean database, including the RBAC security matrix
+  (resolution, HTTP 401/403 enforcement, freshness, lifecycle,
+  assignment, lockout incl. concurrency, audit, DB constraints). Each
+  RBAC test runs in its own throwaway database for full isolation.
 
 ### Running auth tests
 

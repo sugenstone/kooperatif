@@ -30,6 +30,15 @@ pub enum ApiError {
     RateLimited,
     /// 503 — a required dependency (PostgreSQL) is unavailable.
     DependencyUnavailable,
+    /// 403 — authenticated but lacking the required permission
+    /// (STEP-003 §19: never collapse into 401).
+    PermissionDenied,
+    /// 409 — unique/normalized-identity conflict (e.g. duplicate role
+    /// name).
+    Conflict,
+    /// 409 — mutation rejected by the last-administration-path guard
+    /// (STEP-003 §28).
+    LockoutPrevented,
 }
 
 impl ApiError {
@@ -44,6 +53,9 @@ impl ApiError {
             Self::CsrfFailed => "csrf_failed",
             Self::RateLimited => "rate_limited",
             Self::DependencyUnavailable => "dependency_unavailable",
+            Self::PermissionDenied => "permission_denied",
+            Self::Conflict => "conflict",
+            Self::LockoutPrevented => "lockout_prevented",
         }
     }
 
@@ -55,9 +67,10 @@ impl ApiError {
             Self::AuthenticationRequired | Self::SessionExpired | Self::AuthenticationFailed => {
                 StatusCode::UNAUTHORIZED
             }
-            Self::CsrfFailed => StatusCode::FORBIDDEN,
+            Self::CsrfFailed | Self::PermissionDenied => StatusCode::FORBIDDEN,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::DependencyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Conflict | Self::LockoutPrevented => StatusCode::CONFLICT,
         }
     }
 }

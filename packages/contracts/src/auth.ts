@@ -33,10 +33,19 @@ export interface SessionInfo {
 	expiresAt: string;
 }
 
+export interface RoleSummary {
+	id: string;
+	name: string;
+}
+
 export interface AuthResponse {
 	user: UserSummary;
 	session: SessionInfo;
 	csrfToken: string;
+	/** Effective permission keys — authoritative authorization context for frontend UX (backend enforcement never trusts this). */
+	permissions: string[];
+	/** Safe summaries of the user's active roles. */
+	roles: RoleSummary[];
 }
 
 export interface SessionSummary {

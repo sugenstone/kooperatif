@@ -40,7 +40,10 @@ export type ApiErrorCode =
 	| 'authentication_failed'
 	| 'csrf_failed'
 	| 'rate_limited'
-	| 'dependency_unavailable';
+	| 'dependency_unavailable'
+	| 'permission_denied'
+	| 'conflict'
+	| 'lockout_prevented';
 
 export interface ApiErrorBody {
 	error: {

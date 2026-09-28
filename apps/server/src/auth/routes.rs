@@ -61,11 +61,24 @@ pub struct SessionInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RoleSummaryDto {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthResponse {
     pub user: UserSummary,
     pub session: SessionInfo,
     /// Raw CSRF synchronizer token for authenticated mutations.
     pub csrf_token: String,
+    /// Effective permission keys (union over active roles) — the
+    /// authoritative authorization context for frontend UX (STEP-003
+    /// §21). Backend enforcement never trusts this.
+    pub permissions: Vec<String>,
+    /// Safe summaries of the user's active roles.
+    pub roles: Vec<RoleSummaryDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,8 +114,11 @@ pub fn auth_router() -> Router<AppState> {
 }
 
 /// Auth responses must never be cached by browsers or shared caches
-/// (STEP-002 §36).
-async fn no_store_cache_control(request: Request<axum::body::Body>, next: Next) -> Response {
+/// (STEP-002 §36). Shared with the RBAC router (STEP-003 §48).
+pub(crate) async fn no_store_cache_control(
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -111,7 +127,7 @@ async fn no_store_cache_control(request: Request<axum::body::Body>, next: Next) 
     response
 }
 
-fn require_allowed_origin(
+pub(crate) fn require_allowed_origin(
     headers: &HeaderMap,
     method: &Method,
     state: &AppState,
@@ -120,7 +136,7 @@ fn require_allowed_origin(
         .map_err(|rejection| csrf_rejection_to_api_error(&rejection))
 }
 
-fn csrf_rejection_to_api_error(rejection: &CsrfRejection) -> ApiError {
+pub(crate) fn csrf_rejection_to_api_error(rejection: &CsrfRejection) -> ApiError {
     tracing::warn!(reason = ?rejection, "csrf validation failed");
     ApiError::CsrfFailed
 }
@@ -283,6 +299,13 @@ pub async fn login(
         state.auth.config.session_absolute_ttl_secs,
     );
 
+    let (permissions, roles) = authorization_context(pool, user.id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "authorization context failed at login");
+            ApiError::Internal
+        })?;
+
     let body = AuthResponse {
         user: UserSummary {
             id: user.id,
@@ -295,13 +318,46 @@ pub async fn login(
             expires_at: created.expires_at,
         },
         csrf_token: csrf_token.raw,
+        permissions,
+        roles,
     };
 
     Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(body)).into_response())
 }
 
-pub async fn me(auth: CurrentAuth) -> Json<AuthResponse> {
-    Json(AuthResponse {
+/// Effective permission keys + safe active-role summaries for the
+/// authorization context (STEP-003 §21). Errors propagate: an auth
+/// context answer must never silently report an empty permission set.
+async fn authorization_context(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<(Vec<String>, Vec<RoleSummaryDto>), sqlx::Error> {
+    let mut permissions: Vec<String> = crate::auth::authz::effective_permissions(pool, user_id)
+        .await?
+        .into_iter()
+        .collect();
+    permissions.sort();
+    let roles: Vec<RoleSummaryDto> = crate::auth::authz::active_role_summaries(pool, user_id)
+        .await?
+        .into_iter()
+        .map(|(id, name)| RoleSummaryDto { id, name })
+        .collect();
+    Ok((permissions, roles))
+}
+
+pub async fn me(
+    State(state): State<AppState>,
+    auth: CurrentAuth,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+    let (permissions, roles) =
+        authorization_context(pool, auth.user_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "authorization context failed");
+                ApiError::Internal
+            })?;
+    Ok(Json(AuthResponse {
         user: UserSummary {
             id: auth.user_id,
             username: auth.username,
@@ -313,7 +369,9 @@ pub async fn me(auth: CurrentAuth) -> Json<AuthResponse> {
             expires_at: auth.session_expires_at,
         },
         csrf_token: auth.csrf_token,
-    })
+        permissions,
+        roles,
+    }))
 }
 
 pub async fn logout(
