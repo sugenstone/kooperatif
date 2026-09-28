@@ -20,6 +20,12 @@
 	</div>
 	<div class="flex flex-wrap items-center gap-2">
 		<!-- Permission-aware navigation (UX only; the backend enforces). -->
+		{#if can('shareholders.read')}
+			<Button variant="ghost" size="sm" href="/hissedarlar">{t('nav.shareholders')}</Button>
+		{/if}
+		{#if can('families.read')}
+			<Button variant="ghost" size="sm" href="/aileler">{t('nav.families')}</Button>
+		{/if}
 		{#if can('roles.read')}
 			<Button variant="ghost" size="sm" href="/roller">{t('nav.roles')}</Button>
 		{/if}

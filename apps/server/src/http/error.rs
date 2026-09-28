@@ -39,6 +39,9 @@ pub enum ApiError {
     /// 409 — mutation rejected by the last-administration-path guard
     /// (STEP-003 §28).
     LockoutPrevented,
+    /// 409 — optimistic-concurrency precondition failed: the record
+    /// changed after the caller loaded it (docs/21 stale-state).
+    StaleState,
 }
 
 impl ApiError {
@@ -56,6 +59,7 @@ impl ApiError {
             Self::PermissionDenied => "permission_denied",
             Self::Conflict => "conflict",
             Self::LockoutPrevented => "lockout_prevented",
+            Self::StaleState => "stale_state",
         }
     }
 
@@ -70,7 +74,7 @@ impl ApiError {
             Self::CsrfFailed | Self::PermissionDenied => StatusCode::FORBIDDEN,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::DependencyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Conflict | Self::LockoutPrevented => StatusCode::CONFLICT,
+            Self::Conflict | Self::LockoutPrevented | Self::StaleState => StatusCode::CONFLICT,
         }
     }
 }

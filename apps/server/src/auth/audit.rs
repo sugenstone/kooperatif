@@ -26,6 +26,13 @@ pub enum SecurityEventType {
     RoleUnassigned,
     BootstrapRoleGranted,
     LockoutPrevented,
+    PersonCreated,
+    PersonUpdated,
+    FamilyCreated,
+    ShareholderCreated,
+    ShareholderUpdated,
+    ShareholderStatusChanged,
+    ShareholderFamilyChanged,
 }
 
 impl SecurityEventType {
@@ -46,6 +53,13 @@ impl SecurityEventType {
             Self::RoleUnassigned => "role_unassigned",
             Self::BootstrapRoleGranted => "bootstrap_role_granted",
             Self::LockoutPrevented => "lockout_prevented",
+            Self::PersonCreated => "person_created",
+            Self::PersonUpdated => "person_updated",
+            Self::FamilyCreated => "family_created",
+            Self::ShareholderCreated => "shareholder_created",
+            Self::ShareholderUpdated => "shareholder_updated",
+            Self::ShareholderStatusChanged => "shareholder_status_changed",
+            Self::ShareholderFamilyChanged => "shareholder_family_changed",
         }
     }
 }

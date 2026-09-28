@@ -5,10 +5,11 @@ tracked shares, period obligations, collections, financial accounts,
 investments, assets, governance, versioned policies, reporting, and a
 financially isolated Social Aid subsystem.
 
-**This repository is at the STEP-003 stage: repository/architecture
-baseline, identity/authentication/sessions (ADR-002) and the RBAC
-authorization foundation.** No cooperative business domain is implemented
-yet. See
+**This repository is at the STEP-004 stage: repository/architecture
+baseline, identity/authentication/sessions (ADR-002), the RBAC
+authorization foundation, and the Shareholder/Guardian/Family identity
+model (the first cooperative business domain).** No Shares, Periods,
+Payments, Ledger, Investments, Governance or Social Aid exist yet. See
 [docs/29-IMPLEMENTATION-ROADMAP.md](docs/29-IMPLEMENTATION-ROADMAP.md) —
 implementation proceeds one reviewed STEP at a time.
 
@@ -227,6 +228,71 @@ and nothing authorization-related ever enters the session cookie.
   (resolution, HTTP 401/403 enforcement, freshness, lifecycle,
   assignment, lockout incl. concurrency, audit, DB constraints). Each
   RBAC test runs in its own throwaway database for full isolation.
+
+## Shareholders, Guardians & Families (STEP-004, docs/04)
+
+The first cooperative business domain: a normalized identity layer on
+which future Share/Period/Payment work builds. **Person ≠ User ≠
+Shareholder ≠ Guardian ≠ Family.**
+
+- **`persons`** — one row per real-world person; a Person may act as a
+  Shareholder, be referenced as a Guardian, both, or neither. Names are
+  **never unique**: several distinct `Mehmet Yılmaz` records are valid.
+  Only minimal identity fields are stored (data minimization); a
+  computed `search_name` column carries a Turkish-aware fold (`İ/I/ı`→`i`
+  + Unicode lowercase) so search is case-insensitive without mutating
+  stored display values.
+- **`shareholders`** — a cooperative business record linked 1:1 to a
+  Person (`person_id` UNIQUE). `guardian_person_id` is an optional
+  Person reference: a Guardian may or may not be a Shareholder and is
+  never auto-promoted. Status lifecycle is `active ↔ inactive`, plus
+  terminal `voided` for mistaken unused records — **no hard delete**.
+- **`families`** — cooperative-scoped grouping with a manually assigned
+  `sequence_number` (positive bigint, DB-enforced unique; duplicates
+  surface as `409 conflict`, concurrency-safe without MAX+1).
+- **`shareholder_family_memberships`** — temporal membership:
+  `started_at`/`ended_at` intervals, at most one active membership per
+  shareholder, overlap prevented by a PostgreSQL exclusion constraint
+  (btree_gist). `POST /api/shareholders/{id}/family-change` ("Aile
+  Değiştir") closes the current interval and opens the new one — plus
+  optional family creation — inside ONE transaction; full history is
+  retained for future "as of" queries.
+- **Display identity**: same names must be distinguishable everywhere.
+  Every shareholder DTO carries a server-composed `displayLabel`:
+  `Ad Soyad · Vasi: Ad Soyad · Aile No 47`. The UI never renders a bare
+  name where ambiguity is possible; absent guardian shows "Vasi bilgisi
+  yok" (no placeholder persons).
+- **Search**: folded substring over shareholder name, guardian name and
+  family sequence number, server-side, Turkish-safe, offset-paginated
+  (small admin registry — ADR-010).
+- **Duplicate warning, not blocking**: the create flow probes
+  `GET /api/shareholders/duplicates` and shows same-name candidates with
+  guardian/family context; the operator confirms it is a different
+  person.
+- **APIs** (server-side authorized, both CSRF layers, `no-store`):
+  `GET/POST /api/shareholders`, `GET/PATCH /api/shareholders/{id}`,
+  `POST .../status-change`, `POST .../family-change`,
+  `GET /api/shareholders/duplicates`, `GET /api/persons` (lookup only —
+  no generic person CRUD), `GET/POST /api/families`,
+  `GET /api/families/{id}` (with members). Mutations carry an
+  `expectedUpdatedAt` optimistic-concurrency precondition
+  (`409 stale_state`); family transfers also serialize on the row lock
+  + exclusion constraint.
+- **Permissions**: `shareholders.read`, `shareholders.manage`,
+  `families.read`, `families.manage` — granted explicitly to the seeded
+  `Sistem Yöneticisi` role by migration 0004 (no wildcard inheritance;
+  custom roles are untouched).
+- **Audit**: person/family/shareholder creation, identity and guardian
+  updates (before/after), status transitions and family changes (old→new
+  sequence) land in `security_events` with actor + timestamp.
+- **Frontend**: `/hissedarlar` (list/search/pagination/create),
+  `/hissedarlar/yeni` (person + guardian + family in one transactional
+  form), `/hissedarlar/{id}` (identity, Aile Geçmişi, Aile Değiştir,
+  status actions), `/aileler` + `/aileler/{id}` (member list). All
+  Turkish-first, permission-aware navigation.
+- **E2E**: `node scripts/e2e-step004.mjs` drives the real stack
+  (PostgreSQL + API + SvelteKit dev server + Chromium) through
+  login → create → list → detail → family member verification.
 
 ### Running auth tests
 

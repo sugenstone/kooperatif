@@ -31,11 +31,25 @@ pub mod catalog {
     pub const USERS_MANAGE: &str = "users.manage";
     pub const ROLES_READ: &str = "roles.read";
     pub const ROLES_MANAGE: &str = "roles.manage";
+    // STEP-004 (parties domain).
+    pub const SHAREHOLDERS_READ: &str = "shareholders.read";
+    pub const SHAREHOLDERS_MANAGE: &str = "shareholders.manage";
+    pub const FAMILIES_READ: &str = "families.read";
+    pub const FAMILIES_MANAGE: &str = "families.manage";
 
-    /// Every permission key the application owns in STEP-003. Adding a
-    /// permission is a controlled catalog change: migration seed + this
-    /// list + contracts (see README "adding a new permission").
-    pub const ALL: &[&str] = &[USERS_READ, USERS_MANAGE, ROLES_READ, ROLES_MANAGE];
+    /// Every permission key the application owns. Adding a permission
+    /// is a controlled catalog change: migration seed + this list +
+    /// contracts (see README "adding a new permission").
+    pub const ALL: &[&str] = &[
+        USERS_READ,
+        USERS_MANAGE,
+        ROLES_READ,
+        ROLES_MANAGE,
+        SHAREHOLDERS_READ,
+        SHAREHOLDERS_MANAGE,
+        FAMILIES_READ,
+        FAMILIES_MANAGE,
+    ];
 
     pub fn is_known(key: &str) -> bool {
         ALL.contains(&key)
@@ -168,7 +182,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 4, "exactly the STEP-003 catalog");
+        assert_eq!(catalog::ALL.len(), 8, "STEP-003 + STEP-004 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

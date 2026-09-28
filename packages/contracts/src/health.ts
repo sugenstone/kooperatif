@@ -43,7 +43,8 @@ export type ApiErrorCode =
 	| 'dependency_unavailable'
 	| 'permission_denied'
 	| 'conflict'
-	| 'lockout_prevented';
+	| 'lockout_prevented'
+	| 'stale_state';
 
 export interface ApiErrorBody {
 	error: {

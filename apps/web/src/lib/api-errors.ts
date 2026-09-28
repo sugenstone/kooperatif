@@ -11,11 +11,13 @@ export function apiErrorKey(error: unknown): MessageKey {
 	}
 	const candidates: Record<string, MessageKey> = {
 		permission_denied: 'errors.permission_denied',
+		not_found: 'errors.not_found',
 		conflict: 'errors.conflict',
 		lockout_prevented: 'errors.lockout_prevented',
 		validation_failed: 'errors.validation_failed',
 		csrf_failed: 'auth.login.error.csrf_failed',
-		dependency_unavailable: 'auth.login.error.dependency_unavailable'
+		dependency_unavailable: 'auth.login.error.dependency_unavailable',
+		stale_state: 'errors.stale_state'
 	};
 	return candidates[error.code] ?? 'errors.fallback';
 }

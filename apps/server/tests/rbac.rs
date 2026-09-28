@@ -378,7 +378,13 @@ async fn effective_permissions_follow_the_union_and_default_deny() {
     let permissions = kooperatif_server::auth::authz::effective_permissions(&test.pool, plain_id)
         .await
         .expect("resolution");
-    assert_eq!(permissions.len(), 4, "re-enabled role grants again");
+    // The seeded admin role holds exactly the application-owned
+    // catalog (migration seeds grant every catalog key).
+    assert_eq!(
+        permissions.len(),
+        kooperatif_server::auth::authz::catalog::ALL.len(),
+        "re-enabled role grants again"
+    );
 }
 
 // ------------------------------------------------------------------
@@ -432,7 +438,10 @@ async fn rbac_endpoints_enforce_authentication_and_permission_server_side() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalog.as_array().expect("catalog").len(), 4);
+    assert_eq!(
+        catalog.as_array().expect("catalog").len(),
+        kooperatif_server::auth::authz::catalog::ALL.len()
+    );
 
     // users.read gated likewise.
     let (status, _) = send(
@@ -579,7 +588,10 @@ async fn permission_changes_take_effect_immediately_without_relogin() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(me["permissions"].as_array().expect("permissions").len(), 4);
+    assert_eq!(
+        me["permissions"].as_array().expect("permissions").len(),
+        kooperatif_server::auth::authz::catalog::ALL.len()
+    );
     assert!(!me["roles"].as_array().expect("roles").is_empty());
 }
 
@@ -947,7 +959,11 @@ async fn last_administration_path_is_protected() {
     .fetch_all(&test.pool)
     .await
     .expect("keys");
-    assert_eq!(keys.len(), 4, "permission strip must be rolled back");
+    assert_eq!(
+        keys.len(),
+        kooperatif_server::auth::authz::catalog::ALL.len(),
+        "permission strip must be rolled back"
+    );
 
     // With a SECOND administration path, the same mutations succeed.
     let second_name = format!("kilit.ikinci.{}", Uuid::new_v4().simple());

@@ -56,6 +56,33 @@ export {
 	userRolesPath
 } from './rbac';
 export type {
+	CreateFamilyRequest,
+	CreateShareholderRequest,
+	FamilyChangeRequest,
+	FamilyDetail,
+	FamilyListItem,
+	FamilyRefInput,
+	MembershipHistoryEntry,
+	Paginated,
+	PersonLookupItem,
+	PersonRefInput,
+	ShareholderDetail,
+	ShareholderListItem,
+	ShareholderStatus,
+	StatusChangeRequest,
+	UpdateShareholderRequest,
+} from './parties';
+export {
+	FAMILIES_PATH,
+	PERSONS_PATH,
+	SHAREHOLDER_DUPLICATES_PATH,
+	SHAREHOLDERS_PATH,
+	familyPath,
+	shareholderFamilyChangePath,
+	shareholderPath,
+	shareholderStatusChangePath
+} from './parties';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

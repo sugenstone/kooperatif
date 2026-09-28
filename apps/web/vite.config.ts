@@ -4,6 +4,10 @@ import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 
 export default defineConfig({
+	// Expose PUBLIC_* env vars via import.meta.env so PUBLIC_API_BASE_URL
+	// (`.env.example`) actually reaches the client; process env wins over
+	// `.env` values (Vite precedence), which the E2E harness relies on.
+	envPrefix: 'PUBLIC_',
 	// Under vitest, resolve browser builds of packages with dual exports so
 	// Svelte client lifecycle (mount/effects) works inside jsdom.
 	resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
