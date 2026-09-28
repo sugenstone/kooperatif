@@ -103,7 +103,7 @@ jobs:
           echo "recorded migrations: ${count}"
           test "$count" -ge 1
 
-      - name: DB-gated integration tests
-        run: cargo test --manifest-path apps/server/Cargo.toml --test db -- --nocapture
+      - name: DB-gated integration tests (database + full auth security matrix)
+        run: cargo test --manifest-path apps/server/Cargo.toml -- --nocapture
         env:
           KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci

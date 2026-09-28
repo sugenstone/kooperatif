@@ -16,6 +16,22 @@
 export type { DecimalString } from './decimal';
 export { asDecimalString, isDecimalString } from './decimal';
 export type {
+	AuthResponse,
+	LoginRequest,
+	SessionInfo,
+	SessionSummary,
+	SessionsResponse,
+	UserSummary
+} from './auth';
+export {
+	LOGIN_PATH,
+	LOGOUT_PATH,
+	ME_PATH,
+	REVOKE_OTHERS_SESSIONS_PATH,
+	SESSIONS_PATH,
+	sessionPath
+} from './auth';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

@@ -45,9 +45,11 @@ done
 log "postgres is healthy"
 
 log "recreating clean verification database ${VERIFY_DB}"
+# WITH (FORCE) drops stray connections (e.g. a locally running dev
+# server) so the gate is reproducible without manual cleanup.
 docker compose -f "${COMPOSE_FILE}" exec -T postgres \
   psql -U "${POSTGRES_USER}" -d postgres -v ON_ERROR_STOP=1 \
-  -c "DROP DATABASE IF EXISTS ${VERIFY_DB};" \
+  -c "DROP DATABASE IF EXISTS ${VERIFY_DB} WITH (FORCE);" \
   -c "CREATE DATABASE ${VERIFY_DB};"
 
 log "applying migrations to the clean database"
@@ -64,8 +66,8 @@ applied="$(docker compose -f "${COMPOSE_FILE}" exec -T postgres \
 log "migrations recorded: ${applied}"
 [ "${applied}" -ge 1 ] || { log "ERROR: no migrations were recorded"; exit 1; }
 
-log "running DB-gated integration tests"
+log "running DB-gated integration tests (database + full auth security matrix)"
 KOOPERATIF_TEST_DATABASE_URL="${VERIFY_URL}" \
-  cargo test --manifest-path "${SERVER_MANIFEST}" --test db -- --nocapture
+  cargo test --manifest-path "${SERVER_MANIFEST}" -- --nocapture
 
 log "database verification PASSED"

@@ -1,7 +1,9 @@
-//! HTTP layer: router, middleware and infrastructure endpoints.
+//! HTTP layer: router, middleware and endpoints.
 
 pub mod error;
 pub mod health;
+
+use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
@@ -10,6 +12,8 @@ use sqlx::PgPool;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::auth::routes::auth_router;
+use crate::auth::AuthRuntime;
 use crate::http::error::fallback;
 
 /// Shared application state (grows with later domain modules).
@@ -18,6 +22,8 @@ pub struct AppState {
     /// `None` means the server runs without a configured database;
     /// `/ready` then reports `unconfigured` (and answers 503).
     pub db: Option<PgPool>,
+    /// Authentication/session runtime (ADR-002, STEP-002).
+    pub auth: Arc<AuthRuntime>,
 }
 
 pub const HEALTH_PATH: &str = "/health";
@@ -34,7 +40,20 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
         return layer;
     }
     let allowed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
-    layer.allow_origin(allowed)
+    // Development (Vite on :5173 -> API on :8080) needs credentialed
+    // cross-origin cookies; allowed origins are an explicit allowlist.
+    layer
+        .allow_origin(allowed)
+        .allow_credentials(true)
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderName::from_static("x-csrf-token"),
+        ])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::DELETE,
+        ])
 }
 
 /// Build the application router with observability middleware.
@@ -56,6 +75,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
+        .merge(auth_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

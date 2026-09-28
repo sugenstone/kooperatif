@@ -5,8 +5,11 @@
 //! worker of ADR-009 will be added as another binary sharing these modules
 //! without duplicating business logic.
 //!
-//! STEP-001 scope: infrastructure only. No domain, no financial logic.
+//! STEP-001: infrastructure baseline. STEP-002: identity, authentication
+//! and server-side sessions. No other domain functionality exists yet.
 
+pub mod auth;
+pub mod clock;
 pub mod config;
 pub mod db;
 pub mod http;

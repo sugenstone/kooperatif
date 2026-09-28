@@ -31,7 +31,16 @@ export interface ReadinessResponse {
 }
 
 /** Machine-readable error codes (docs/21-API-CONTRACTS.md categories). */
-export type ApiErrorCode = 'not_found' | 'internal_error';
+export type ApiErrorCode =
+	| 'not_found'
+	| 'internal_error'
+	| 'validation_failed'
+	| 'authentication_required'
+	| 'session_expired'
+	| 'authentication_failed'
+	| 'csrf_failed'
+	| 'rate_limited'
+	| 'dependency_unavailable';
 
 export interface ApiErrorBody {
 	error: {
