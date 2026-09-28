@@ -36,11 +36,12 @@ INSERT INTO security_events (event_type, user_id, metadata) VALUES
     ('share_created', '11111111-0000-4000-8000-0000000000aa',
      '{"share_number":9001}');
 
--- Persons: shareholder A, shareholder B, guardian person.
+-- Persons: shareholder A, shareholder B, guardian person, third-party payer.
 INSERT INTO persons (id, first_name, last_name, search_name) VALUES
     ('22222222-0000-4000-8000-000000000001', 'Yedek', 'Hissedarı', 'yedek hissedarı'),
     ('22222222-0000-4000-8000-000000000002', 'Yedek', 'Devralan', 'yedek devralan'),
-    ('22222222-0000-4000-8000-000000000003', 'Vasi', 'Test', 'vasi test');
+    ('22222222-0000-4000-8000-000000000003', 'Vasi', 'Test', 'vasi test'),
+    ('22222222-0000-4000-8000-000000000004', 'Ödeyen', 'Üçüncü', 'ödeyen üçüncü');
 
 INSERT INTO families (id, sequence_number) VALUES
     ('33333333-0000-4000-8000-000000000001', 900001),
@@ -183,5 +184,56 @@ INSERT INTO assessment_share_sources
     ('acacacac-0000-4000-8000-000000000004',
      '66666666-0000-4000-8000-000000000002',
      '88888888-0000-4000-8000-000000000003', 1234.56);
+
+-- STEP-007 payments: money RECEIVED, distinct from obligation.
+-- Payment 9001: third-party payer covers TWO different debtors'
+-- assessments in one receipt (payer ≠ debtor; family-style bulk).
+INSERT INTO payments
+    (id, payment_number, payer_person_id, amount, currency, method,
+     received_at, note, status, idempotency_key, idempotency_fingerprint,
+     reversed_at, reversed_by, reversal_reason,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('dddddddd-0000-4000-8000-000000000001', 9001,
+     '22222222-0000-4000-8000-000000000004', 150.00, 'TRY', 'cash',
+     '2026-01-20T10:00:00Z', 'drill: aile tahsilatı', 'posted',
+     'drill-idem-0001', 'drill-fp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-20T10:00:00Z', '2026-01-20T10:00:00Z'),
+    -- Payment 9002: fully REVERSED receipt — history survives restore.
+    ('dddddddd-0000-4000-8000-000000000002', 9002,
+     '22222222-0000-4000-8000-000000000002', 30.00, 'TRY',
+     'bank_transfer',
+     '2026-01-22T09:00:00Z', 'drill: ters kayıt', 'reversed',
+     'drill-idem-0002', 'drill-fp-0002',
+     '2026-01-22T12:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı kayıt',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-22T09:00:00Z', '2026-01-22T12:00:00Z');
+
+INSERT INTO payment_allocations
+    (id, payment_id, assessment_id, amount, status,
+     reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    -- Payment 9001 split across two DIFFERENT debtors' obligations.
+    ('eeeeeeee-0000-4000-8000-000000000001',
+     'dddddddd-0000-4000-8000-000000000001',
+     'acacacac-0000-4000-8000-000000000001', 100.00, 'active',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z'),
+    ('eeeeeeee-0000-4000-8000-000000000002',
+     'dddddddd-0000-4000-8000-000000000001',
+     'acacacac-0000-4000-8000-000000000002', 50.00, 'active',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z'),
+    -- Payment 9002's allocation is reversed (history preserved).
+    ('eeeeeeee-0000-4000-8000-000000000003',
+     'dddddddd-0000-4000-8000-000000000002',
+     'acacacac-0000-4000-8000-000000000001', 30.00, 'reversed',
+     '2026-01-22T12:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı kayıt',
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z');
 
 COMMIT;

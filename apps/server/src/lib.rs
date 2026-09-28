@@ -15,5 +15,6 @@ pub mod db;
 pub mod http;
 pub mod observability;
 pub mod parties;
+pub mod payments;
 pub mod periods;
 pub mod shares;

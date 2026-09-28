@@ -172,8 +172,8 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 14],
-			['persons', 3],
+			['permissions', 16],
+			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
 			['shareholder_family_memberships', 3],
@@ -183,7 +183,9 @@ async function main() {
 			['periods', 3],
 			['assessment_rules', 3],
 			['assessments', 4],
-			['assessment_share_sources', 4]
+			['assessment_share_sources', 4],
+			['payments', 2],
+			['payment_allocations', 3]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -220,6 +222,21 @@ async function main() {
 			[
 				"SELECT count(*) FROM assessment_share_sources src JOIN assessments a ON a.id=src.assessment_id JOIN shares sh ON sh.id=src.share_id JOIN share_ownerships o ON o.id=src.ownership_id WHERE a.id='acacacac-0000-4000-8000-000000000004'",
 				'2'
+			],
+			// Payment 9001 → payer is the THIRD-PARTY person, never a debtor FK.
+			[
+				"SELECT p.first_name||' '||p.last_name FROM payments pay JOIN persons p ON p.id=pay.payer_person_id WHERE pay.payment_number=9001",
+				'Ödeyen Üçüncü'
+			],
+			// Payment 9001 allocations reach TWO different debtors.
+			[
+				"SELECT count(DISTINCT a.shareholder_id) FROM payment_allocations al JOIN assessments a ON a.id=al.assessment_id WHERE al.payment_id='dddddddd-0000-4000-8000-000000000001'",
+				'2'
+			],
+			// Reversed payment keeps actor + reason (docs/19 bookkeeping).
+			[
+				"SELECT status||'|'||reversal_reason FROM payments WHERE payment_number=9002",
+				'reversed|drill: hatalı kayıt'
 			]
 		];
 		let allRel = true;
@@ -255,6 +272,18 @@ async function main() {
 			"SELECT sum(amount_component)::text FROM assessment_share_sources WHERE assessment_id='acacacac-0000-4000-8000-000000000004'",
 			'2469.12'
 		);
+		// Payment precision + derived paid total for assessment ...0001:
+		// 100.00 active + 30.00 reversed → only the ACTIVE row counts.
+		expect(
+			'Payment precision (150.00/30.00)',
+			"SELECT json_agg(amount::text ORDER BY amount)::jsonb = '[\"30.00\",\"150.00\"]'::jsonb FROM payments",
+			't'
+		);
+		expect(
+			'Active allocations for assessment ...0001',
+			"SELECT coalesce(sum(amount),0)::text FROM payment_allocations WHERE assessment_id='acacacac-0000-4000-8000-000000000001' AND status='active'",
+			'100.00'
+		);
 
 		// Constraints must still BEHAVE after restore — not just exist.
 		const constraintFails = [
@@ -274,7 +303,27 @@ async function main() {
 				 VALUES ('66666666-0000-4000-8000-000000000001','44444444-0000-4000-8000-000000000001','2025-07-01',NULL,'transfer','77777777-0000-4000-8000-000000000002','11111111-0000-4000-8000-0000000000aa')`
 			],
 			['family sequence unique', `INSERT INTO families (sequence_number) VALUES (900001)`],
-			['period dates check', `INSERT INTO periods (name, collection_start_date, due_date) VALUES ('x','2026-05-02','2026-05-01')`]
+			['period dates check', `INSERT INTO periods (name, collection_start_date, due_date) VALUES ('x','2026-05-02','2026-05-01')`],
+			[
+				'payment positive amount check',
+				`INSERT INTO payments (payer_person_id, amount, method, received_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('22222222-0000-4000-8000-000000000004',0,'cash',now(),'drill-x','drill-x','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'payment idempotency key unique',
+				`INSERT INTO payments (payer_person_id, amount, method, received_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('22222222-0000-4000-8000-000000000004',1,'cash',now(),'drill-idem-0001','drill-x','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'payment reversal consistency check',
+				`INSERT INTO payments (payer_person_id, amount, method, received_at, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('22222222-0000-4000-8000-000000000004',1,'cash',now(),'reversed','drill-y','drill-y','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'allocation (payment,assessment) unique',
+				`INSERT INTO payment_allocations (payment_id, assessment_id, amount, created_by)
+				 VALUES ('dddddddd-0000-4000-8000-000000000001','acacacac-0000-4000-8000-000000000001',1,'11111111-0000-4000-8000-0000000000aa')`
+			]
 		];
 		let allConstraints = true;
 		for (const [name, sql] of constraintFails) {

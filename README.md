@@ -420,6 +420,79 @@ allocation and money movement belong to a later reviewed STEP.
   login → fixtures → period create → preview → finalize → obligation
   detail → shareholder Tahakkuklar → close.
 
+## Payments, Allocations & Collection (STEP-007, docs/06 + docs/19)
+
+The first money-received domain. **A Payment is money the cooperative
+actually received; an Assessment is an obligation; a Payment Allocation
+is the application of received value to one or more obligations.** The
+three concepts are never merged — a receipt never mutates an
+assessment's stored amount, and balances are always derived.
+
+- **`payments`** — `payment_number` from a PostgreSQL identity column.
+  `payer_person_id` references a **Person**, never a Shareholder: a
+  shareholder pays through their person identity and a third party pays
+  identically — payer ≠ debtor is the default, not an exception.
+  Lifecycle `posted → reversed` (terminal); no draft/pending state
+  because no approval policy is approved yet (docs/16). Reversal keeps
+  the original row and stamps `reversed_at`/`reversed_by`/
+  `reversal_reason` — enforced by a DB CHECK, never a DELETE.
+- **`payment_allocations`** — many-to-many application rows between
+  payments and assessments, unique per `(payment_id, assessment_id)`.
+  Reversal is status-based (`active → reversed`); a reversed allocation
+  stays as history with its own reversal metadata.
+- **Atomic posting**: `POST /api/payments` creates the payment and its
+  requested allocations inside one transaction. Any invalid target,
+  over-allocation or bad amount rolls the whole command back — the
+  payment never persists half-allocated.
+- **Over-allocation safety**: the assessment row is locked
+  (`FOR UPDATE`) inside the posting transaction, so concurrent
+  allocations serialize and the second one is rejected — a paid-in-full
+  obligation can never exceed its amount even under races.
+- **Unallocated remainder is explicit**: `unallocatedAmount` is derived
+  (`amount − Σ active allocations`); a payment may be fully unallocated
+  and the remainder can be distributed later via
+  `POST /api/payments/{id}/allocations`. It stays ON the payment — never
+  silently attributed to a family member or written off.
+- **Idempotent creation** (ADR-006): a durable `idempotency_key` +
+  payload fingerprint means a retry replays the existing receipt;
+  a reused key with a different payload answers `409 conflict`.
+- **Idempotent reversal**: `POST /api/payments/{id}/reverse` marks the
+  payment and all its active allocations reversed with reason + actor;
+  a replay answers the existing state, never a second effect. Single
+  lines are corrected through
+  `POST /api/payments/{id}/allocations/{id}/reverse` — other lines stay.
+- **Derived surfaces**: `GET /api/assessments/{id}` returns
+  `allocatedAmount`/`remainingAmount`/`settledAt` computed from active
+  allocations; `GET /api/shareholders/{id}/financial-summary`,
+  `GET /api/shareholders/{id}/open-assessments`,
+  `GET /api/families/{id}/collection-context` (member-wise totals for
+  bulk collection — the family is context, **never the debtor**),
+  `GET /api/payments` (list/search), `GET /api/payments/{id}` (with
+  allocation lines + payer identity),
+  `GET /api/payments/payer-persons?search=` (payer picker),
+  `GET /api/assessments/{id}/payments` (application history).
+- **Exact money**: `NUMERIC(19,2)` TRY end to end; the API carries
+  decimal strings, the frontend parses `tr-TR` operator input at the
+  string level — no float ever touches a financial value.
+- **Permissions**: `payments.read`, `payments.manage` — granted
+  explicitly to the seeded `Sistem Yöneticisi` role by migration 0007.
+- **Audit**: `payment_posted`, `payment_allocations_added`,
+  `payment_reversed`, `payment_allocation_reversed` land in
+  `security_events` with payment/allocation identifiers.
+- **Frontend**: `/tahsilatlar` (list), `/tahsilatlar/yeni` (three-step
+  collection: payer search-or-create → debt selection by shareholder
+  or family members → exact preview of allocated/unallocated before
+  confirm), `/tahsilatlar/{id}` (receipt detail, allocation lines,
+  reversal with reason), payment history on `/tahakkuklar/{id}`,
+  financial summary on `/hissedarlar/{id}`, collection context on
+  `/aileler/{id}`. Turkish-first i18n; `can()` is UX-only.
+- **E2E**: `node scripts/e2e-step007.mjs` drives the real stack through
+  family bulk collection (one payer, two debtors) → assessment history
+  → shareholder summary → full reversal with derived-balance proof.
+- **Boundary**: no Cashbox, Bank Account, Ledger, Receipt or Collection
+  Session objects exist — where received money physically enters and
+  how it is documented are deferred domains (docs/06 §88–§92).
+
 ## Backup & Disaster Recovery (BACKUP-READINESS-001, ADR-013)
 
 PostgreSQL logical-backup toolkit plus a proven restore path. Operator
@@ -508,6 +581,6 @@ is missing — no insecure silent defaults.
   (`docker compose -f docker/compose.yaml down` keeps it; add `-v` to
   discard).
 - The `migrate` subcommand is the only supported way to apply migrations.
-- Obligation schema now exists (STEP-006); money-movement schema
-  intentionally does not — Payments/Allocations/Ledger belong to a
-  later reviewed STEP (ADR-003/ADR-004).
+- Obligation + money-received schema now exists (STEP-006/007);
+  financial-account schema intentionally does not — Cashbox/Bank/
+  Ledger/Receipt belong to a later reviewed STEP (ADR-003/ADR-004).

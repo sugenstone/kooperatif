@@ -19,18 +19,31 @@
 	import { resolve } from '$app/paths';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
+	import { can } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { familyPath, type FamilyDetail } from '@kooperatif/contracts';
+	import { formatTry } from '$lib/money';
+	import {
+		familyCollectionContextPath,
+		familyPath,
+		type FamilyCollectionContext,
+		type FamilyDetail
+	} from '@kooperatif/contracts';
 
 	let { data } = $props<{ data: { id: string } }>();
 
 	let detail = $state<FamilyDetail | null>(null);
+	let collection = $state<FamilyCollectionContext | null>(null);
 	let loadError = $state<MessageKey | null>(null);
 
 	async function refresh(): Promise<void> {
 		loadError = null;
 		try {
 			detail = await apiFetch<FamilyDetail>(familyPath(data.id));
+			if (can('payments.read')) {
+				collection = await apiFetch<FamilyCollectionContext>(
+					familyCollectionContextPath(data.id)
+				).catch(() => null);
+			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
 		}
@@ -114,5 +127,50 @@
 				{/if}
 			</CardContent>
 		</Card>
+
+		{#if can('payments.read') && collection}
+			<Card class="w-full">
+				<CardHeader>
+					<CardTitle>{t('payments.summary.title')}</CardTitle>
+					<CardDescription>
+						{t('payments.family.totalRemaining')}: {formatTry(collection.totalRemaining)}
+					</CardDescription>
+				</CardHeader>
+				<CardContent class="flex flex-col gap-4">
+					<Table>
+						<TableHeader>
+							<TableRow>
+								<TableHead>{t('families.members')}</TableHead>
+								<TableHead>{t('payments.summary.openCount')}</TableHead>
+								<TableHead>{t('payments.new.remaining')}</TableHead>
+							</TableRow>
+						</TableHeader>
+						<TableBody>
+							{#each collection.members as member (member.member.shareholderId)}
+								<TableRow>
+									<TableCell>
+										<a
+											class="font-medium underline-offset-2 hover:underline"
+											href={resolve(`/hissedarlar/${member.member.shareholderId}`)}
+										>
+											{member.member.displayLabel}
+										</a>
+									</TableCell>
+									<TableCell>{member.openAssessmentCount}</TableCell>
+									<TableCell>{formatTry(member.remainingAmount)}</TableCell>
+								</TableRow>
+							{/each}
+						</TableBody>
+					</Table>
+					{#if can('payments.manage')}
+						<div>
+							<Button size="sm" href={resolve(`/tahsilatlar/yeni?family=${detail.id}`)}>
+								{t('payments.family.collect')}
+							</Button>
+						</div>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
 	{/if}
 </section>

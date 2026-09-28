@@ -128,6 +128,40 @@ export {
 	shareholderAssessmentsPath
 } from './periods';
 export type {
+	AddAllocationsRequest,
+	AllocationRequest,
+	AllocationStatus,
+	AssessmentPayment,
+	CreatePaymentRequest,
+	CreatePaymentResponse,
+	FamilyCollectionContext,
+	FamilyMemberContext,
+	OpenAssessment,
+	Payer,
+	PayerCandidate,
+	PaymentAllocation,
+	PaymentDetail,
+	PaymentListItem,
+	PaymentMethod,
+	PaymentStatus,
+	PeriodFinancialSummary,
+	ReverseRequest,
+	ShareholderFinancialSummary
+} from './payments';
+export {
+	PAYMENTS_PATH,
+	PAYMENT_PAYER_PERSONS_PATH,
+	assessmentPaymentsPath,
+	familyCollectionContextPath,
+	paymentAllocationsPath,
+	paymentAllocationReversePath,
+	paymentPath,
+	paymentReversePath,
+	periodFinancialSummaryPath,
+	shareholderFinancialSummaryPath,
+	shareholderOpenAssessmentsPath
+} from './payments';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

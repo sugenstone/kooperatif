@@ -86,7 +86,9 @@ export const PERMISSION_KEYS = {
 	periodsRead: 'periods.read',
 	periodsManage: 'periods.manage',
 	assessmentsRead: 'assessments.read',
-	assessmentsManage: 'assessments.manage'
+	assessmentsManage: 'assessments.manage',
+	paymentsRead: 'payments.read',
+	paymentsManage: 'payments.manage'
 } as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[keyof typeof PERMISSION_KEYS];

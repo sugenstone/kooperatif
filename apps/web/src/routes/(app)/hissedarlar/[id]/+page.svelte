@@ -37,8 +37,12 @@
 		type Paginated,
 		type PersonLookupItem,
 		type ShareListItem,
+		shareholderFinancialSummaryPath,
+		shareholderOpenAssessmentsPath,
+		type OpenAssessment,
 		type ShareholderAssessment,
 		type ShareholderDetail,
+		type ShareholderFinancialSummary,
 		type UpdateShareholderRequest
 	} from '@kooperatif/contracts';
 
@@ -49,6 +53,8 @@
 	let detail = $state<ShareholderDetail | null>(null);
 	let shares = $state<ShareListItem[]>([]);
 	let assessments = $state<ShareholderAssessment[]>([]);
+	let financialSummary = $state<ShareholderFinancialSummary | null>(null);
+	let openAssessments = $state<OpenAssessment[]>([]);
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
@@ -87,6 +93,12 @@
 			}
 			if (can('assessments.read')) {
 				assessments = await apiFetch<ShareholderAssessment[]>(shareholderAssessmentsPath(data.id));
+			}
+			if (can('payments.read')) {
+				financialSummary = await apiFetch<ShareholderFinancialSummary>(
+					shareholderFinancialSummaryPath(data.id)
+				);
+				openAssessments = await apiFetch<OpenAssessment[]>(shareholderOpenAssessmentsPath(data.id));
 			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
@@ -529,6 +541,58 @@
 										</TableCell>
 										<TableCell>{item.shareCount || '—'}</TableCell>
 										<TableCell>{formatTry(item.amount)}</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if can('payments.read') && financialSummary}
+			<Card class="w-full max-w-2xl">
+				<CardHeader>
+					<CardTitle>{t('payments.summary.title')}</CardTitle>
+					<CardDescription>
+						{t('payments.summary.openCount')}: {financialSummary.openAssessmentCount} /
+						{financialSummary.assessmentCount}
+					</CardDescription>
+				</CardHeader>
+				<CardContent>
+					<dl class="grid grid-cols-[minmax(180px,auto)_1fr] gap-x-6 gap-y-2 text-sm">
+						<dt class="font-medium">{t('payments.summary.totalAssessed')}</dt>
+						<dd>{formatTry(financialSummary.totalAssessed)}</dd>
+						<dt class="font-medium">{t('payments.summary.totalPaid')}</dt>
+						<dd>{formatTry(financialSummary.totalPaid)}</dd>
+						<dt class="font-medium">{t('payments.summary.totalRemaining')}</dt>
+						<dd>{formatTry(financialSummary.totalRemaining)}</dd>
+					</dl>
+					{#if openAssessments.length > 0}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('assessments.period')}</TableHead>
+									<TableHead>{t('assessments.amount')}</TableHead>
+									<TableHead>{t('payments.new.paidSoFar')}</TableHead>
+									<TableHead>{t('payments.new.remaining')}</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each openAssessments as item (item.id)}
+									<TableRow>
+										<TableCell>
+											<a
+												class="underline-offset-2 hover:underline"
+												href={resolve(`/tahakkuklar/${item.id}`)}
+											>
+												#{item.periodNumber}
+												{item.periodName}
+											</a>
+										</TableCell>
+										<TableCell>{formatTry(item.amount)}</TableCell>
+										<TableCell>{formatTry(item.paidAmount)}</TableCell>
+										<TableCell>{formatTry(item.remainingAmount)}</TableCell>
 									</TableRow>
 								{/each}
 							</TableBody>

@@ -19,13 +19,20 @@
 	} from '$lib/components/ui/table';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
+	import { can } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { formatTry } from '$lib/money';
-	import { assessmentPath, type AssessmentDetail } from '@kooperatif/contracts';
+	import {
+		assessmentPath,
+		assessmentPaymentsPath,
+		type AssessmentDetail,
+		type AssessmentPayment
+	} from '@kooperatif/contracts';
 
 	let { data } = $props<{ data: { id: string } }>();
 
 	let detail = $state<AssessmentDetail | null>(null);
+	let payments = $state<AssessmentPayment[] | null>(null);
 	let loadError = $state<MessageKey | null>(null);
 
 	const timestampFormatter = new Intl.DateTimeFormat(activeIntlLocale(), {
@@ -53,6 +60,9 @@
 		loadError = null;
 		try {
 			detail = await apiFetch<AssessmentDetail>(assessmentPath(data.id));
+			if (can('payments.read')) {
+				payments = await apiFetch<AssessmentPayment[]>(assessmentPaymentsPath(data.id));
+			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
 		}
@@ -167,6 +177,60 @@
 				{/if}
 			</CardContent>
 		</Card>
+
+		{#if can('payments.read')}
+			<Card class="w-full max-w-3xl">
+				<CardHeader>
+					<CardTitle>{t('payments.history')}</CardTitle>
+				</CardHeader>
+				<CardContent>
+					{#if payments === null}
+						<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+					{:else if payments.length === 0}
+						<p class="text-sm text-muted-foreground">{t('payments.historyEmpty')}</p>
+					{:else}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('payments.historyPayment')}</TableHead>
+									<TableHead>{t('payments.historyPayer')}</TableHead>
+									<TableHead>{t('payments.historyAmount')}</TableHead>
+									<TableHead>{t('payments.historyStatus')}</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each payments as item (item.allocationId)}
+									<TableRow>
+										<TableCell>
+											<a
+												class="font-medium underline-offset-2 hover:underline"
+												href={resolve(`/tahsilatlar/${item.paymentId}`)}
+											>
+												{item.paymentNumber}
+											</a>
+											<p class="text-xs text-muted-foreground">
+												{formatTimestamp(item.receivedAt)}
+											</p>
+										</TableCell>
+										<TableCell>{item.payerFullName}</TableCell>
+										<TableCell>{formatTry(item.amount)}</TableCell>
+										<TableCell>
+											{#if item.allocationStatus === 'active' && item.paymentStatus === 'posted'}
+												<Badge>{t('payments.allocationActive')}</Badge>
+											{:else}
+												<Badge variant="outline">
+													{t('payments.allocationReversed')}
+												</Badge>
+											{/if}
+										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
 	{:else}
 		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
 	{/if}

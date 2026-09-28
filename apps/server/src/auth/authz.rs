@@ -44,6 +44,9 @@ pub mod catalog {
     pub const PERIODS_MANAGE: &str = "periods.manage";
     pub const ASSESSMENTS_READ: &str = "assessments.read";
     pub const ASSESSMENTS_MANAGE: &str = "assessments.manage";
+    // STEP-007 (payments domain).
+    pub const PAYMENTS_READ: &str = "payments.read";
+    pub const PAYMENTS_MANAGE: &str = "payments.manage";
 
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
@@ -63,6 +66,8 @@ pub mod catalog {
         PERIODS_MANAGE,
         ASSESSMENTS_READ,
         ASSESSMENTS_MANAGE,
+        PAYMENTS_READ,
+        PAYMENTS_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -198,8 +203,8 @@ mod tests {
     fn catalog_is_minimal_and_has_no_wildcards() {
         assert_eq!(
             catalog::ALL.len(),
-            14,
-            "STEP-003 + STEP-004 + STEP-005 + STEP-006 catalog"
+            16,
+            "STEP-003 + STEP-004 + STEP-005 + STEP-006 + STEP-007 catalog"
         );
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")

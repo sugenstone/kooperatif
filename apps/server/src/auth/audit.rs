@@ -42,6 +42,10 @@ pub enum SecurityEventType {
     PeriodDeleted,
     PeriodClosed,
     AssessmentsGenerated,
+    PaymentPosted,
+    PaymentAllocationsAdded,
+    PaymentReversed,
+    PaymentAllocationReversed,
 }
 
 impl SecurityEventType {
@@ -78,6 +82,10 @@ impl SecurityEventType {
             Self::PeriodDeleted => "period_deleted",
             Self::PeriodClosed => "period_closed",
             Self::AssessmentsGenerated => "assessments_generated",
+            Self::PaymentPosted => "payment_posted",
+            Self::PaymentAllocationsAdded => "payment_allocations_added",
+            Self::PaymentReversed => "payment_reversed",
+            Self::PaymentAllocationReversed => "payment_allocation_reversed",
         }
     }
 }

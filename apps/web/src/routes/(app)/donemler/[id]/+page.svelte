@@ -31,12 +31,14 @@
 		periodAssessmentsPath,
 		periodClosePath,
 		periodGenerateAssessmentsPath,
+		periodFinancialSummaryPath,
 		periodPath,
 		type AssessmentListItem,
 		type AssessmentPreview,
 		type AssessmentRuleType,
 		type Paginated,
 		type PeriodDetail,
+		type PeriodFinancialSummary,
 		type PeriodStatus
 	} from '@kooperatif/contracts';
 
@@ -64,6 +66,7 @@
 	let assessmentPage = $state(1);
 	let assessmentSearch = $state('');
 	let appliedAssessmentSearch = $state('');
+	let financialSummary = $state<PeriodFinancialSummary | null>(null);
 
 	const timestampFormatter = new Intl.DateTimeFormat(activeIntlLocale(), {
 		dateStyle: 'medium',
@@ -86,6 +89,11 @@
 		try {
 			detail = await apiFetch<PeriodDetail>(periodPath(data.id));
 			await refreshAssessments();
+			if (can('payments.read') && detail.status !== 'draft') {
+				financialSummary = await apiFetch<PeriodFinancialSummary>(
+					periodFinancialSummaryPath(data.id)
+				);
+			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
 		}
@@ -455,6 +463,27 @@
 							{t('common.cancel')}
 						</Button>
 					</div>
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if can('payments.read') && detail.status !== 'draft' && financialSummary}
+			<Card class="w-full">
+				<CardHeader>
+					<CardTitle>{t('payments.summary.title')}</CardTitle>
+					<CardDescription>
+						{t('payments.summary.contributingPayments')}: {financialSummary.contributingPaymentCount}
+					</CardDescription>
+				</CardHeader>
+				<CardContent>
+					<dl class="grid grid-cols-[minmax(200px,auto)_1fr] gap-x-6 gap-y-2 text-sm">
+						<dt class="font-medium">{t('payments.summary.totalAssessed')}</dt>
+						<dd>{formatTry(financialSummary.totalAssessed)}</dd>
+						<dt class="font-medium">{t('payments.summary.collected')}</dt>
+						<dd>{formatTry(financialSummary.totalCollected)}</dd>
+						<dt class="font-medium">{t('payments.summary.totalRemaining')}</dt>
+						<dd>{formatTry(financialSummary.totalRemaining)}</dd>
+					</dl>
 				</CardContent>
 			</Card>
 		{/if}

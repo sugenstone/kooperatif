@@ -32,6 +32,9 @@
 		{#if can('periods.read')}
 			<Button variant="ghost" size="sm" href="/donemler">{t('nav.periods')}</Button>
 		{/if}
+		{#if can('payments.read')}
+			<Button variant="ghost" size="sm" href="/tahsilatlar">{t('nav.payments')}</Button>
+		{/if}
 		{#if can('roles.read')}
 			<Button variant="ghost" size="sm" href="/roller">{t('nav.roles')}</Button>
 		{/if}
