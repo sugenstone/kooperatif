@@ -5,12 +5,12 @@ tracked shares, period obligations, collections, financial accounts,
 investments, assets, governance, versioned policies, reporting, and a
 financially isolated Social Aid subsystem.
 
-**This repository is at the STEP-005 stage: repository/architecture
+**This repository is at the STEP-006 stage: repository/architecture
 baseline, identity/authentication/sessions (ADR-002), the RBAC
 authorization foundation, the Shareholder/Guardian/Family identity
-model, and the Share ownership/acquisition foundation.** No Periods,
-Assessments, Payments, Ledger, Investments, Governance or Social Aid
-exist yet. See
+model, the Share ownership/acquisition foundation, and the
+Period/Assessment/Obligation foundation.** No Payments, Collection
+Sessions, Ledger, Investments, Governance or Social Aid exist yet. See
 [docs/29-IMPLEMENTATION-ROADMAP.md](docs/29-IMPLEMENTATION-ROADMAP.md) —
 implementation proceeds one reviewed STEP at a time.
 
@@ -351,6 +351,70 @@ business asset — never a `share_count` column or a balance.**
   share creation → sale with an agreed amount → owner change →
   shareholder "Hisseler" verification.
 
+## Periods, Assessments & Obligations (STEP-006, docs/05 + docs/16)
+
+The first obligation domain: a Period defines a collection window and a
+durable assessment rule; finalization atomically generates one frozen
+obligation row per eligible shareholder. **An Assessment is an
+obligation record — not a payment, not a ledger entry.** Collection,
+allocation and money movement belong to a later reviewed STEP.
+
+- **`periods`** — `period_number` from a PostgreSQL identity column
+  (concurrency-safe). Lifecycle `draft → open → closed` (docs/16); the
+  `draft → open` transition happens only through assessment generation.
+  `due_date >= collection_start_date` is DB-enforced.
+- **`assessment_rules`** — exactly one rule per period (unique
+  `period_id`): `per_shareholder` (one obligation per eligible
+  shareholder) or `per_share` (one amount component per share owned at
+  the explicit `assessment_effective_date`), plus the exact
+  `NUMERIC(19,2)` TRY base amount.
+- **`assessments`** — durable obligation rows, unique per
+  `(period_id, shareholder_id)`. Each row snapshots the rule type, base
+  amount, currency, effective date and generation actor/time, so later
+  rule edits, ownership changes, sales or identity changes never rewrite
+  history. Status is `active` (or reserved `voided` for a future
+  correction workflow — no void action exists yet).
+- **`assessment_share_sources`** — per-Share provenance: which
+  share + ownership interval contributed which amount component
+  (`per_share` only), so "tahakkukun kaynağı hangi hisseler?" is always
+  answerable.
+- **Eligibility** is resolved at the explicit effective date: inactive
+  or voided shareholders are excluded; `per_share` uses temporal
+  ownership intervals so a share transferred after the effective point
+  still assesses its owner-at-that-date, and suspended/voided shares are
+  excluded.
+- **Preview before commitment**: `POST .../assessment-preview` returns
+  the rule, counts, per-shareholder expected amounts and totals —
+  persists nothing. `POST .../generate-assessments` finalizes
+  atomically in one transaction with a row lock: exactly one winner
+  under concurrency, and a second attempt answers `409`.
+- **Draft-only mutation**: a draft's name/dates/rule may be PATCHed or
+  the whole record DELETEd (rule cascades — it is a config row, never
+  business history). After generation the period and rule are frozen:
+  `409 conflict`.
+- **APIs** (server-side authorized, both CSRF layers, `no-store`):
+  `GET/POST /api/periods`, `GET/PATCH/DELETE /api/periods/{id}`,
+  `POST /api/periods/{id}/assessment-preview`,
+  `POST /api/periods/{id}/generate-assessments`,
+  `POST /api/periods/{id}/close`,
+  `GET /api/periods/{id}/assessments`, `GET /api/assessments/{id}` (with
+  sources), `GET /api/shareholders/{id}/assessments`. Draft edits carry
+  an `expectedUpdatedAt` optimistic-concurrency precondition.
+- **Permissions**: `periods.read`, `periods.manage`,
+  `assessments.read`, `assessments.manage` — granted explicitly to the
+  seeded `Sistem Yöneticisi` role by migration 0006.
+- **Audit**: period created/updated/deleted/closed and
+  `assessments_generated` (period, counts, exact total) land in
+  `security_events`.
+- **Frontend**: `/donemler` (list/search/pagination), `/donemler/yeni`,
+  `/donemler/{id}` (detail, rule card, Önizleme table, finalize/close
+  commands, generated Tahakkuk list), `/tahakkuklar/{id}` (obligation +
+  Kaynak Hisseler provenance) and a "Tahakkuklar" section on the
+  shareholder page. Turkish-first i18n; `can()` is UX-only.
+- **E2E**: `node scripts/e2e-step006.mjs` drives the real stack through
+  login → fixtures → period create → preview → finalize → obligation
+  detail → shareholder Tahakkuklar → close.
+
 ### Running auth tests
 
 `pnpm db:verify` (or `scripts/db-verify.sh`) recreates a clean
@@ -399,5 +463,6 @@ is missing — no insecure silent defaults.
   (`docker compose -f docker/compose.yaml down` keeps it; add `-v` to
   discard).
 - The `migrate` subcommand is the only supported way to apply migrations.
-- Financial schema intentionally does not exist yet (ADR-003/ADR-004
-  implementation belongs to a later reviewed STEP).
+- Obligation schema now exists (STEP-006); money-movement schema
+  intentionally does not — Payments/Allocations/Ledger belong to a
+  later reviewed STEP (ADR-003/ADR-004).

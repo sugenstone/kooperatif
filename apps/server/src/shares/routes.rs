@@ -169,7 +169,10 @@ macro_rules! shares_mutation {
     }};
 }
 
-fn identity_dto(
+/// Compose the canonical Shareholder identity DTO from joined columns.
+/// Shared with the periods/assessments domain (STEP-006) so every
+/// obligation surface renders the same `Vasi:`/`Aile No` context.
+pub fn identity_dto(
     shareholder_id: Option<Uuid>,
     first: &Option<String>,
     last: &Option<String>,

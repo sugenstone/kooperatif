@@ -37,6 +37,11 @@ pub enum SecurityEventType {
     ShareTransferred,
     ShareSold,
     ShareStatusChanged,
+    PeriodCreated,
+    PeriodUpdated,
+    PeriodDeleted,
+    PeriodClosed,
+    AssessmentsGenerated,
 }
 
 impl SecurityEventType {
@@ -68,6 +73,11 @@ impl SecurityEventType {
             Self::ShareTransferred => "share_transferred",
             Self::ShareSold => "share_sold",
             Self::ShareStatusChanged => "share_status_changed",
+            Self::PeriodCreated => "period_created",
+            Self::PeriodUpdated => "period_updated",
+            Self::PeriodDeleted => "period_deleted",
+            Self::PeriodClosed => "period_closed",
+            Self::AssessmentsGenerated => "assessments_generated",
         }
     }
 }

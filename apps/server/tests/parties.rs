@@ -929,7 +929,8 @@ async fn parties_authorization_and_permission_upgrade() {
         eprintln!("SKIPPED");
         return;
     };
-    // 67: seeded admin role received STEP-004/STEP-005 permissions via migration.
+    // 67: seeded admin role received STEP-004/STEP-005/STEP-006
+    // permissions via migrations.
     let perms: Vec<String> = sqlx::query_scalar(
         "SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id = rp.permission_id \
          JOIN roles r ON r.id = rp.role_id WHERE r.name = 'Sistem Yöneticisi' ORDER BY p.key",
@@ -942,7 +943,11 @@ async fn parties_authorization_and_permission_upgrade() {
         "{perms:?}"
     );
     assert!(perms.contains(&"families.read".to_string()), "{perms:?}");
-    assert_eq!(perms.len(), 10);
+    assert!(
+        perms.contains(&"assessments.manage".to_string()),
+        "{perms:?}"
+    );
+    assert_eq!(perms.len(), 14);
 
     // Plain user: authenticated, no STEP-004 permissions.
     let argon2 = argon2::Argon2::new(

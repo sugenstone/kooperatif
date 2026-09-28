@@ -24,17 +24,20 @@
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
+	import { formatTry } from '$lib/money';
 	import {
 		FAMILIES_PATH,
 		PERSONS_PATH,
 		shareholderFamilyChangePath,
 		shareholderPath,
 		shareholderStatusChangePath,
+		shareholderAssessmentsPath,
 		shareholderSharesPath,
 		type FamilyListItem,
 		type Paginated,
 		type PersonLookupItem,
 		type ShareListItem,
+		type ShareholderAssessment,
 		type ShareholderDetail,
 		type UpdateShareholderRequest
 	} from '@kooperatif/contracts';
@@ -45,6 +48,7 @@
 
 	let detail = $state<ShareholderDetail | null>(null);
 	let shares = $state<ShareListItem[]>([]);
+	let assessments = $state<ShareholderAssessment[]>([]);
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
@@ -80,6 +84,9 @@
 			detail = await apiFetch<ShareholderDetail>(shareholderPath(data.id));
 			if (can('shares.read')) {
 				shares = await apiFetch<ShareListItem[]>(shareholderSharesPath(data.id));
+			}
+			if (can('assessments.read')) {
+				assessments = await apiFetch<ShareholderAssessment[]>(shareholderAssessmentsPath(data.id));
 			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
@@ -463,6 +470,65 @@
 												<Badge variant="outline">{t('shares.statusVoided')}</Badge>
 											{/if}
 										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if can('assessments.read')}
+			<Card class="w-full max-w-2xl">
+				<CardHeader>
+					<CardTitle>{t('assessments.shareholderSection')}</CardTitle>
+					<CardDescription>{assessments.length}</CardDescription>
+				</CardHeader>
+				<CardContent>
+					{#if assessments.length === 0}
+						<p class="text-sm text-muted-foreground">{t('assessments.shareholderEmpty')}</p>
+					{:else}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('assessments.period')}</TableHead>
+									<TableHead>{t('periods.dueDate')}</TableHead>
+									<TableHead>{t('assessments.rule')}</TableHead>
+									<TableHead>{t('assessments.shareCount')}</TableHead>
+									<TableHead>{t('assessments.amount')}</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each assessments as item (item.id)}
+									<TableRow>
+										<TableCell>
+											<a
+												class="font-medium underline-offset-2 hover:underline"
+												href={resolve(`/donemler/${item.periodId}`)}
+											>
+												#{item.periodNumber}
+												{item.periodName}
+											</a>
+										</TableCell>
+										<TableCell>
+											{new Intl.DateTimeFormat(activeIntlLocale(), {
+												dateStyle: 'medium'
+											}).format(
+												new Date(
+													Number(item.dueDate.split('-')[0]),
+													Number(item.dueDate.split('-')[1]) - 1,
+													Number(item.dueDate.split('-')[2])
+												)
+											)}
+										</TableCell>
+										<TableCell>
+											{item.ruleType === 'per_share'
+												? t('periods.rulePerShare')
+												: t('periods.rulePerShareholder')}
+										</TableCell>
+										<TableCell>{item.shareCount || '—'}</TableCell>
+										<TableCell>{formatTry(item.amount)}</TableCell>
 									</TableRow>
 								{/each}
 							</TableBody>

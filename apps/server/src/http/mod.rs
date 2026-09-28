@@ -17,6 +17,7 @@ use crate::auth::routes::auth_router;
 use crate::auth::AuthRuntime;
 use crate::http::error::fallback;
 use crate::parties::routes::parties_router;
+use crate::periods::routes::periods_router;
 use crate::shares::routes::shares_router;
 
 /// Shared application state (grows with later domain modules).
@@ -84,6 +85,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(rbac_router())
         .merge(parties_router())
         .merge(shares_router())
+        .merge(periods_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

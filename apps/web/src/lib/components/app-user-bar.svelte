@@ -29,6 +29,9 @@
 		{#if can('shares.read')}
 			<Button variant="ghost" size="sm" href="/hisseler">{t('nav.shares')}</Button>
 		{/if}
+		{#if can('periods.read')}
+			<Button variant="ghost" size="sm" href="/donemler">{t('nav.periods')}</Button>
+		{/if}
 		{#if can('roles.read')}
 			<Button variant="ghost" size="sm" href="/roller">{t('nav.roles')}</Button>
 		{/if}
