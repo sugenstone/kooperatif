@@ -5,12 +5,14 @@ tracked shares, period obligations, collections, financial accounts,
 investments, assets, governance, versioned policies, reporting, and a
 financially isolated Social Aid subsystem.
 
-**This repository is at the STEP-006 stage: repository/architecture
-baseline, identity/authentication/sessions (ADR-002), the RBAC
-authorization foundation, the Shareholder/Guardian/Family identity
-model, the Share ownership/acquisition foundation, and the
-Period/Assessment/Obligation foundation.** No Payments, Collection
-Sessions, Ledger, Investments, Governance or Social Aid exist yet. See
+**This repository is at the BACKUP-READINESS-001 stage:
+repository/architecture baseline, identity/authentication/sessions
+(ADR-002), the RBAC authorization foundation, the
+Shareholder/Guardian/Family identity model, the Share
+ownership/acquisition foundation, the Period/Assessment/Obligation
+foundation, and the PostgreSQL backup/restore/disaster-recovery
+foundation (ADR-013).** No Payments, Collection Sessions, Ledger,
+Investments, Governance or Social Aid exist yet. See
 [docs/29-IMPLEMENTATION-ROADMAP.md](docs/29-IMPLEMENTATION-ROADMAP.md) —
 implementation proceeds one reviewed STEP at a time.
 
@@ -39,8 +41,11 @@ verification ("untested backup is not a verified backup"), and a
 production data (Payments, Allocations, Ledger) cannot be declared
 production-ready without verified backup/restore evidence. Ordinary
 business mistakes use reversal/correction, never disaster-recovery
-rollback. Concrete backup tooling is a future implementation STEP; no
-backup infrastructure is configured in this repository yet.
+rollback. The local technical foundation is implemented under
+`scripts/backup/` (see the dedicated section below and the operator
+runbook in [docs/30-BACKUP-OPERATIONS-RUNBOOK.md](docs/30-BACKUP-OPERATIONS-RUNBOOK.md));
+production WAL/PITR, encrypted off-site copies and scheduling remain
+environment provisioning duties.
 
 Default product language/locale: **Turkish (`tr-TR`)**. Localization is
 presentation-only and built in from the start.
@@ -415,6 +420,43 @@ allocation and money movement belong to a later reviewed STEP.
   login → fixtures → period create → preview → finalize → obligation
   detail → shareholder Tahakkuklar → close.
 
+## Backup & Disaster Recovery (BACKUP-READINESS-001, ADR-013)
+
+PostgreSQL logical-backup toolkit plus a proven restore path. Operator
+procedure: [docs/30-BACKUP-OPERATIONS-RUNBOOK.md](docs/30-BACKUP-OPERATIONS-RUNBOOK.md).
+
+- **Artifacts**: `kooperatif_YYYYMMDDTHHMMSSZ_<rand8>.dump`
+  (`pg_dump --format=custom --no-owner --no-privileges`) + a sidecar
+  `.manifest.json` (schema version, SHA-256, pg/git versions, migration
+  ledger, extension list). Publication is atomic — a failed run never
+  leaves a file that looks like a completed backup.
+- **Tooling**: pg binaries run inside the pinned `postgres:17-alpine`
+  image (`KOOPERATIF_BACKUP_TOOLING=docker`, default) so the client
+  major always matches the server; `host` mode uses PATH binaries.
+  Credentials travel only via `PGPASSWORD` environment — never argv,
+  logs or manifests.
+- **Commands**: `pnpm backup:create` · `pnpm backup:verify -- <name>`
+  (checksum + manifest + archive TOC) · `pnpm backup:restore --
+  --artifact <n> --target-db <db> --confirm <db>` (Level-1 gate first;
+  refuses the source DB, unsafe names, mismatched confirm, non-empty
+  targets without explicit flags; single-transaction restore) ·
+  `pnpm backup:retention` (ADR-013 daily 30d / monthly 12mo / yearly
+  anchor; dry-run by default, `--apply` to delete; the newest artifact
+  is never a deletion candidate) · `pnpm backup:status`
+  (`HEALTHY`/`STALE`/`FAILED`/`NEVER_RUN`, non-zero exit for monitors) ·
+  `pnpm backup:drill` (full source→backup→fresh-restore→verify proof on
+  isolated databases) · `pnpm backup:failure-test` (corruption,
+  tampering, missing artifacts, unsafe targets) · `pnpm backup:test`
+  (pure-logic unit tests).
+- **Status**: `backups/status.json` records attempts/success/verify/
+  restore/drill/retention — it lives outside PostgreSQL so it survives
+  database loss. `backups/` is gitignored; never commit dumps.
+- **Boundary**: this is the *technical* recoverability layer.
+  Production policy requires environment provisioning beyond it: WAL
+  archiving + PITR (RPO ≤ 15 min), an encrypted off-site copy (3-2-1),
+  object-storage protection for uploaded files, scheduled execution and
+  alert wiring (ADR-013; runbook §2).
+
 ### Running auth tests
 
 `pnpm db:verify` (or `scripts/db-verify.sh`) recreates a clean
@@ -445,6 +487,9 @@ pnpm rust:fmt          # cargo fmt --check
 pnpm rust:clippy       # cargo clippy --all-targets -D warnings
 pnpm rust:test         # cargo test
 pnpm db:verify         # clean-database migration verification (Docker)
+pnpm backup:test       # backup unit tests (pure logic, no Docker)
+pnpm backup:drill      # full recovery drill on real PostgreSQL (Docker)
+pnpm backup:failure-test  # backup failure-injection tests (Docker)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the frontend, backend and database

@@ -107,3 +107,30 @@ jobs:
         run: cargo test --manifest-path apps/server/Cargo.toml -- --nocapture
         env:
           KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci
+
+  backup:
+    name: Backup/restore (unit tests + recovery drill, ADR-013)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+
+      - name: Backup unit tests (pure logic)
+        run: node --test "scripts/backup/tests/*.test.mjs"
+
+      - name: Recovery drill on real PostgreSQL
+        run: node scripts/backup/drill.mjs
+
+      - name: Failure-injection tests
+        run: node scripts/backup/failure-test.mjs

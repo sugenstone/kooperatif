@@ -1,0 +1,187 @@
+-- BACKUP-READINESS-001 recovery-drill fixtures.
+--
+-- Deterministic synthetic data covering every domain the recovery proof
+-- must demonstrate (docs/23, ADR-013 restore verification). All UUIDs are
+-- fixed; names are obviously synthetic. No real personal data.
+--
+-- Coverage:
+--   user + role assignment + session + security_events
+--   persons (shareholder, guardian, second shareholder)
+--   families + TEMPORAL membership history (closed + open interval)
+--   shares + ownership history (transfer!) + share events
+--   periods + rules + assessments (per_shareholder AND per_share with
+--   provenance) + exact decimal values incl. 0.01 / 10000.00 / 1234.56
+
+BEGIN;
+
+-- Operator user (fake Argon2 PHC string — never a real credential).
+INSERT INTO users (id, username, display_name, status, password_hash) VALUES
+    ('11111111-0000-4000-8000-0000000000aa', 'yedek.test.operator',
+     'Yedek Test Operatörü', 'active',
+     '$argon2id$v=19$m=8192,t=1,p=1$eWVkZWtzYWx0$c2lnbg');
+
+INSERT INTO user_role_assignments (user_id, role_id) VALUES
+    ('11111111-0000-4000-8000-0000000000aa', '00000000-0000-4000-8000-000000000001');
+
+INSERT INTO user_sessions
+    (user_id, token_hash, csrf_token, expires_at, idle_expires_at, client_label)
+VALUES
+    ('11111111-0000-4000-8000-0000000000aa',
+     decode('00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff', 'hex'),
+     'drill-csrf-token', now() + interval '1 hour', now() + interval '30 minutes',
+     'drill/terminal');
+
+INSERT INTO security_events (event_type, user_id, metadata) VALUES
+    ('login_succeeded', '11111111-0000-4000-8000-0000000000aa', '{"origin":"drill"}'),
+    ('share_created', '11111111-0000-4000-8000-0000000000aa',
+     '{"share_number":9001}');
+
+-- Persons: shareholder A, shareholder B, guardian person.
+INSERT INTO persons (id, first_name, last_name, search_name) VALUES
+    ('22222222-0000-4000-8000-000000000001', 'Yedek', 'Hissedarı', 'yedek hissedarı'),
+    ('22222222-0000-4000-8000-000000000002', 'Yedek', 'Devralan', 'yedek devralan'),
+    ('22222222-0000-4000-8000-000000000003', 'Vasi', 'Test', 'vasi test');
+
+INSERT INTO families (id, sequence_number) VALUES
+    ('33333333-0000-4000-8000-000000000001', 900001),
+    ('33333333-0000-4000-8000-000000000002', 900002);
+
+INSERT INTO shareholders (id, person_id, guardian_person_id, status) VALUES
+    ('44444444-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000003', 'active'),
+    ('44444444-0000-4000-8000-000000000002',
+     '22222222-0000-4000-8000-000000000002', NULL, 'active');
+
+-- Temporal family membership: A moved from family 900001 to 900002.
+INSERT INTO shareholder_family_memberships
+    (id, shareholder_id, family_id, started_at, ended_at, reason) VALUES
+    ('55555555-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000001',
+     '33333333-0000-4000-8000-000000000001',
+     '2025-01-01T00:00:00Z', '2025-06-30T00:00:00Z', 'drill: aile değişikliği'),
+    ('55555555-0000-4000-8000-000000000002',
+     '44444444-0000-4000-8000-000000000001',
+     '33333333-0000-4000-8000-000000000002',
+     '2025-07-01T00:00:00Z', NULL, NULL),
+    ('55555555-0000-4000-8000-000000000003',
+     '44444444-0000-4000-8000-000000000002',
+     '33333333-0000-4000-8000-000000000001',
+     '2025-01-01T00:00:00Z', NULL, NULL);
+
+-- Shares + events + temporal ownership (share 9001 transfers A→B).
+-- share_number/period_number are GENERATED ALWAYS AS IDENTITY —
+-- OVERRIDING SYSTEM VALUE keeps fixtures deterministic.
+INSERT INTO shares (id, share_number, status, created_by)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('66666666-0000-4000-8000-000000000001', 9001, 'active',
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('66666666-0000-4000-8000-000000000002', 9002, 'active',
+     '11111111-0000-4000-8000-0000000000aa');
+INSERT INTO share_events
+    (id, share_id, event_type, occurred_at, from_shareholder_id,
+     to_shareholder_id, acquisition_type, amount, actor_user_id) VALUES
+    ('77777777-0000-4000-8000-000000000001',
+     '66666666-0000-4000-8000-000000000001', 'initial_acquisition',
+     '2025-01-10T00:00:00Z', NULL, '44444444-0000-4000-8000-000000000001',
+     'founder', 100.00, '11111111-0000-4000-8000-0000000000aa'),
+    ('77777777-0000-4000-8000-000000000002',
+     '66666666-0000-4000-8000-000000000001', 'transfer',
+     '2025-08-01T00:00:00Z', '44444444-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000002', NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('77777777-0000-4000-8000-000000000003',
+     '66666666-0000-4000-8000-000000000002', 'initial_acquisition',
+     '2025-02-01T00:00:00Z', NULL, '44444444-0000-4000-8000-000000000002',
+     'founder', NULL, '11111111-0000-4000-8000-0000000000aa');
+
+INSERT INTO share_ownerships
+    (id, share_id, shareholder_id, started_at, ended_at,
+     acquisition_type, source_event_id, created_by) VALUES
+    ('88888888-0000-4000-8000-000000000001',
+     '66666666-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000001',
+     '2025-01-10T00:00:00Z', '2025-08-01T00:00:00Z', 'founder',
+     '77777777-0000-4000-8000-000000000001',
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('88888888-0000-4000-8000-000000000002',
+     '66666666-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000002',
+     '2025-08-01T00:00:00Z', NULL, 'transfer',
+     '77777777-0000-4000-8000-000000000002',
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('88888888-0000-4000-8000-000000000003',
+     '66666666-0000-4000-8000-000000000002',
+     '44444444-0000-4000-8000-000000000002',
+     '2025-02-01T00:00:00Z', NULL, 'founder',
+     '77777777-0000-4000-8000-000000000003',
+     '11111111-0000-4000-8000-0000000000aa');
+
+-- Periods: one per_shareholder, two per_share.
+INSERT INTO periods
+    (id, period_number, name, status, collection_start_date, due_date, created_by)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('99999999-0000-4000-8000-000000000001', 9001, 'Yedek Dönem A', 'open',
+     '2026-01-01', '2026-01-31', '11111111-0000-4000-8000-0000000000aa'),
+    ('99999999-0000-4000-8000-000000000002', 9002, 'Yedek Dönem B', 'open',
+     '2026-02-01', '2026-02-28', '11111111-0000-4000-8000-0000000000aa'),
+    ('99999999-0000-4000-8000-000000000003', 9003, 'Yedek Dönem C', 'closed',
+     '2026-03-01', '2026-03-31', '11111111-0000-4000-8000-0000000000aa');
+
+INSERT INTO assessment_rules
+    (id, period_id, rule_type, base_amount, assessment_effective_date) VALUES
+    ('abababab-0000-4000-8000-000000000001',
+     '99999999-0000-4000-8000-000000000001', 'per_shareholder',
+     10000.00, '2026-01-15'),
+    ('abababab-0000-4000-8000-000000000002',
+     '99999999-0000-4000-8000-000000000002', 'per_share',
+     0.01, '2026-02-10'),
+    ('abababab-0000-4000-8000-000000000003',
+     '99999999-0000-4000-8000-000000000003', 'per_share',
+     1234.56, '2026-03-10');
+
+INSERT INTO assessments
+    (id, period_id, shareholder_id, rule_type, base_amount, amount,
+     currency, assessment_effective_date, generated_by) VALUES
+    -- Dönem A: flat obligation per shareholder (10000.00 each).
+    ('acacacac-0000-4000-8000-000000000001',
+     '99999999-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000001', 'per_shareholder',
+     10000.00, 10000.00, 'TRY', '2026-01-15',
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('acacacac-0000-4000-8000-000000000002',
+     '99999999-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000002', 'per_shareholder',
+     10000.00, 10000.00, 'TRY', '2026-01-15',
+     '11111111-0000-4000-8000-0000000000aa'),
+    -- Dönem B: 0.01 per share; B owns both shares at the effective date.
+    ('acacacac-0000-4000-8000-000000000003',
+     '99999999-0000-4000-8000-000000000002',
+     '44444444-0000-4000-8000-000000000002', 'per_share',
+     0.01, 0.02, 'TRY', '2026-02-10',
+     '11111111-0000-4000-8000-0000000000aa'),
+    -- Dönem C: 1234.56 per share → 2469.12 with two provenance rows.
+    ('acacacac-0000-4000-8000-000000000004',
+     '99999999-0000-4000-8000-000000000003',
+     '44444444-0000-4000-8000-000000000002', 'per_share',
+     1234.56, 2469.12, 'TRY', '2026-03-10',
+     '11111111-0000-4000-8000-0000000000aa');
+
+INSERT INTO assessment_share_sources
+    (assessment_id, share_id, ownership_id, amount_component) VALUES
+    ('acacacac-0000-4000-8000-000000000003',
+     '66666666-0000-4000-8000-000000000001',
+     '88888888-0000-4000-8000-000000000002', 0.01),
+    ('acacacac-0000-4000-8000-000000000003',
+     '66666666-0000-4000-8000-000000000002',
+     '88888888-0000-4000-8000-000000000003', 0.01),
+    ('acacacac-0000-4000-8000-000000000004',
+     '66666666-0000-4000-8000-000000000001',
+     '88888888-0000-4000-8000-000000000002', 1234.56),
+    ('acacacac-0000-4000-8000-000000000004',
+     '66666666-0000-4000-8000-000000000002',
+     '88888888-0000-4000-8000-000000000003', 1234.56);
+
+COMMIT;

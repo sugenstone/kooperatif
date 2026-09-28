@@ -19,6 +19,14 @@
 		"rust:clippy": "cargo clippy --manifest-path apps/server/Cargo.toml --all-targets -- -D warnings",
 		"rust:test": "cargo test --manifest-path apps/server/Cargo.toml",
 		"db:verify": "bash scripts/db-verify.sh",
+		"backup:create": "node scripts/backup/create.mjs",
+		"backup:verify": "node scripts/backup/verify.mjs",
+		"backup:restore": "node scripts/backup/restore.mjs",
+		"backup:status": "node scripts/backup/status.mjs",
+		"backup:retention": "node scripts/backup/retention.mjs",
+		"backup:drill": "node scripts/backup/drill.mjs",
+		"backup:failure-test": "node scripts/backup/failure-test.mjs",
+		"backup:test": "node --test \"scripts/backup/tests/*.test.mjs\"",
 		"verify": "bash scripts/verify.sh"
 	}
 }

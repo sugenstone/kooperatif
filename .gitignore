@@ -29,3 +29,6 @@ Thumbs.db
 # Local runtime artifacts
 *.log
 /tmp/
+
+# Backup artifacts — database dumps must never be committed.
+backups/
