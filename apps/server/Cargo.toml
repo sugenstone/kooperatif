@@ -2,7 +2,7 @@
 name = "kooperatif-server"
 version = "0.1.0"
 edition = "2021"
-description = "Kooperatif backend API server (STEP-002: identity, authentication, sessions)"
+description = "Kooperatif backend API server"
 publish = false
 
 [dependencies]
@@ -11,6 +11,7 @@ axum = "0.8"
 base64ct = { version = "1", features = ["alloc"] }
 rand = "0.8"
 rpassword = "7"
+rust_decimal = "1.37"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -22,6 +23,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
     "time",
     "uuid",
+    "rust_decimal",
 ] }
 thiserror = "2"
 time = { version = "0.3", features = [

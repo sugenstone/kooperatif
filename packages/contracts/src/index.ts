@@ -83,6 +83,28 @@ export {
 	shareholderStatusChangePath
 } from './parties';
 export type {
+	CreateShareRequest,
+	InitialAcquisitionType,
+	OwnershipAcquisitionType,
+	ShareDetail,
+	ShareEventItem,
+	ShareEventType,
+	ShareholderIdentity,
+	ShareListItem,
+	ShareSaleRequest,
+	ShareStatus,
+	ShareStatusChangeRequest,
+	ShareTransferRequest
+} from './shares';
+export {
+	SHARES_PATH,
+	sharePath,
+	shareSalePath,
+	shareStatusChangePath,
+	shareTransferPath,
+	shareholderSharesPath
+} from './shares';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

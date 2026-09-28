@@ -36,6 +36,9 @@ pub mod catalog {
     pub const SHAREHOLDERS_MANAGE: &str = "shareholders.manage";
     pub const FAMILIES_READ: &str = "families.read";
     pub const FAMILIES_MANAGE: &str = "families.manage";
+    // STEP-005 (shares domain).
+    pub const SHARES_READ: &str = "shares.read";
+    pub const SHARES_MANAGE: &str = "shares.manage";
 
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
@@ -49,6 +52,8 @@ pub mod catalog {
         SHAREHOLDERS_MANAGE,
         FAMILIES_READ,
         FAMILIES_MANAGE,
+        SHARES_READ,
+        SHARES_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -182,7 +187,11 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 8, "STEP-003 + STEP-004 catalog");
+        assert_eq!(
+            catalog::ALL.len(),
+            10,
+            "STEP-003 + STEP-004 + STEP-005 catalog"
+        );
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

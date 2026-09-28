@@ -26,6 +26,9 @@
 		{#if can('families.read')}
 			<Button variant="ghost" size="sm" href="/aileler">{t('nav.families')}</Button>
 		{/if}
+		{#if can('shares.read')}
+			<Button variant="ghost" size="sm" href="/hisseler">{t('nav.shares')}</Button>
+		{/if}
 		{#if can('roles.read')}
 			<Button variant="ghost" size="sm" href="/roller">{t('nav.roles')}</Button>
 		{/if}

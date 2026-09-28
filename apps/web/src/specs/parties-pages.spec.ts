@@ -88,10 +88,19 @@ describe('shareholder display label', () => {
 		).toBe('Mehmet Yılmaz · Vasi: Hasan Yılmaz · Aile No 47');
 	});
 
-	it('omits absent guardian context without fake placeholders', () => {
+	it('always shows guardian context — Belirtilmemiş when absent (STEP-005 §75)', () => {
 		expect(shareholderLabel({ firstName: 'A', lastName: 'B', familySequence: 1 })).toBe(
-			'A · B · Aile No 1'.replace('A · B', 'A B')
+			'A B · Vasi: Belirtilmemiş · Aile No 1'
 		);
+		expect(
+			shareholderLabel({
+				firstName: 'A',
+				lastName: 'B',
+				guardianFirstName: 'C',
+				guardianLastName: 'D',
+				familySequence: 1
+			})
+		).toBe('A B · Vasi: C D · Aile No 1');
 	});
 });
 
@@ -188,7 +197,7 @@ describe('Shareholder detail page', () => {
 		familyId: '33333333-3333-4333-8333-333333333333',
 		familySequence: 126,
 		status: 'active',
-		displayLabel: 'Abdullah Üye · Aile No 126',
+		displayLabel: 'Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126',
 		personId: '55555555-5555-4555-8555-555555555555',
 		guardianPersonId: null,
 		membershipStartedAt: '2026-01-01T00:00:00Z',
@@ -216,7 +225,9 @@ describe('Shareholder detail page', () => {
 		stubFetch(async () => jsonResponse(detailPayload));
 		render(ShareholderDetail, { data: { id: detailPayload.id } });
 
-		expect(await screen.findByText('Abdullah Üye · Aile No 126')).toBeInTheDocument();
+		expect(
+			await screen.findByText('Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126')
+		).toBeInTheDocument();
 		expect(screen.getByText('Vasi bilgisi yok')).toBeInTheDocument();
 		expect(screen.getByText('Devam ediyor')).toBeInTheDocument();
 		expect(screen.getByText('47')).toBeInTheDocument();
@@ -235,7 +246,7 @@ describe('Shareholder detail page', () => {
 			init?.method === 'PATCH' ? jsonResponse(detailPayload) : jsonResponse(detailPayload)
 		);
 		render(ShareholderDetail, { data: { id: detailPayload.id } });
-		await screen.findByText('Abdullah Üye · Aile No 126');
+		await screen.findByText('Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126');
 
 		await userEvent.click(screen.getByRole('button', { name: 'Bilgileri Düzenle' }));
 		const firstInput = screen.getByLabelText('Ad');

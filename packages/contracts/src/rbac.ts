@@ -80,7 +80,9 @@ export const PERMISSION_KEYS = {
 	shareholdersRead: 'shareholders.read',
 	shareholdersManage: 'shareholders.manage',
 	familiesRead: 'families.read',
-	familiesManage: 'families.manage'
+	familiesManage: 'families.manage',
+	sharesRead: 'shares.read',
+	sharesManage: 'shares.manage'
 } as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[keyof typeof PERMISSION_KEYS];

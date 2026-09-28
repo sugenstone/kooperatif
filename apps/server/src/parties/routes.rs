@@ -205,7 +205,7 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::DependencyUnavailable)
 }
 
-fn page_of(query: &ListQuery) -> Result<(i64, i64), ApiError> {
+pub fn page_of(query: &ListQuery) -> Result<(i64, i64), ApiError> {
     let page = query.page.unwrap_or(1).max(1);
     let page_size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
     if !(1..=MAX_PAGE_SIZE).contains(&page_size) {
@@ -226,10 +226,15 @@ macro_rules! parties_mutation {
     }};
 }
 
+/// Canonical shareholder identity (STEP-005 §5/§6/§75): guardian context
+/// is part of EVERY shareholder's operational identity — not a
+/// duplicate-name disambiguator. Absent guardian renders the explicit
+/// "Vasi: Belirtilmemiş" segment; it is never silently omitted.
 fn compose_display_label(item: &party_repo::ShareholderListRow) -> String {
     let mut label = format!("{} {}", item.first_name, item.last_name);
-    if let (Some(first), Some(last)) = (&item.guardian_first_name, &item.guardian_last_name) {
-        label.push_str(&format!(" · Vasi: {first} {last}"));
+    match (&item.guardian_first_name, &item.guardian_last_name) {
+        (Some(first), Some(last)) => label.push_str(&format!(" · Vasi: {first} {last}")),
+        _ => label.push_str(" · Vasi: Belirtilmemiş"),
     }
     if let Some(sequence) = item.family_sequence {
         label.push_str(&format!(" · Aile No {sequence}"));

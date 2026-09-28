@@ -15,3 +15,4 @@ pub mod db;
 pub mod http;
 pub mod observability;
 pub mod parties;
+pub mod shares;

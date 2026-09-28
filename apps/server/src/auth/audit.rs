@@ -33,6 +33,10 @@ pub enum SecurityEventType {
     ShareholderUpdated,
     ShareholderStatusChanged,
     ShareholderFamilyChanged,
+    ShareCreated,
+    ShareTransferred,
+    ShareSold,
+    ShareStatusChanged,
 }
 
 impl SecurityEventType {
@@ -60,6 +64,10 @@ impl SecurityEventType {
             Self::ShareholderUpdated => "shareholder_updated",
             Self::ShareholderStatusChanged => "shareholder_status_changed",
             Self::ShareholderFamilyChanged => "shareholder_family_changed",
+            Self::ShareCreated => "share_created",
+            Self::ShareTransferred => "share_transferred",
+            Self::ShareSold => "share_sold",
+            Self::ShareStatusChanged => "share_status_changed",
         }
     }
 }

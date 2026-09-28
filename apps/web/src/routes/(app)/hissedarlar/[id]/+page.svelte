@@ -30,9 +30,11 @@
 		shareholderFamilyChangePath,
 		shareholderPath,
 		shareholderStatusChangePath,
+		shareholderSharesPath,
 		type FamilyListItem,
 		type Paginated,
 		type PersonLookupItem,
+		type ShareListItem,
 		type ShareholderDetail,
 		type UpdateShareholderRequest
 	} from '@kooperatif/contracts';
@@ -42,6 +44,7 @@
 	let { data } = $props<{ data: { id: string } }>();
 
 	let detail = $state<ShareholderDetail | null>(null);
+	let shares = $state<ShareListItem[]>([]);
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
@@ -75,6 +78,9 @@
 		loadError = null;
 		try {
 			detail = await apiFetch<ShareholderDetail>(shareholderPath(data.id));
+			if (can('shares.read')) {
+				shares = await apiFetch<ShareListItem[]>(shareholderSharesPath(data.id));
+			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
 		}
@@ -402,6 +408,66 @@
 							{t('common.cancel')}
 						</Button>
 					</div>
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if can('shares.read')}
+			<Card class="w-full max-w-2xl">
+				<CardHeader>
+					<CardTitle>{t('shares.shareholderSection')}</CardTitle>
+					<CardDescription>{shares.length}</CardDescription>
+				</CardHeader>
+				<CardContent>
+					{#if shares.length === 0}
+						<p class="text-sm text-muted-foreground">{t('shares.noShares')}</p>
+					{:else}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('shares.number')}</TableHead>
+									<TableHead>{t('shares.acquisition')}</TableHead>
+									<TableHead>{t('shares.ownershipStart')}</TableHead>
+									<TableHead>{t('shares.status')}</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each shares as share (share.id)}
+									<TableRow>
+										<TableCell>
+											<a
+												class="font-medium underline-offset-2 hover:underline"
+												href={resolve(`/hisseler/${share.id}`)}
+											>
+												{share.shareNumber}
+											</a>
+										</TableCell>
+										<TableCell>
+											{#if share.acquisitionType === 'founder'}
+												{t('shares.acquisitionFounder')}
+											{:else if share.acquisitionType === 'later_acquisition'}
+												{t('shares.acquisitionLater')}
+											{:else if share.acquisitionType === 'transfer'}
+												{t('shares.acquisitionTransfer')}
+											{:else if share.acquisitionType === 'sale'}
+												{t('shares.acquisitionSale')}
+											{:else}—{/if}
+										</TableCell>
+										<TableCell>{formatTimestamp(share.ownershipStartedAt)}</TableCell>
+										<TableCell>
+											{#if share.status === 'active'}
+												<Badge>{t('shares.statusActive')}</Badge>
+											{:else if share.status === 'suspended'}
+												<Badge variant="secondary">{t('shares.statusSuspended')}</Badge>
+											{:else}
+												<Badge variant="outline">{t('shares.statusVoided')}</Badge>
+											{/if}
+										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
 				</CardContent>
 			</Card>
 		{/if}
