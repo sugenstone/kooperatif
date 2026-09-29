@@ -230,6 +230,17 @@
 					<dd>{formatTry(detail.unallocatedAmount)}</dd>
 					<dt class="font-medium">{t('payments.method')}</dt>
 					<dd>{methodLabel(detail.method)}</dd>
+					{#if detail.destinationAccountId}
+						<dt class="font-medium">{t('payments.destinationAccount')}</dt>
+						<dd>
+							<a
+								class="underline-offset-2 hover:underline"
+								href={resolve(`/finansal-hesaplar/${detail.destinationAccountId}`)}
+							>
+								{detail.destinationAccountName}
+							</a>
+						</dd>
+					{/if}
 					<dt class="font-medium">{t('payments.receivedAt')}</dt>
 					<dd>{formatTimestamp(detail.receivedAt)}</dd>
 					{#if detail.note}

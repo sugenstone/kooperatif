@@ -162,6 +162,36 @@ export {
 	shareholderOpenAssessmentsPath
 } from './payments';
 export type {
+	AccountMovement,
+	AccountMovementList,
+	AccountStatusChangeRequest,
+	AccountTransfer,
+	AccountTransferList,
+	CreateFinancialAccountRequest,
+	FinancialAccount,
+	FinancialAccountList,
+	FinancialAccountOption,
+	FinancialAccountStatus,
+	FinancialAccountType,
+	MovementDirection,
+	MovementSourceType,
+	MovementStatus,
+	PostTransferRequest,
+	ReverseTransferRequest,
+	TransferStatus,
+	UpdateFinancialAccountRequest
+} from './financial_accounts';
+export {
+	ACCOUNT_TRANSFERS_PATH,
+	FINANCIAL_ACCOUNTS_PATH,
+	FINANCIAL_ACCOUNT_OPTIONS_PATH,
+	accountTransferPath,
+	accountTransferReversePath,
+	financialAccountMovementsPath,
+	financialAccountPath,
+	financialAccountStatusPath
+} from './financial_accounts';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

@@ -35,6 +35,12 @@
 		{#if can('payments.read')}
 			<Button variant="ghost" size="sm" href="/tahsilatlar">{t('nav.payments')}</Button>
 		{/if}
+		{#if can('financial_accounts.read')}
+			<Button variant="ghost" size="sm" href="/finansal-hesaplar">
+				{t('nav.financialAccounts')}
+			</Button>
+			<Button variant="ghost" size="sm" href="/transferler">{t('nav.transfers')}</Button>
+		{/if}
 		{#if can('roles.read')}
 			<Button variant="ghost" size="sm" href="/roller">{t('nav.roles')}</Button>
 		{/if}

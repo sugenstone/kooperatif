@@ -12,6 +12,7 @@ pub mod auth;
 pub mod clock;
 pub mod config;
 pub mod db;
+pub mod financial_accounts;
 pub mod http;
 pub mod observability;
 pub mod parties;

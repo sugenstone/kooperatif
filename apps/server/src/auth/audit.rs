@@ -46,6 +46,11 @@ pub enum SecurityEventType {
     PaymentAllocationsAdded,
     PaymentReversed,
     PaymentAllocationReversed,
+    FinancialAccountCreated,
+    FinancialAccountUpdated,
+    FinancialAccountStatusChanged,
+    AccountTransferPosted,
+    AccountTransferReversed,
 }
 
 impl SecurityEventType {
@@ -86,6 +91,11 @@ impl SecurityEventType {
             Self::PaymentAllocationsAdded => "payment_allocations_added",
             Self::PaymentReversed => "payment_reversed",
             Self::PaymentAllocationReversed => "payment_allocation_reversed",
+            Self::FinancialAccountCreated => "financial_account_created",
+            Self::FinancialAccountUpdated => "financial_account_updated",
+            Self::FinancialAccountStatusChanged => "financial_account_status_changed",
+            Self::AccountTransferPosted => "account_transfer_posted",
+            Self::AccountTransferReversed => "account_transfer_reversed",
         }
     }
 }

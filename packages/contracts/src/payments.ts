@@ -65,6 +65,9 @@ export interface PaymentAllocation {
 }
 
 export interface PaymentDetail extends PaymentListItem {
+	/** STEP-008: WHERE the value is held — distinct from `method` (HOW it arrived). NULL only on pre-STEP-008 rows. */
+	destinationAccountId: string | null;
+	destinationAccountName: string | null;
 	note: string | null;
 	reversedAt: string | null;
 	reversalReason: string | null;
@@ -97,6 +100,8 @@ export interface CreatePaymentRequest {
 	/** Optional RFC3339 — defaults to server now; backdating allowed. */
 	receivedAt?: string;
 	note?: string;
+	/** STEP-008: required — every new Payment posts into one Financial Account. */
+	destinationAccountId: string;
 	idempotencyKey: string;
 	/** May be empty: the whole amount then stays unallocated. */
 	allocations: AllocationRequest[];

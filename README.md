@@ -491,7 +491,92 @@ assessment's stored amount, and balances are always derived.
   → shareholder summary → full reversal with derived-balance proof.
 - **Boundary**: no Cashbox, Bank Account, Ledger, Receipt or Collection
   Session objects exist — where received money physically enters and
-  how it is documented are deferred domains (docs/06 §88–§92).
+  how it is documented are deferred domains (docs/06 §88–§92). The
+  financial-account half of that boundary landed in STEP-008 below;
+  Ledger/Receipt/Collection Session remain deferred.
+
+## Financial Accounts, Movements & Transfers (STEP-008, docs/07 + docs/19)
+
+The money-where domain. **A Payment is a record of money received; an
+Account Movement is the account effect of that money — the two are
+separate records, never merged. An account balance is never a stored
+number: it is the sum of valid account movements (`inflow` adds,
+`outflow` subtracts), always derived, never editable.**
+
+- **`financial_accounts`** — one engine, two operational shapes:
+  `account_type` `cash | bank`; TRY-only at this step. Lifecycle
+  `active ↔ inactive` (operator-approved): an inactive account keeps
+  its history and balance but accepts no new postings. `account_type`
+  and `currency` are immutable after creation — updating them would
+  silently rewrite financial history. Bank metadata (`bank_name`,
+  `iban`) is allowed only on `bank` accounts.
+- **`account_movements`** — the immutable financial history (ADR-003).
+  Created **only by domain commands**: `source_type` is `payment` or
+  `transfer` and `source_id` points at the originating row — there is
+  deliberately no arbitrary movement endpoint. `UNIQUE
+  (account_id, source_type, source_id)` structurally prevents a source
+  posting the same leg twice.
+- **`account_transfers`** — one logical move between two cooperative
+  accounts (never income or expense): a single transfer row plus two
+  linked movement legs (source outflow, destination inflow) inserted
+  in one transaction — a half-posted transfer is impossible.
+- **No negative balances** (operator decision): a transfer whose source
+  cannot cover the amount, or a reversal whose effect would take an
+  account below zero, is rejected with `409` while the account rows
+  are locked.
+- **Deterministic locking**: every balance-affecting command locks
+  account rows `FOR UPDATE` in ascending UUID order (transfers both
+  accounts; payment commands the payment first, then the account) —
+  deadlocks are impossible by construction and concurrent transfers
+  serialize without overdraft.
+- **Payment integration**: new payments require a
+  `destination_account_id`; `POST /api/payments` posts the payment,
+  its allocations and exactly one inflow movement atomically — a
+  posted payment can never exist without its movement. Reversing a
+  payment reverses its movement in the same transaction, blocked if
+  the effect would violate the no-negative-balance rule (money already
+  moved out — restore it first). Legacy payments with NULL destination
+  stay readable and reversible with no account effect; no fabricated
+  destination is invented for historical money.
+- **Status-based reversal everywhere** (docs/19): payment, transfer
+  and movement originals always survive; reversal stamps
+  `reversed_at`/`reversed_by`/`reversal_reason` (DB-enforced CHECKs),
+  reverses both transfer legs atomically, and replays idempotently.
+- **Idempotent transfers** (ADR-006): durable `idempotency_key` +
+  payload fingerprint — a retry replays the existing transfer, a key
+  reused with a different payload answers `409 conflict`.
+- **Derived surfaces**: `GET /api/financial-accounts` (list/search +
+  derived balance), `GET /api/financial-accounts/options` (active
+  accounts for pickers), `GET /api/financial-accounts/{id}`,
+  `GET /api/financial-accounts/{id}/movements` (active + reversed
+  history with source metadata), `GET|POST /api/account-transfers`,
+  `GET /api/account-transfers/{id}`,
+  `POST /api/account-transfers/{id}/reverse`.
+- **Exact money**: `NUMERIC(19,2)` TRY end to end; movement `effect`
+  is a signed decimal string computed at the API boundary.
+- **Permissions**: `financial_accounts.read`, `financial_accounts.manage`
+  — granted to `Sistem Yöneticisi` by migration 0008; every route is
+  backend-authorized and every mutation is CSRF-protected.
+- **Audit**: `financial_account_created`, `financial_account_updated`,
+  `financial_account_status_changed`, `account_transfer_posted`,
+  `account_transfer_reversed` land in `security_events`; payment
+  posting/reversal reuses the STEP-007 payment audit events.
+- **Frontend**: `/finansal-hesaplar` (list + derived balances),
+  `/finansal-hesaplar/yeni` (create), `/finansal-hesaplar/{id}`
+  (metadata, derived balance, movement history, edit + status
+  controls), `/transferler` (list), `/transferler/yeni` (two-account
+  preview before confirm), `/transferler/{id}` (detail + reversal),
+  destination-account selector on `/tahsilatlar/yeni` (required) and
+  the account shown on `/tahsilatlar/{id}`. Turkish-first i18n; all
+  math stays at the string/`BigInt` level.
+- **E2E**: `node scripts/e2e-step008.mjs` drives the real stack through
+  payment → account posting → UI transfer → insufficient-funds
+  rejection → transfer reversal → payment reversal with derived-balance
+  proof at every step.
+- **Boundary**: no General Ledger, Income/Expense, Investment,
+  Social Aid finance, Receipt, bank-reconciliation, gold/commodity,
+  refund/disbursement or manual-balance-editing surface exists —
+  deferred domains (docs/07 open decisions).
 
 ## Backup & Disaster Recovery (BACKUP-READINESS-001, ADR-013)
 
@@ -581,6 +666,7 @@ is missing — no insecure silent defaults.
   (`docker compose -f docker/compose.yaml down` keeps it; add `-v` to
   discard).
 - The `migrate` subcommand is the only supported way to apply migrations.
-- Obligation + money-received schema now exists (STEP-006/007);
-  financial-account schema intentionally does not — Cashbox/Bank/
-  Ledger/Receipt belong to a later reviewed STEP (ADR-003/ADR-004).
+- Obligation + money-received + financial-account schema now exists
+  (STEP-006/007/008); Ledger/Receipt/Collection Session and the
+  income/expense/investment surfaces intentionally do not — they belong
+  to later reviewed STEPs (ADR-003/ADR-004).

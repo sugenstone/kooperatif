@@ -947,7 +947,11 @@ async fn parties_authorization_and_permission_upgrade() {
         perms.contains(&"assessments.manage".to_string()),
         "{perms:?}"
     );
-    assert_eq!(perms.len(), 16);
+    assert_eq!(perms.len(), 18);
+    assert!(
+        perms.contains(&"financial_accounts.manage".to_string()),
+        "{perms:?}"
+    );
 
     // Plain user: authenticated, no STEP-004 permissions.
     let argon2 = argon2::Argon2::new(

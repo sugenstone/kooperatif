@@ -35,6 +35,10 @@ struct TestApp {
     pool: PgPool,
     _peer: SocketAddr,
     _database_name: String,
+    /// Lazily-created default destination Financial Account (STEP-008):
+    /// ONE account per test database so idempotent replays fingerprint
+    /// identically.
+    default_account: tokio::sync::Mutex<Option<Uuid>>,
 }
 
 impl TestApp {
@@ -96,6 +100,7 @@ async fn setup() -> Option<TestApp> {
         app,
         pool,
         _database_name: database_name,
+        default_account: tokio::sync::Mutex::new(None),
         _peer: format!(
             "127.{}.{}.{}:{}",
             octets[0],
@@ -335,12 +340,42 @@ fn payment_body(
     }
 }
 
+/// STEP-008: every new Payment requires a destination Financial
+/// Account. Tests that don't care about WHICH account get one lazily
+/// created cash account per test database — stable across idempotent
+/// replays (the account id is part of the payload fingerprint).
+async fn default_account(test: &TestApp, cookie: &str, csrf: &str) -> Uuid {
+    let mut guard = test.default_account.lock().await;
+    if let Some(id) = *guard {
+        return id;
+    }
+    let (status, detail) = send(
+        &test.app,
+        req(
+            "POST",
+            "/api/financial-accounts",
+            cookie,
+            Some(csrf),
+            Some(json!({ "name": "Test Kasası", "accountType": "cash" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "account create: {detail}");
+    let id: Uuid = detail["id"].as_str().unwrap().parse().unwrap();
+    *guard = Some(id);
+    id
+}
+
 async fn create_payment(
     test: &TestApp,
     cookie: &str,
     csrf: &str,
-    body: Value,
+    mut body: Value,
 ) -> (StatusCode, Value) {
+    if body.get("destinationAccountId").is_none() {
+        let account = default_account(test, cookie, csrf).await;
+        body["destinationAccountId"] = json!(account.to_string());
+    }
     send(
         &test.app,
         req("POST", "/api/payments", cookie, Some(csrf), Some(body)),
@@ -1078,7 +1113,12 @@ async fn authorization_csrf_idor_and_cache_control() {
         (
             "POST",
             "/api/payments".to_string(),
-            Some(payment_body(None, "10.00", "k-plain", vec![])),
+            Some(json!({
+                "payerFirstName": "Yetkisiz", "payerLastName": "Kişi",
+                "amount": "10.00", "method": "cash",
+                "destinationAccountId": Uuid::new_v4().to_string(),
+                "idempotencyKey": "k-plain", "allocations": []
+            })),
         ),
         (
             "GET",
@@ -1107,7 +1147,12 @@ async fn authorization_csrf_idor_and_cache_control() {
             "/api/payments",
             &cookie,
             None,
-            Some(payment_body(None, "10.00", "k-csrf", vec![])),
+            Some(json!({
+                "payerFirstName": "Csrf", "payerLastName": "Kişi",
+                "amount": "10.00", "method": "cash",
+                "destinationAccountId": Uuid::new_v4().to_string(),
+                "idempotencyKey": "k-csrf", "allocations": []
+            })),
         ),
     )
     .await;

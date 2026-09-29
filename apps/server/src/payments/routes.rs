@@ -104,6 +104,9 @@ fn command_error(error: payment_repo::PaymentCommandError) -> ApiError {
     use payment_repo::PaymentCommandError::*;
     match error {
         NotFound => ApiError::NotFound,
+        // STEP-008: a destination account that does not exist or is not
+        // usable is indistinguishable — no existence leak (IDOR rule).
+        AccountNotFoundOrInactive => ApiError::NotFound,
         // Deterministic request errors — the same request would always
         // fail regardless of concurrent state.
         PayerNotFound | DuplicateTarget | PaymentOverAllocated => ApiError::ValidationFailed,
@@ -112,7 +115,8 @@ fn command_error(error: payment_repo::PaymentCommandError) -> ApiError {
         | TargetAlreadyAllocated
         | AssessmentOverAllocated
         | IdempotencyConflict
-        | NotPosted => ApiError::Conflict,
+        | NotPosted
+        | AccountEffectBlocked => ApiError::Conflict,
         Database(error) => {
             tracing::error!(error = %error, "payment command failed");
             ApiError::Internal
@@ -182,6 +186,10 @@ pub struct AllocationDto {
 pub struct PaymentDetailDto {
     #[serde(flatten)]
     pub item: PaymentListItemDto,
+    /// STEP-008: WHERE the received value is held — separate from
+    /// `method` (HOW it arrived). NULL only on pre-STEP-008 rows.
+    pub destination_account_id: Option<Uuid>,
+    pub destination_account_name: Option<String>,
     pub note: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub reversed_at: Option<OffsetDateTime>,
@@ -387,6 +395,9 @@ pub struct CreatePaymentRequest {
     /// future rejected.
     pub received_at: Option<String>,
     pub note: Option<String>,
+    /// STEP-008: required — every new Payment posts into exactly one
+    /// Financial Account. Only rows predating the domain keep NULL.
+    pub destination_account_id: Uuid,
     pub idempotency_key: String,
     /// May be EMPTY: the whole amount then stays unallocated on the
     /// Payment awaiting explicit disposition (never auto-attributed).
@@ -421,6 +432,7 @@ struct ValidatedPayment {
     method: payment_model::PaymentMethod,
     received_at: OffsetDateTime,
     note: Option<String>,
+    destination_account_id: Uuid,
     idempotency_key: String,
     allocations: Vec<payment_repo::NewAllocation>,
 }
@@ -487,6 +499,7 @@ fn validated_payment(
         method,
         received_at,
         note,
+        destination_account_id: payload.destination_account_id,
         idempotency_key,
         allocations,
     })
@@ -567,6 +580,7 @@ pub async fn create_payment(
         method: validated.method,
         received_at: validated.received_at,
         note: validated.note.as_deref(),
+        destination_account_id: validated.destination_account_id,
         allocations: &validated
             .allocations
             .iter()
@@ -585,6 +599,7 @@ pub async fn create_payment(
             method: validated.method.as_str().to_owned(),
             received_at: validated.received_at,
             note: validated.note.clone(),
+            destination_account_id: validated.destination_account_id,
             idempotency_key: validated.idempotency_key,
             fingerprint,
             allocations: validated.allocations,
@@ -606,6 +621,7 @@ pub async fn create_payment(
                 "created_person": outcome.created_person,
                 "amount": payment_model::canonical_amount(validated.amount),
                 "method": validated.method.as_str(),
+                "destination_account_id": validated.destination_account_id,
                 "allocation_count": outcome.allocation_count,
                 "allocated_amount": payment_model::canonical_amount(outcome.allocated_amount),
                 "unallocated_amount": payment_model::canonical_amount(outcome.unallocated_amount),
@@ -644,6 +660,8 @@ async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentDetailDto, 
         .map_err(db_err("payment allocations failed"))?;
     Ok(PaymentDetailDto {
         item: payment_item(&row),
+        destination_account_id: row.destination_account_id,
+        destination_account_name: row.destination_account_name.clone(),
         note: row.note.clone(),
         reversed_at: row.reversed_at,
         reversal_reason: row.reversal_reason.clone(),
@@ -669,6 +687,8 @@ pub async fn get_payment(
         .map_err(db_err("payment allocations failed"))?;
     Ok(Json(PaymentDetailDto {
         item: payment_item(&row),
+        destination_account_id: row.destination_account_id,
+        destination_account_name: row.destination_account_name.clone(),
         note: row.note.clone(),
         reversed_at: row.reversed_at,
         reversal_reason: row.reversal_reason.clone(),

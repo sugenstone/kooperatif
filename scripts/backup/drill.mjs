@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 16],
+			['permissions', 18],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -185,7 +185,10 @@ async function main() {
 			['assessments', 4],
 			['assessment_share_sources', 4],
 			['payments', 2],
-			['payment_allocations', 3]
+			['payment_allocations', 3],
+			['financial_accounts', 2],
+			['account_movements', 4],
+			['account_transfers', 1]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -237,6 +240,16 @@ async function main() {
 			[
 				"SELECT status||'|'||reversal_reason FROM payments WHERE payment_number=9002",
 				'reversed|drill: hatalı kayıt'
+			],
+			// Payment 9001 → destination financial account (STEP-008).
+			[
+				"SELECT a.name FROM payments p JOIN financial_accounts a ON a.id=p.destination_account_id WHERE p.payment_number=9001",
+				'Yedek Kasa'
+			],
+			// Transfer 9001 links its two legs to the same source row.
+			[
+				"SELECT s.name||'→'||d.name||'|'||count(*) FROM account_transfers t JOIN financial_accounts s ON s.id=t.source_account_id JOIN financial_accounts d ON d.id=t.destination_account_id JOIN account_movements m ON m.source_type='transfer' AND m.source_id=t.id WHERE t.transfer_number=9001 GROUP BY s.name, d.name",
+				'Yedek Kasa→Yedek Banka|2'
 			]
 		];
 		let allRel = true;
@@ -284,6 +297,24 @@ async function main() {
 			"SELECT coalesce(sum(amount),0)::text FROM payment_allocations WHERE assessment_id='acacacac-0000-4000-8000-000000000001' AND status='active'",
 			'100.00'
 		);
+		// Derived balances on the RESTORED copy — cash: +150 -40 = 110;
+		// bank: +30 reversed (excluded) +40 = 40. Balances are never
+		// stored; the restored movement history must derive them.
+		expect(
+			'Derived cash balance (150-40=110.00)',
+			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000001' AND status='active'",
+			'110.00'
+		);
+		expect(
+			'Derived bank balance (reversed leg excluded → 40.00)',
+			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000002' AND status='active'",
+			'40.00'
+		);
+		expect(
+			'Reversed movement history preserved',
+			"SELECT count(*) FROM account_movements WHERE status='reversed' AND reversed_by IS NOT NULL AND reversal_reason IS NOT NULL",
+			'1'
+		);
 
 		// Constraints must still BEHAVE after restore — not just exist.
 		const constraintFails = [
@@ -323,6 +354,36 @@ async function main() {
 				'allocation (payment,assessment) unique',
 				`INSERT INTO payment_allocations (payment_id, assessment_id, amount, created_by)
 				 VALUES ('dddddddd-0000-4000-8000-000000000001','acacacac-0000-4000-8000-000000000001',1,'11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'account currency check',
+				`INSERT INTO financial_accounts (name, account_type, currency, created_by)
+				 VALUES ('drill usd','cash','USD','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'movement leg uniqueness',
+				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','inflow',1,'payment','dddddddd-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'movement reversal consistency check',
+				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, status, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','inflow',1,'transfer','f3f3f3f3-0000-4000-8000-000000000099',now(),'reversed','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'transfer same-account check',
+				`INSERT INTO account_transfers (source_account_id, destination_account_id, amount, occurred_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'drill-tx','drill-tx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'transfer idempotency key unique',
+				`INSERT INTO account_transfers (source_account_id, destination_account_id, amount, occurred_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000002',1,now(),'drill-tidem-0001','drill-ty','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'payment destination FK',
+				`INSERT INTO payments (payer_person_id, amount, method, received_at, destination_account_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('22222222-0000-4000-8000-000000000004',1,'cash',now(),'f1f1f1f1-0000-4000-8000-00000000ffff','drill-z','drill-z','11111111-0000-4000-8000-0000000000aa')`
 			]
 		];
 		let allConstraints = true;

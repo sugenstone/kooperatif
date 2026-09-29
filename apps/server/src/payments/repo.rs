@@ -28,6 +28,8 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::model::PaymentStatus;
+use crate::financial_accounts::model::{MovementDirection, MovementSource};
+use crate::financial_accounts::repo as account_repo;
 use crate::parties::model as party_model;
 use crate::shares::repo::ShareholderIdentityRow;
 
@@ -51,6 +53,10 @@ pub struct PaymentRow {
     /// Set when the payer Person happens to be a Shareholder — context
     /// only; payer identity never implies debtor identity (§12–§14).
     pub payer_shareholder_id: Option<Uuid>,
+    /// STEP-008: where the value is held. NULL only on rows created
+    /// before the Financial Accounts domain existed.
+    pub destination_account_id: Option<Uuid>,
+    pub destination_account_name: Option<String>,
     /// Derived: SUM of ACTIVE allocations (never a stored flag).
     pub allocated_amount: Decimal,
     pub reversed_at: Option<OffsetDateTime>,
@@ -66,6 +72,7 @@ const PAYMENT_SELECT: &str = "SELECT pay.id, pay.payment_number, pay.status, \
     pp.id AS payer_person_id, pp.first_name AS payer_first_name, \
     pp.last_name AS payer_last_name, \
     ps.id AS payer_shareholder_id, \
+    pay.destination_account_id, fa.name AS destination_account_name, \
     COALESCE(al.allocated, 0) AS allocated_amount, \
     pay.reversed_at, pay.reversal_reason, \
     cb.display_name AS created_by_name, rb.display_name AS reversed_by_name, \
@@ -73,6 +80,7 @@ const PAYMENT_SELECT: &str = "SELECT pay.id, pay.payment_number, pay.status, \
 FROM payments pay \
 JOIN persons pp ON pp.id = pay.payer_person_id \
 LEFT JOIN shareholders ps ON ps.person_id = pp.id \
+LEFT JOIN financial_accounts fa ON fa.id = pay.destination_account_id \
 LEFT JOIN ( \
     SELECT payment_id, sum(amount) AS allocated \
     FROM payment_allocations WHERE status = 'active' GROUP BY payment_id \
@@ -407,6 +415,9 @@ pub struct CreatePayment {
     pub method: String,
     pub received_at: OffsetDateTime,
     pub note: Option<String>,
+    /// WHERE the value is kept (STEP-008). Distinct from `method`
+    /// (HOW it arrived). Required for every new Payment.
+    pub destination_account_id: Uuid,
     pub idempotency_key: String,
     /// Canonical payload fingerprint stored beside the key (ADR-006).
     pub fingerprint: String,
@@ -438,7 +449,27 @@ pub enum PaymentCommandError {
     /// The Payment is already `reversed` where `posted` was required
     /// (add-allocations on a reversed Payment) — 409.
     NotPosted,
+    /// STEP-008: the destination Financial Account does not exist or
+    /// is not `active` — indistinguishable 404 (IDOR rule).
+    AccountNotFoundOrInactive,
+    /// STEP-008: reversing the Payment's inflow would take the
+    /// account's derived balance below zero (funds already moved
+    /// out by a Transfer) — 409, requires operator resolution.
+    AccountEffectBlocked,
     Database(sqlx::Error),
+}
+
+/// Translate the Financial Accounts command error vocabulary into the
+/// Payment vocabulary — account lookups stay indistinguishable (IDOR)
+/// and insufficient post-reversal balance surfaces as a domain 409.
+fn account_err(error: account_repo::AccountCommandError) -> PaymentCommandError {
+    use account_repo::AccountCommandError::*;
+    match error {
+        NotFound | InactiveAccount => PaymentCommandError::AccountNotFoundOrInactive,
+        InsufficientFunds => PaymentCommandError::AccountEffectBlocked,
+        Database(error) => PaymentCommandError::Database(error),
+        _ => PaymentCommandError::AccountEffectBlocked,
+    }
 }
 
 pub struct PaymentOutcome {
@@ -610,6 +641,19 @@ pub async fn create_payment(
     // 2. Payer resolution (existing Person or new — never a debtor).
     let (payer_person_id, created_person) = resolve_payer(&mut tx, &command).await?;
 
+    // 2b. Destination Financial Account (STEP-008): lock FIRST in the
+    // domain order accounts -> payments -> assessments shared with the
+    // transfer command. Must exist, be `active`, and hold TRY.
+    let accounts = account_repo::lock_accounts(&mut tx, &[command.destination_account_id])
+        .await
+        .map_err(account_err)?;
+    let Some((status, currency)) = accounts.get(&command.destination_account_id) else {
+        return Err(PaymentCommandError::AccountNotFoundOrInactive);
+    };
+    if status != "active" || currency != "TRY" {
+        return Err(PaymentCommandError::AccountNotFoundOrInactive);
+    }
+
     // 3. Request-level target dedupe, then deterministic locking.
     let mut ids: Vec<Uuid> = command
         .allocations
@@ -627,13 +671,15 @@ pub async fn create_payment(
     // 4. Insert the Payment (posted at birth — one receipt = one row).
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO payments \
-             (payer_person_id, amount, currency, method, received_at, note, \
-              status, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, 'TRY', $3, $4, $5, 'posted', $6, $7, $8) \
+             (payer_person_id, destination_account_id, amount, currency, \
+              method, received_at, note, status, idempotency_key, \
+              idempotency_fingerprint, created_by) \
+         VALUES ($1, $2, $3, 'TRY', $4, $5, $6, 'posted', $7, $8, $9) \
          ON CONFLICT (idempotency_key) DO NOTHING \
          RETURNING id, payment_number",
     )
     .bind(payer_person_id)
+    .bind(command.destination_account_id)
     .bind(command.amount)
     .bind(&command.method)
     .bind(command.received_at)
@@ -709,6 +755,25 @@ pub async fn create_payment(
         .await
         .map_err(PaymentCommandError::Database)?;
     }
+
+    // 6. The account effect (STEP-008): exactly ONE inflow movement on
+    // the destination account, sourced from this Payment. Same
+    // transaction — a posted Payment can never exist without its
+    // movement and vice versa.
+    account_repo::insert_movement(
+        &mut tx,
+        account_repo::NewMovement {
+            account_id: command.destination_account_id,
+            direction: MovementDirection::Inflow,
+            amount: command.amount,
+            source: MovementSource::Payment,
+            source_id: payment_id,
+            occurred_at: command.received_at,
+            actor,
+        },
+    )
+    .await
+    .map_err(account_err)?;
 
     let allocated: Decimal = command.allocations.iter().map(|a| a.amount).sum();
     tx.commit().await.map_err(PaymentCommandError::Database)?;
@@ -833,13 +898,15 @@ pub async fn reverse_payment(
 ) -> Result<ReverseOutcome, PaymentCommandError> {
     let mut tx = pool.begin().await.map_err(PaymentCommandError::Database)?;
 
-    let payment: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, payment_number FROM payments WHERE id = $1 FOR UPDATE")
-            .bind(payment_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(PaymentCommandError::Database)?;
-    let Some((status, payment_number)) = payment else {
+    let payment: Option<(String, i64, Option<Uuid>, Decimal)> = sqlx::query_as(
+        "SELECT status, payment_number, destination_account_id, amount \
+         FROM payments WHERE id = $1 FOR UPDATE",
+    )
+    .bind(payment_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(PaymentCommandError::Database)?;
+    let Some((status, payment_number, destination_account_id, amount)) = payment else {
         return Err(PaymentCommandError::NotFound);
     };
     if status != PaymentStatus::Posted.as_str() {
@@ -849,6 +916,34 @@ pub async fn reverse_payment(
             reversed_allocation_count: 0,
             payment_number,
         });
+    }
+
+    // STEP-008 account effect: the original movement row is PRESERVED
+    // and flipped to `reversed` (status-based model), excluded from the
+    // derived balance. Legacy NULL-account Payments have no effect.
+    // Guard: if the funds already left via a Transfer, reversing the
+    // inflow would take the balance negative — reject (negative
+    // balances are rejected domain-wide).
+    if let Some(account_id) = destination_account_id {
+        account_repo::lock_accounts(&mut tx, &[account_id])
+            .await
+            .map_err(account_err)?;
+        let balance = account_repo::locked_balance(&mut tx, account_id)
+            .await
+            .map_err(account_err)?;
+        if balance - amount < Decimal::ZERO {
+            return Err(PaymentCommandError::AccountEffectBlocked);
+        }
+        account_repo::reverse_movements_of_source(
+            &mut tx,
+            MovementSource::Payment,
+            payment_id,
+            now,
+            actor,
+            &reason,
+        )
+        .await
+        .map_err(account_err)?;
     }
 
     let reversed = sqlx::query(

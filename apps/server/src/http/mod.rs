@@ -15,6 +15,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth::rbac::rbac_router;
 use crate::auth::routes::auth_router;
 use crate::auth::AuthRuntime;
+use crate::financial_accounts::routes::financial_accounts_router;
 use crate::http::error::fallback;
 use crate::parties::routes::parties_router;
 use crate::payments::routes::payments_router;
@@ -88,6 +89,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(shares_router())
         .merge(periods_router())
         .merge(payments_router())
+        .merge(financial_accounts_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

@@ -34,6 +34,7 @@
 	} from '$lib/money';
 	import {
 		FAMILIES_PATH,
+		FINANCIAL_ACCOUNT_OPTIONS_PATH,
 		PAYMENTS_PATH,
 		PAYMENT_PAYER_PERSONS_PATH,
 		familyCollectionContextPath,
@@ -42,6 +43,7 @@
 		type CreatePaymentResponse,
 		type FamilyCollectionContext,
 		type FamilyListItem,
+		type FinancialAccountOption,
 		type OpenAssessment,
 		type Paginated,
 		type PayerCandidate,
@@ -204,6 +206,26 @@
 	let method = $state<PaymentMethod>('cash');
 	let receivedAt = $state('');
 	let note = $state('');
+	// STEP-008: WHERE the received value is posted — required, distinct
+	// from `method` (HOW it arrived).
+	let accountOptions = $state<FinancialAccountOption[]>([]);
+	let destinationAccountId = $state('');
+	let accountsLoadError = $state<MessageKey | null>(null);
+
+	async function loadAccountOptions(): Promise<void> {
+		try {
+			accountOptions = await apiFetch<FinancialAccountOption[]>(FINANCIAL_ACCOUNT_OPTIONS_PATH);
+			if (accountOptions.length === 1 && !destinationAccountId) {
+				destinationAccountId = accountOptions[0].id;
+			}
+		} catch (error) {
+			accountsLoadError = apiErrorKey(error);
+		}
+	}
+
+	const selectedAccount = $derived(
+		accountOptions.find((a) => a.id === destinationAccountId) ?? null
+	);
 
 	const parsedAmount = $derived(parseTryInput(paymentAmount));
 
@@ -265,13 +287,14 @@
 	}
 
 	async function submit(): Promise<void> {
-		if (submitting || !preview.valid || !payerReady()) return;
+		if (submitting || !preview.valid || !payerReady() || !destinationAccountId) return;
 		submitting = true;
 		submitError = null;
 		try {
 			const request: CreatePaymentRequest = {
 				amount: parsedAmount!,
 				method,
+				destinationAccountId,
 				idempotencyKey,
 				allocations: preview.lines.map((l) => ({
 					assessmentId: l.assessmentId,
@@ -310,6 +333,7 @@
 			debtMode = 'family';
 			void loadFamilyContext(data.family);
 		}
+		void loadAccountOptions();
 	});
 </script>
 
@@ -617,6 +641,30 @@
 				</select>
 			</div>
 			<div>
+				<Label for="pay-account">{t('payments.destinationAccount')}</Label>
+				<select
+					id="pay-account"
+					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
+					bind:value={destinationAccountId}
+					disabled={accountsLoadError !== null}
+				>
+					<option value="">—</option>
+					{#each accountOptions as account (account.id)}
+						<option value={account.id}>
+							{account.name} ({account.accountType === 'cash'
+								? t('accounts.typeCash')
+								: t('accounts.typeBank')})
+						</option>
+					{/each}
+				</select>
+				<p class="mt-1 text-xs text-muted-foreground">
+					{t('payments.destinationAccountHelp')}
+				</p>
+				{#if accountsLoadError}
+					<p class="mt-1 text-xs text-destructive">{t(accountsLoadError)}</p>
+				{/if}
+			</div>
+			<div>
 				<Label for="pay-received">{t('payments.receivedAt')}</Label>
 				<Input id="pay-received" type="datetime-local" bind:value={receivedAt} />
 				<p class="mt-1 text-xs text-muted-foreground">{t('payments.new.receivedAtHelp')}</p>
@@ -643,6 +691,8 @@
 				</dd>
 				<dt class="font-medium">{t('payments.amount')}</dt>
 				<dd>{parsedAmount !== null ? formatTry(parsedAmount) : '—'}</dd>
+				<dt class="font-medium">{t('payments.destinationAccount')}</dt>
+				<dd>{selectedAccount?.name ?? '—'}</dd>
 				<dt class="font-medium">{t('payments.new.reviewAllocations')}</dt>
 				<dd>{formatTry(preview.allocated)}</dd>
 				<dt class="font-medium">{t('payments.new.reviewUnallocated')}</dt>
@@ -672,7 +722,7 @@
 
 			<div class="flex gap-2">
 				<Button
-					disabled={!preview.valid || !payerReady() || submitting}
+					disabled={!preview.valid || !payerReady() || !destinationAccountId || submitting}
 					onclick={() => void submit()}
 				>
 					{submitting ? t('payments.new.submitting') : t('payments.new.submit')}

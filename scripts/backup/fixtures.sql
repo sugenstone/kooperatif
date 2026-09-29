@@ -11,6 +11,9 @@
 --   shares + ownership history (transfer!) + share events
 --   periods + rules + assessments (per_shareholder AND per_share with
 --   provenance) + exact decimal values incl. 0.01 / 10000.00 / 1234.56
+--   payments + allocations (incl. a fully reversed receipt)
+--   financial accounts + payment/transfer-sourced movements +
+--   a posted account transfer (derived balances must survive restore)
 
 BEGIN;
 
@@ -235,5 +238,72 @@ VALUES
      '2026-01-22T12:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı kayıt',
      '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z');
+
+-- STEP-008: financial accounts, account movements, account transfer.
+-- One CASH + one BANK account; balances are NEVER stored — the drill
+-- verifies the restored movement rows derive them exactly.
+INSERT INTO financial_accounts
+    (id, name, account_type, currency, status, bank_name, iban, created_by)
+VALUES
+    ('f1f1f1f1-0000-4000-8000-000000000001', 'Yedek Kasa', 'cash', 'TRY',
+     'active', NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('f1f1f1f1-0000-4000-8000-000000000002', 'Yedek Banka', 'bank', 'TRY',
+     'active', 'Yedek Bankası A.Ş.', 'TR00 0000 0000 0000 0000 0000 00',
+     '11111111-0000-4000-8000-0000000000aa');
+
+-- Where did each posted payment's money physically go?
+UPDATE payments SET destination_account_id = 'f1f1f1f1-0000-4000-8000-000000000001'
+    WHERE payment_number = 9001;
+UPDATE payments SET destination_account_id = 'f1f1f1f1-0000-4000-8000-000000000002'
+    WHERE payment_number = 9002;
+
+-- Payment-sourced movements: 9001 active on cash; 9002 reversed on
+-- bank (reversal bookkeeping survives the restore).
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    ('f2f2f2f2-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 150.00, 'payment',
+     'dddddddd-0000-4000-8000-000000000001', '2026-01-20T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z'),
+    ('f2f2f2f2-0000-4000-8000-000000000002',
+     'f1f1f1f1-0000-4000-8000-000000000002', 'inflow', 30.00, 'payment',
+     'dddddddd-0000-4000-8000-000000000002', '2026-01-22T09:00:00Z',
+     'reversed', '2026-01-22T12:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı kayıt',
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z');
+
+-- One posted transfer cash → bank 40.00 (two linked legs, one row).
+INSERT INTO account_transfers
+    (id, transfer_number, source_account_id, destination_account_id, amount,
+     currency, occurred_at, note, status, idempotency_key,
+     idempotency_fingerprint, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('f3f3f3f3-0000-4000-8000-000000000001', 9001,
+     'f1f1f1f1-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000002',
+     40.00, 'TRY', '2026-01-25T10:00:00Z', 'drill: kasa→banka', 'posted',
+     'drill-tidem-0001', 'drill-tfp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-25T10:00:00Z', '2026-01-25T10:00:00Z');
+
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    ('f2f2f2f2-0000-4000-8000-000000000003',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 40.00, 'transfer',
+     'f3f3f3f3-0000-4000-8000-000000000001', '2026-01-25T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z'),
+    ('f2f2f2f2-0000-4000-8000-000000000004',
+     'f1f1f1f1-0000-4000-8000-000000000002', 'inflow', 40.00, 'transfer',
+     'f3f3f3f3-0000-4000-8000-000000000001', '2026-01-25T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z');
 
 COMMIT;

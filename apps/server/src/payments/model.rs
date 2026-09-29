@@ -75,9 +75,11 @@ impl AllocationStatus {
     }
 }
 
-/// How the value was handed over (docs/06 §10). This is recording
-/// metadata only: it does NOT imply a destination financial account —
-/// cashbox/bank/ledger accounts are deferred domains.
+/// How the value was handed over (docs/06 §10). Recording metadata
+/// only: HOW the money arrived — never WHERE it is held. The
+/// destination Financial Account (STEP-008) is a separate required
+/// field; a cash-method Payment may still land in a bank account and
+/// vice versa. Ledger accounts remain a deferred domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaymentMethod {
     Cash,
@@ -171,6 +173,10 @@ pub struct PaymentFingerprint<'a> {
     pub method: PaymentMethod,
     pub received_at: OffsetDateTime,
     pub note: Option<&'a str>,
+    /// STEP-008: the destination Financial Account is part of the
+    /// fingerprint — replaying the same key with a different account
+    /// is a different command (409).
+    pub destination_account_id: uuid::Uuid,
     pub allocations: &'a [(uuid::Uuid, Decimal)],
 }
 
@@ -190,6 +196,7 @@ pub fn idempotency_fingerprint(input: &PaymentFingerprint<'_>) -> String {
         "method": input.method.as_str(),
         "receivedAt": input.received_at,
         "note": input.note,
+        "destinationAccountId": input.destination_account_id,
         "allocations": sorted
             .iter()
             .map(|(id, amount)| serde_json::json!({
@@ -290,6 +297,7 @@ mod tests {
             method: PaymentMethod::Cash,
             received_at: now,
             note: None,
+            destination_account_id: Uuid::from_u128(9),
             allocations: &[(a, Decimal::new(500, 2)), (b, Decimal::new(500, 2))],
         };
         let first = idempotency_fingerprint(&base);
