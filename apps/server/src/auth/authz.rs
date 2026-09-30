@@ -55,6 +55,10 @@ pub mod catalog {
     pub const CREDITS_READ: &str = "credits.read";
     pub const CREDITS_MANAGE: &str = "credits.manage";
 
+    /// STEP-010 — Income/Expense ("Gelir/Gider") surfaces.
+    pub const INCOME_EXPENSE_READ: &str = "income_expense.read";
+    pub const INCOME_EXPENSE_MANAGE: &str = "income_expense.manage";
+
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
     /// contracts (see README "adding a new permission").
@@ -79,6 +83,8 @@ pub mod catalog {
         FINANCIAL_ACCOUNTS_MANAGE,
         CREDITS_READ,
         CREDITS_MANAGE,
+        INCOME_EXPENSE_READ,
+        INCOME_EXPENSE_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -212,7 +218,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 20, "STEP-003..STEP-009 catalog");
+        assert_eq!(catalog::ALL.len(), 22, "STEP-003..STEP-010 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

@@ -213,6 +213,37 @@ export {
 	financialAccountStatusPath
 } from './financial_accounts';
 export type {
+	CategoryStatusChangeRequest,
+	CreateFinancialCategoryRequest,
+	EntryKind,
+	EntryListQuery,
+	EntryStatus,
+	ExpenseEntryList,
+	FinancialCategory,
+	FinancialCategoryList,
+	FinancialCategoryStatus,
+	FinancialCategoryType,
+	IncomeEntryList,
+	IncomeExpenseEntry,
+	OperationalSummary,
+	PostEntryRequest,
+	ReverseEntryRequest,
+	UpdateFinancialCategoryRequest
+} from './income_expense';
+export {
+	EXPENSES_PATH,
+	FINANCIAL_CATEGORIES_PATH,
+	FINANCIAL_CATEGORY_OPTIONS_PATH,
+	INCOME_EXPENSE_SUMMARY_PATH,
+	INCOMES_PATH,
+	expensePath,
+	expenseReversePath,
+	financialCategoryPath,
+	financialCategoryStatusPath,
+	incomePath,
+	incomeReversePath
+} from './income_expense';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

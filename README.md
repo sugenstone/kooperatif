@@ -511,8 +511,9 @@ number: it is the sum of valid account movements (`inflow` adds,
   silently rewrite financial history. Bank metadata (`bank_name`,
   `iban`) is allowed only on `bank` accounts.
 - **`account_movements`** — the immutable financial history (ADR-003).
-  Created **only by domain commands**: `source_type` is `payment` or
-  `transfer` and `source_id` points at the originating row — there is
+  Created **only by domain commands**: `source_type` is `payment`,
+  `transfer`, `income` or `expense` (the last two landed in STEP-010)
+  and `source_id` points at the originating row — there is
   deliberately no arbitrary movement endpoint. `UNIQUE
   (account_id, source_type, source_id)` structurally prevents a source
   posting the same leg twice.
@@ -573,10 +574,79 @@ number: it is the sum of valid account movements (`inflow` adds,
   payment → account posting → UI transfer → insufficient-funds
   rejection → transfer reversal → payment reversal with derived-balance
   proof at every step.
-- **Boundary**: no General Ledger, Income/Expense, Investment,
-  Social Aid finance, Receipt, bank-reconciliation, gold/commodity,
-  refund/disbursement or manual-balance-editing surface exists —
-  deferred domains (docs/07 open decisions).
+- **Boundary**: no General Ledger, Investment, Social Aid finance,
+  Receipt, bank-reconciliation, gold/commodity, refund/disbursement or
+  manual-balance-editing surface exists — deferred domains (docs/07
+  open decisions). Income/Expense landed in STEP-010 below.
+
+## Income & Expense (STEP-010, docs/07 + docs/19)
+
+The money-why domain. **Income and Expense are business events that
+explain why money moved; the Account Movement stays the authoritative
+money record. A posted Income produces exactly ONE inflow movement, a
+posted Expense exactly ONE outflow movement — bound 1:1 both ways
+(`account_movement_id` FK plus `source_type`/`source_id`). There is no
+income/expense balance and no second ledger.**
+
+- **`income_entries` / `expense_entries`** — first-class posted events:
+  stable `income_number`/`expense_number` identity, explicit
+  `financial_account_id` (never inferred from persons), typed
+  `category_id`, exact `NUMERIC(19,2)` TRY amount, `occurred_at`
+  (backdating allowed), `description`, optional `counterparty`
+  (descriptive text — never Person/Shareholder semantics) and
+  `reference_no`. Lifecycle `posted → reversed` is terminal.
+- **`financial_categories`** — one typed table (`income | expense`).
+  A composite FK `(category_id, entry_kind) → (id, category_type)`
+  makes a wrong-typed category impossible at the database level.
+  Categories are creatable, renamable (optimistic `expectedUpdatedAt`)
+  and activatable/deactivatable — never hard-deleted; deactivation
+  blocks only NEW postings, history keeps the relation.
+- **Atomic posting**: entry + exactly one movement insert in one
+  transaction under the account row lock — an Income can never exist
+  without its movement and vice versa. An Expense that would take the
+  account below zero is rejected `409` (STEP-008 rule); an Income
+  reversal that would do the same is rejected identically.
+- **Boundaries hold**: Payments remain `payment`-sourced movements and
+  never appear in Income; Transfers post `transfer` legs and are
+  neither Income nor Expense; Shareholder Credits and Credit
+  Applications still create zero movements. The operational summary
+  (`GET /api/income-expense/summary`) sums posted entries only —
+  `net = incomeTotal − expenseTotal` — and is explicitly NOT the
+  account balance and NOT profit/loss.
+- **Derived surfaces**: `GET|POST /api/incomes`,
+  `GET /api/incomes/{id}`, `POST /api/incomes/{id}/reverse` (same for
+  `/api/expenses`), `GET|POST /api/financial-categories`,
+  `GET /api/financial-categories/options`, `PATCH
+  /api/financial-categories/{id}`, `POST
+  /api/financial-categories/{id}/status-change`, `GET
+  /api/income-expense/summary` (`dateFrom`/`dateTo`). Lists are
+  server-paginated with date/account/category/status/search filters.
+- **Idempotent commands** (ADR-006): posting carries a durable
+  `idempotency_key` + payload fingerprint — same key + same payload
+  replays the created entry, different payload answers `409`.
+- **Status-based reversal** (docs/19): entries flip `posted →
+  reversed` with actor/time/reason and the bound movement reverses in
+  the same transaction — no DELETE endpoint exists anywhere.
+- **Permissions**: `income_expense.read`, `income_expense.manage` —
+  granted to `Sistem Yöneticisi` by migration 0010.
+- **Audit**: `income_created`, `income_reversed`, `expense_created`,
+  `expense_reversed`, `financial_category_created`,
+  `financial_category_updated`, `financial_category_status_changed`
+  land in `security_events`.
+- **Frontend**: `/gelirler` + `/giderler` (filtered, paginated lists),
+  `/yeni` creation forms with preview and tr-TR money input
+  (`parseTryInput` — the HOTFIX-001 canonical boundary), `/{id}`
+  details with movement provenance and reasoned reversal,
+  `/gelir-gider` operational summary (totals + recent entries — NOT a
+  balance sheet) and `/kategoriler` category management. Nav entries
+  are permission-gated (`income_expense.read`).
+- **E2E**: `node scripts/e2e-step010.mjs` drives the real stack —
+  UI income +5000, UI expense −1250, derived-balance checks at every
+  step, summary totals, UI reversal, and a payment that provably never
+  enters income totals.
+- **Boundary**: no General Ledger/double-entry, invoices, vendors,
+  Investment, Social Aid, tax/VAT engine, budgeting, purchase orders
+  or approval workflows — deferred (docs/07, STEP-010 §53).
 
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
@@ -722,7 +792,7 @@ is missing — no insecure silent defaults.
   (`docker compose -f docker/compose.yaml down` keeps it; add `-v` to
   discard).
 - The `migrate` subcommand is the only supported way to apply migrations.
-- Obligation + money-received + financial-account schema now exists
-  (STEP-006/007/008); Ledger/Receipt/Collection Session and the
-  income/expense/investment surfaces intentionally do not — they belong
+- Obligation + money-received + financial-account + income/expense
+  schema now exists (STEP-006/007/008/010); Ledger/Receipt/Collection
+  Session and the investment surfaces intentionally do not — they belong
   to later reviewed STEPs (ADR-003/ADR-004).

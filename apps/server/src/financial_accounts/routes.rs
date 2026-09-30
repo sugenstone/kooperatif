@@ -233,8 +233,12 @@ fn transfer_dto(row: &account_repo::AccountTransferRow) -> AccountTransferDto {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountListQuery {
-    #[serde(flatten)]
-    pub list: ListQuery,
+    // Inlined instead of `#[serde(flatten)]`: serde_urlencoded cannot
+    // coerce numeric types through flattened maps (`pageSize=20` →
+    // "invalid type: string"), which broke filtered list requests.
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
     pub account_type: Option<String>,
     pub status: Option<String>,
 }
@@ -246,7 +250,12 @@ pub async fn list_accounts(
 ) -> Result<Response, ApiError> {
     authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query.list)?;
+    let list = ListQuery {
+        search: query.search.clone(),
+        page: query.page,
+        page_size: query.page_size,
+    };
+    let (page, page_size) = page_of(&list)?;
     let account_type = match query.account_type.as_deref() {
         None | Some("") => None,
         Some(value) => Some(AccountType::parse(value).ok_or(ApiError::ValidationFailed)?),
@@ -257,7 +266,7 @@ pub async fn list_accounts(
     };
     let rows = account_repo::list_accounts(
         pool,
-        query.list.search.as_deref(),
+        query.search.as_deref(),
         account_type,
         status,
         page,

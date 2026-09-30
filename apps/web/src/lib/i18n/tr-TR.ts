@@ -516,7 +516,100 @@ export const trTR = {
 	'errors.conflict': 'Bu isim zaten kullanılıyor.',
 	'errors.lockout_prevented':
 		'Bu değişiklik, son yönetim yolunu kaldıracağı için güvenlik nedeniyle reddedildi.',
-	'errors.validation_failed': 'Gönderilen bilgi geçersiz.'
+	'errors.validation_failed': 'Gönderilen bilgi geçersiz.',
+
+	// STEP-010 — Gelir / Gider
+	'nav.incomes': 'Gelirler',
+	'nav.expenses': 'Giderler',
+	'nav.incomeExpense': 'Gelir-Gider',
+	'incomeExpense.account': 'Finansal Hesap',
+	'incomeExpense.category': 'Kategori',
+	'incomeExpense.amount': 'Tutar',
+	'incomeExpense.date': 'Tarih',
+	'incomeExpense.occurredAt': 'İşlem Tarihi (opsiyonel)',
+	'incomeExpense.occurredAtHelp':
+		'Boş bırakılırsa şu anki zaman kaydedilir; geçmiş tarih girilebilir.',
+	'incomeExpense.description': 'Açıklama',
+	'incomeExpense.referenceNo': 'Belge / Referans No (isteğe bağlı)',
+	'incomeExpense.status': 'Durum',
+	'incomeExpense.statusPosted': 'Kayıtlı',
+	'incomeExpense.statusReversed': 'Ters Kayıt',
+	'incomeExpense.reversedAt': 'Ters Kayıt Tarihi',
+	'incomeExpense.reversalReason': 'Ters Kayıt Gerekçesi',
+	'incomeExpense.reverseReasonPlaceholder': 'Ters kayıt gerekçesi (zorunlu)',
+	'incomeExpense.movement': 'Bağlı Hesap Hareketi',
+	'incomeExpense.filters.from': 'Başlangıç Tarihi',
+	'incomeExpense.filters.to': 'Bitiş Tarihi',
+	'incomeExpense.filters.apply': 'Filtrele',
+	'incomeExpense.filters.clear': 'Temizle',
+	'incomeExpense.all': 'Tümü',
+	'incomeExpense.errors.invalidAmount': 'Geçerli bir tutar girin (ör. 500,00).',
+	'incomeExpense.errors.required': 'Hesap, kategori, tutar ve açıklama zorunludur.',
+
+	'income.title': 'Gelirler',
+	'income.description':
+		'Tahsilat dışı operasyonel gelir kayıtları. Her gelir, seçilen finansal hesaba tek bir hareket yazar.',
+	'income.create': 'Yeni Gelir',
+	'income.empty': 'Gelir kaydı bulunamadı.',
+	'income.number': 'Gelir No',
+	'income.detail': 'Gelir Detayı',
+	'income.counterparty': 'Kaynak (isteğe bağlı)',
+	'income.new.title': 'Yeni Gelir',
+	'income.new.preview': 'Gelir Önizlemesi',
+	'income.new.submit': 'Geliri Kaydet',
+	'income.new.submitting': 'Kaydediliyor…',
+	'income.reverse': 'Geliri Ters Kaydet',
+	'income.confirmReverse':
+		'Gelir kaydı tersine çevrilecek; bağlı hesap hareketi de ters kayıt olur, kayıtlar silinmez. Onaylıyor musunuz?',
+	'income.errors.conflict':
+		'İşlem reddedildi: kayıt değişti veya aynı anahtar farklı içerikle kullanıldı.',
+
+	'expense.title': 'Giderler',
+	'expense.description':
+		'Operasyonel gider kayıtları. Her gider, seçilen finansal hesaptan tek bir çıkış hareketi yazar.',
+	'expense.create': 'Yeni Gider',
+	'expense.empty': 'Gider kaydı bulunamadı.',
+	'expense.number': 'Gider No',
+	'expense.detail': 'Gider Detayı',
+	'expense.counterparty': 'Ödeme Yapılan Taraf (isteğe bağlı)',
+	'expense.new.title': 'Yeni Gider',
+	'expense.new.preview': 'Gider Önizlemesi',
+	'expense.new.submit': 'Gideri Kaydet',
+	'expense.new.submitting': 'Kaydediliyor…',
+	'expense.reverse': 'Gideri Ters Kaydet',
+	'expense.confirmReverse':
+		'Gider kaydı tersine çevrilecek; bağlı hesap hareketi de ters kayıt olur, kayıtlar silinmez. Onaylıyor musunuz?',
+	'expense.errors.conflict':
+		'İşlem reddedildi: hesap bakiyesi yetersiz veya kayıt değişti. Sayfayı yenileyip tekrar deneyin.',
+
+	'incomeExpense.summary.title': 'Gelir-Gider Özeti',
+	'incomeExpense.summary.description':
+		'Operasyonel gelir/gider özeti. Bu bir hesap bakiyesi değildir; tahsilatlar, transferler ve avanslar bu toplama dahil değildir.',
+	'incomeExpense.summary.incomeTotal': 'Toplam Gelir',
+	'incomeExpense.summary.expenseTotal': 'Toplam Gider',
+	'incomeExpense.summary.net': 'Net Fark',
+	'incomeExpense.summary.recentIncome': 'Son Gelirler',
+	'incomeExpense.summary.recentExpense': 'Son Giderler',
+	'incomeExpense.summary.manageCategories': 'Kategori Yönetimi',
+
+	'categories.title': 'Gelir/Gider Kategorileri',
+	'categories.description':
+		'Kategoriler kayıtlı gelir/gider türlerini tanımlar. Geçmiş kayıtlar korunur; pasifleştirme yalnızca yeni kayıtları engeller.',
+	'categories.create': 'Yeni Kategori',
+	'categories.name': 'Kategori Adı',
+	'categories.namePlaceholder': 'Örn. Kırtasiye',
+	'categories.type': 'Tip',
+	'categories.typeIncome': 'Gelir',
+	'categories.typeExpense': 'Gider',
+	'categories.status': 'Durum',
+	'categories.active': 'Aktif',
+	'categories.inactive': 'Pasif',
+	'categories.entryCount': 'Kayıt Sayısı',
+	'categories.rename': 'Yeniden Adlandır',
+	'categories.activate': 'Aktifleştir',
+	'categories.deactivate': 'Pasifleştir',
+	'categories.empty': 'Kategori bulunamadı.',
+	'categories.errors.duplicate': 'Bu isimde bir kategori zaten var.'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

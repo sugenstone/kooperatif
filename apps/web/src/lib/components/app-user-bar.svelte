@@ -41,6 +41,11 @@
 			</Button>
 			<Button variant="ghost" size="sm" href="/transferler">{t('nav.transfers')}</Button>
 		{/if}
+		{#if can('income_expense.read')}
+			<Button variant="ghost" size="sm" href="/gelirler">{t('nav.incomes')}</Button>
+			<Button variant="ghost" size="sm" href="/giderler">{t('nav.expenses')}</Button>
+			<Button variant="ghost" size="sm" href="/gelir-gider">{t('nav.incomeExpense')}</Button>
+		{/if}
 		{#if can('roles.read')}
 			<Button variant="ghost" size="sm" href="/roller">{t('nav.roles')}</Button>
 		{/if}

@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 20],
+			['permissions', 22],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -187,10 +187,13 @@ async function main() {
 			['payments', 3],
 			['payment_allocations', 3],
 			['financial_accounts', 2],
-			['account_movements', 5],
+			['account_movements', 8],
 			['account_transfers', 1],
 			['shareholder_credits', 1],
-			['credit_applications', 2]
+			['credit_applications', 2],
+			['financial_categories', 12],
+			['income_entries', 1],
+			['expense_entries', 2]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -262,6 +265,21 @@ async function main() {
 			[
 				"SELECT c.credit_number||'|'||p.name||'|'||ap.mode FROM credit_applications ap JOIN shareholder_credits c ON c.id=ap.credit_id JOIN assessments a ON a.id=ap.assessment_id JOIN periods p ON p.id=a.period_id WHERE ap.status='active'",
 				'9001|Yedek Dönem A|automatic'
+			],
+			// Income 9001 → its ONE movement, provenance 'income' (STEP-010).
+			[
+				"SELECT m.direction||'|'||m.source_type||'|'||(m.source_id=i.id)::text FROM income_entries i JOIN account_movements m ON m.id=i.account_movement_id WHERE i.income_number=9001",
+				'inflow|income|true'
+			],
+			// Expense 9001 → typed category + account.
+			[
+				"SELECT c.name||'|'||c.category_type||'|'||a.name FROM expense_entries e JOIN financial_categories c ON c.id=e.category_id JOIN financial_accounts a ON a.id=e.financial_account_id WHERE e.expense_number=9001",
+				'Yedek Gider Türü|expense|Yedek Kasa'
+			],
+			// Reversed expense 9002 keeps entry AND movement reversal bookkeeping.
+			[
+				"SELECT e.status||'|'||m.status||'|'||e.reversal_reason FROM expense_entries e JOIN account_movements m ON m.id=e.account_movement_id WHERE e.expense_number=9002",
+				'reversed|reversed|drill: hatalı gider'
 			]
 		];
 		let allRel = true;
@@ -309,13 +327,14 @@ async function main() {
 			"SELECT coalesce(sum(amount),0)::text FROM payment_allocations WHERE assessment_id='acacacac-0000-4000-8000-000000000001' AND status='active'",
 			'100.00'
 		);
-		// Derived balances on the RESTORED copy — cash: +150 -40 = 110;
-		// bank: +30 reversed (excluded) +40 = 40. Balances are never
-		// stored; the restored movement history must derive them.
+		// Derived balances on the RESTORED copy — cash: +150 -40 +80
+		// +500 (income) −60 (expense) = 630; the reversed 25.00 expense is
+		// excluded. Bank: +30 reversed (excluded) +40 = 40. Balances are
+		// never stored; the restored movement history must derive them.
 		expect(
-			'Derived cash balance (150-40+80=190.00)',
+			'Derived cash balance (150-40+80+500-60=630.00)',
 			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000001' AND status='active'",
-			'190.00'
+			'630.00'
 		);
 		expect(
 			'Derived bank balance (reversed leg excluded → 40.00)',
@@ -325,7 +344,20 @@ async function main() {
 		expect(
 			'Reversed movement history preserved',
 			"SELECT count(*) FROM account_movements WHERE status='reversed' AND reversed_by IS NOT NULL AND reversal_reason IS NOT NULL",
-			'1'
+			'2'
+		);
+		// STEP-010: entry exactness + operational totals on the restored
+		// copy — posted income 500.00, posted expense 60.00 (the reversed
+		// 25.00 counts in neither totals nor balance).
+		expect(
+			'Income/expense precision (500.00/60.00/25.00)',
+			"SELECT json_agg(amount::text ORDER BY amount)::jsonb = '[\"25.00\",\"60.00\"]'::jsonb FROM expense_entries",
+			't'
+		);
+		expect(
+			'Operational totals (posted only: 500/60/440)',
+			"SELECT (SELECT coalesce(sum(amount),0)::text FROM income_entries WHERE status='posted')||'|'||(SELECT coalesce(sum(amount),0)::text FROM expense_entries WHERE status='posted')||'|'||((SELECT coalesce(sum(amount),0) FROM income_entries WHERE status='posted')-(SELECT coalesce(sum(amount),0) FROM expense_entries WHERE status='posted'))::text",
+			'500.00|60.00|440.00'
 		);
 
 		// STEP-009 derived truths on the restored copy:
@@ -446,6 +478,42 @@ async function main() {
 				'credit application idempotency key unique',
 				`INSERT INTO credit_applications (credit_id, assessment_id, amount, mode, idempotency_key, created_by)
 				 VALUES ('a9a9a9a9-0000-4000-8000-000000000001','acacacac-0000-4000-8000-000000000001',1,'manual','drill-capp-0001','11111111-0000-4000-8000-0000000000aa')`
+			],
+			// STEP-010 invariants must still BEHAVE after restore.
+			[
+				'category (type,name) unique',
+				`INSERT INTO financial_categories (category_type, name, created_by)
+				 VALUES ('income','Yedek Gelir Türü  ','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'income positive amount check',
+				`INSERT INTO income_entries (financial_account_id, category_id, amount, occurred_at, description, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','c0c0c0c0-0000-4000-8000-000000000001',0,now(),'drill','f2f2f2f2-0000-4000-8000-0000000099aa','drill-ix','drill-ix','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'income idempotency key unique',
+				`INSERT INTO income_entries (financial_account_id, category_id, amount, occurred_at, description, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','c0c0c0c0-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-0000000099bb','drill-iidem-0001','drill-iy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'income reversal consistency check',
+				`INSERT INTO income_entries (financial_account_id, category_id, amount, occurred_at, description, account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','c0c0c0c0-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-0000000099cc','reversed','drill-iz','drill-iz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'income/expense category-type composite FK',
+				`INSERT INTO expense_entries (financial_account_id, category_id, amount, occurred_at, description, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','c0c0c0c0-0000-4000-8000-000000000001',1,now(),'drill: income kategorisi giderde','f2f2f2f2-0000-4000-8000-0000000099dd','drill-ex','drill-ex','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'entry→movement 1:1 unique',
+				`INSERT INTO income_entries (financial_account_id, category_id, amount, occurred_at, description, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','c0c0c0c0-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-000000000006','drill-iw','drill-iw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'income movement leg uniqueness',
+				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','inflow',1,'income','e1e1e1e1-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
 			]
 		];
 		let allConstraints = true;

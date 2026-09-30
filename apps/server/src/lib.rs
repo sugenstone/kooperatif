@@ -15,6 +15,7 @@ pub mod credits;
 pub mod db;
 pub mod financial_accounts;
 pub mod http;
+pub mod income_expense;
 pub mod observability;
 pub mod parties;
 pub mod payments;

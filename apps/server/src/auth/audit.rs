@@ -55,6 +55,13 @@ pub enum SecurityEventType {
     ShareholderCreditReversed,
     CreditApplied,
     CreditApplicationReversed,
+    IncomePosted,
+    IncomeReversed,
+    ExpensePosted,
+    ExpenseReversed,
+    FinancialCategoryCreated,
+    FinancialCategoryUpdated,
+    FinancialCategoryStatusChanged,
 }
 
 impl SecurityEventType {
@@ -104,6 +111,13 @@ impl SecurityEventType {
             Self::ShareholderCreditReversed => "shareholder_credit_reversed",
             Self::CreditApplied => "credit_applied",
             Self::CreditApplicationReversed => "credit_application_reversed",
+            Self::IncomePosted => "income_posted",
+            Self::IncomeReversed => "income_reversed",
+            Self::ExpensePosted => "expense_posted",
+            Self::ExpenseReversed => "expense_reversed",
+            Self::FinancialCategoryCreated => "financial_category_created",
+            Self::FinancialCategoryUpdated => "financial_category_updated",
+            Self::FinancialCategoryStatusChanged => "financial_category_status_changed",
         }
     }
 }

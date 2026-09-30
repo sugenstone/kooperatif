@@ -120,11 +120,15 @@ impl MovementDirection {
 }
 
 /// Structured movement provenance — the ONLY allowed movement sources
-/// in STEP-008 (docs/07 §movements; future sources extend the enum).
+/// (docs/07 §movements). STEP-008: payment/transfer. STEP-010 adds
+/// income/expense — domain commands only, still no arbitrary
+/// movement endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovementSource {
     Payment,
     Transfer,
+    Income,
+    Expense,
 }
 
 impl MovementSource {
@@ -132,6 +136,8 @@ impl MovementSource {
         match self {
             Self::Payment => "payment",
             Self::Transfer => "transfer",
+            Self::Income => "income",
+            Self::Expense => "expense",
         }
     }
 
@@ -139,6 +145,8 @@ impl MovementSource {
         match value {
             "payment" => Some(Self::Payment),
             "transfer" => Some(Self::Transfer),
+            "income" => Some(Self::Income),
+            "expense" => Some(Self::Expense),
             _ => None,
         }
     }

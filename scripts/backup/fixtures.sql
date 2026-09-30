@@ -16,6 +16,8 @@
 --   a posted account transfer (derived balances must survive restore)
 --   shareholder credits + credit applications (automatic + a REVERSED
 --   manual application) — entitlement history, never new movements
+--   financial categories + income/expense entries (incl. a REVERSED
+--   expense) bound 1:1 to income/expense-sourced movements
 
 BEGIN;
 
@@ -370,5 +372,93 @@ VALUES
      '2026-01-29T09:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı mahsup',
      '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:07:00Z');
+
+-- STEP-010: financial categories + income/expense entries.
+-- Each posted entry owns exactly ONE movement; provenance is relational
+-- (source_type 'income'/'expense' + account_movement_id). The reversed
+-- expense keeps both entry AND movement reversal bookkeeping.
+INSERT INTO financial_categories
+    (id, category_type, name, description, status, created_by) VALUES
+    ('c0c0c0c0-0000-4000-8000-000000000001', 'income', 'Yedek Gelir Türü',
+     'drill: gelir kategorisi', 'active',
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('c0c0c0c0-0000-4000-8000-000000000002', 'expense', 'Yedek Gider Türü',
+     'drill: gider kategorisi', 'active',
+     '11111111-0000-4000-8000-0000000000aa');
+
+-- Movements first: the entry's account_movement_id is a hard FK.
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    -- Income 9001: +500.00 inflow on cash.
+    ('f2f2f2f2-0000-4000-8000-000000000006',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 500.00, 'income',
+     'e1e1e1e1-0000-4000-8000-000000000001', '2026-01-30T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T10:00:00Z'),
+    -- Expense 9001: -60.00 outflow on cash, still active.
+    ('f2f2f2f2-0000-4000-8000-000000000007',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 60.00, 'expense',
+     'e2e2e2e2-0000-4000-8000-000000000001', '2026-01-30T11:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T11:00:00Z'),
+    -- Expense 9002: -25.00 outflow on cash, REVERSED (excluded from
+    -- derived balance; the row survives with reversal bookkeeping).
+    ('f2f2f2f2-0000-4000-8000-000000000008',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 25.00, 'expense',
+     'e2e2e2e2-0000-4000-8000-000000000002', '2026-01-30T12:00:00Z',
+     'reversed', '2026-01-30T14:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı gider',
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T12:00:00Z');
+
+INSERT INTO income_entries
+    (id, income_number, financial_account_id, category_id, amount,
+     currency, occurred_at, description, counterparty, reference_no,
+     account_movement_id, status, idempotency_key, idempotency_fingerprint,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('e1e1e1e1-0000-4000-8000-000000000001', 9001,
+     'f1f1f1f1-0000-4000-8000-000000000001',
+     'c0c0c0c0-0000-4000-8000-000000000001', 500.00, 'TRY',
+     '2026-01-30T10:00:00Z', 'drill: stant kirası geliri',
+     'Yedek Pazar Yeri', 'DRILL-G-001',
+     'f2f2f2f2-0000-4000-8000-000000000006', 'posted',
+     'drill-iidem-0001', 'drill-iifp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-30T10:00:00Z', '2026-01-30T10:00:00Z');
+
+INSERT INTO expense_entries
+    (id, expense_number, financial_account_id, category_id, amount,
+     currency, occurred_at, description, counterparty, reference_no,
+     account_movement_id, status, idempotency_key, idempotency_fingerprint,
+     reversed_at, reversed_by, reversal_reason,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('e2e2e2e2-0000-4000-8000-000000000001', 9001,
+     'f1f1f1f1-0000-4000-8000-000000000001',
+     'c0c0c0c0-0000-4000-8000-000000000002', 60.00, 'TRY',
+     '2026-01-30T11:00:00Z', 'drill: kırtasiye alımı',
+     'Yedek Kırtasiye', 'DRILL-X-001',
+     'f2f2f2f2-0000-4000-8000-000000000007', 'posted',
+     'drill-eidem-0001', 'drill-eifp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-30T11:00:00Z', '2026-01-30T11:00:00Z'),
+    -- Reversed expense — entry and movement reversal bookkeeping
+    -- must survive the restore.
+    ('e2e2e2e2-0000-4000-8000-000000000002', 9002,
+     'f1f1f1f1-0000-4000-8000-000000000001',
+     'c0c0c0c0-0000-4000-8000-000000000002', 25.00, 'TRY',
+     '2026-01-30T12:00:00Z', 'drill: hatalı gider kaydı',
+     NULL, NULL,
+     'f2f2f2f2-0000-4000-8000-000000000008', 'reversed',
+     'drill-eidem-0002', 'drill-eifp-0002',
+     '2026-01-30T14:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı gider',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-30T12:00:00Z', '2026-01-30T14:00:00Z');
 
 COMMIT;

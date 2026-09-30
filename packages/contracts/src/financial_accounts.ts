@@ -11,9 +11,13 @@
  * two paired Account Movement legs (source outflow + destination
  * inflow), atomic, same amount, same currency. Never Income/Expense.
  *
- * Deliberately absent: General Ledger, Income, Expense, Investment,
- * Social Aid, Receipt, bank reconciliation, gold/commodity units,
- * cross-currency exchange.
+ * STEP-010 adds `income`/`expense` movement sources — Income/Expense
+ * are business events bound 1:1 to their movement (see
+ * income_expense.ts).
+ *
+ * Deliberately absent: General Ledger, Investment, Social Aid,
+ * Receipt, bank reconciliation, gold/commodity units, cross-currency
+ * exchange.
  */
 
 import type { DecimalString } from './decimal';
@@ -23,7 +27,7 @@ export type FinancialAccountType = 'cash' | 'bank';
 export type FinancialAccountStatus = 'active' | 'inactive';
 export type MovementDirection = 'inflow' | 'outflow';
 export type MovementStatus = 'active' | 'reversed';
-export type MovementSourceType = 'payment' | 'transfer';
+export type MovementSourceType = 'payment' | 'transfer' | 'income' | 'expense';
 export type TransferStatus = 'posted' | 'reversed';
 
 export interface FinancialAccount {

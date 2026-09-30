@@ -174,5 +174,16 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'errors.not_found': 'Record not found.',
 	'roles.title': 'Roles',
 	'users.title': 'Users',
-	'errors.permission_denied': 'You do not have permission for this action.'
+	'errors.permission_denied': 'You do not have permission for this action.',
+	'nav.incomes': 'Income',
+	'nav.expenses': 'Expenses',
+	'nav.incomeExpense': 'Income-Expense',
+	'income.title': 'Income',
+	'income.create': 'New Income',
+	'expense.title': 'Expenses',
+	'expense.create': 'New Expense',
+	'incomeExpense.summary.title': 'Income-Expense Summary',
+	'incomeExpense.statusPosted': 'Posted',
+	'incomeExpense.statusReversed': 'Reversed',
+	'categories.title': 'Income/Expense Categories'
 };
