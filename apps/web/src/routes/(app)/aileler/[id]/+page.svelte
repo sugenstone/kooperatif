@@ -143,6 +143,9 @@
 								<TableHead>{t('families.members')}</TableHead>
 								<TableHead>{t('payments.summary.openCount')}</TableHead>
 								<TableHead>{t('payments.new.remaining')}</TableHead>
+								{#if can('credits.read')}
+									<TableHead>{t('families.memberCredit')}</TableHead>
+								{/if}
 							</TableRow>
 						</TableHeader>
 						<TableBody>
@@ -158,6 +161,9 @@
 									</TableCell>
 									<TableCell>{member.openAssessmentCount}</TableCell>
 									<TableCell>{formatTry(member.remainingAmount)}</TableCell>
+									{#if can('credits.read')}
+										<TableCell>{formatTry(member.creditAvailable)}</TableCell>
+									{/if}
 								</TableRow>
 							{/each}
 						</TableBody>

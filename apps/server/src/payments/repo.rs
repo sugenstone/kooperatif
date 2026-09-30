@@ -28,6 +28,7 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::model::PaymentStatus;
+use crate::credits::repo as credit_repo;
 use crate::financial_accounts::model::{MovementDirection, MovementSource};
 use crate::financial_accounts::repo as account_repo;
 use crate::parties::model as party_model;
@@ -59,6 +60,9 @@ pub struct PaymentRow {
     pub destination_account_name: Option<String>,
     /// Derived: SUM of ACTIVE allocations (never a stored flag).
     pub allocated_amount: Decimal,
+    /// STEP-009 derived: SUM of ACTIVE Shareholder Credits sourced
+    /// from this Payment's remainder.
+    pub credited_amount: Decimal,
     pub reversed_at: Option<OffsetDateTime>,
     pub reversal_reason: Option<String>,
     pub created_by_name: Option<String>,
@@ -74,6 +78,7 @@ const PAYMENT_SELECT: &str = "SELECT pay.id, pay.payment_number, pay.status, \
     ps.id AS payer_shareholder_id, \
     pay.destination_account_id, fa.name AS destination_account_name, \
     COALESCE(al.allocated, 0) AS allocated_amount, \
+    COALESCE(cr.credited, 0) AS credited_amount, \
     pay.reversed_at, pay.reversal_reason, \
     cb.display_name AS created_by_name, rb.display_name AS reversed_by_name, \
     pay.created_at \
@@ -85,6 +90,10 @@ LEFT JOIN ( \
     SELECT payment_id, sum(amount) AS allocated \
     FROM payment_allocations WHERE status = 'active' GROUP BY payment_id \
 ) al ON al.payment_id = pay.id \
+LEFT JOIN ( \
+    SELECT source_payment_id, sum(amount) AS credited \
+    FROM shareholder_credits WHERE status = 'active' GROUP BY source_payment_id \
+) cr ON cr.source_payment_id = pay.id \
 LEFT JOIN users cb ON cb.id = pay.created_by \
 LEFT JOIN users rb ON rb.id = pay.reversed_by ";
 
@@ -269,8 +278,13 @@ pub async fn shareholder_open_assessments(
          FROM assessments a \
          JOIN periods p ON p.id = a.period_id \
          LEFT JOIN ( \
-             SELECT assessment_id, sum(amount) AS paid \
-             FROM payment_allocations WHERE status = 'active' GROUP BY assessment_id \
+             SELECT assessment_id, sum(amount) AS paid FROM ( \
+                 SELECT assessment_id, amount FROM payment_allocations \
+                 WHERE status = 'active' \
+                 UNION ALL \
+                 SELECT assessment_id, amount FROM credit_applications \
+                 WHERE status = 'active' \
+             ) settled GROUP BY assessment_id \
          ) al ON al.assessment_id = a.id \
          WHERE a.shareholder_id = $1 AND a.status = 'active' \
          ORDER BY p.period_number DESC, a.id",
@@ -303,8 +317,13 @@ pub async fn shareholder_financial_summary(
             COALESCE(sum(a.amount - COALESCE(al.paid, 0)), 0) AS total_remaining \
          FROM assessments a \
          LEFT JOIN ( \
-             SELECT assessment_id, sum(amount) AS paid \
-             FROM payment_allocations WHERE status = 'active' GROUP BY assessment_id \
+             SELECT assessment_id, sum(amount) AS paid FROM ( \
+                 SELECT assessment_id, amount FROM payment_allocations \
+                 WHERE status = 'active' \
+                 UNION ALL \
+                 SELECT assessment_id, amount FROM credit_applications \
+                 WHERE status = 'active' \
+             ) settled GROUP BY assessment_id \
          ) al ON al.assessment_id = a.id \
          WHERE a.shareholder_id = $1 AND a.status = 'active'",
     )
@@ -340,8 +359,13 @@ pub async fn period_financial_summary(
              WHERE a2.period_id = $1 AND pa.status = 'active') AS contributing_payment_count \
          FROM assessments a \
          LEFT JOIN ( \
-             SELECT assessment_id, sum(amount) AS paid \
-             FROM payment_allocations WHERE status = 'active' GROUP BY assessment_id \
+             SELECT assessment_id, sum(amount) AS paid FROM ( \
+                 SELECT assessment_id, amount FROM payment_allocations \
+                 WHERE status = 'active' \
+                 UNION ALL \
+                 SELECT assessment_id, amount FROM credit_applications \
+                 WHERE status = 'active' \
+             ) settled GROUP BY assessment_id \
          ) al ON al.assessment_id = a.id \
          WHERE a.period_id = $1 AND a.status = 'active'",
     )
@@ -359,6 +383,9 @@ pub struct FamilyMemberCollectionRow {
     pub member: ShareholderIdentityRow,
     pub open_assessment_count: i64,
     pub remaining_amount: Decimal,
+    /// STEP-009: this member's OWN derived available credit —
+    /// attribution only; the Family NEVER owns a pooled balance.
+    pub credit_available: Decimal,
 }
 
 pub async fn family_collection_context(
@@ -370,7 +397,8 @@ pub async fn family_collection_context(
             gp.first_name AS guardian_first_name, gp.last_name AS guardian_last_name, \
             f.sequence_number AS family_sequence, s.status AS shareholder_status, \
             COALESCE(o.cnt, 0)::bigint AS open_assessment_count, \
-            COALESCE(o.remaining, 0) AS remaining_amount \
+            COALESCE(o.remaining, 0) AS remaining_amount, \
+            COALESCE(cv.available, 0) AS credit_available \
          FROM shareholder_family_memberships m \
          JOIN families f ON f.id = m.family_id \
          JOIN shareholders s ON s.id = m.shareholder_id AND s.status <> 'voided' \
@@ -382,12 +410,27 @@ pub async fn family_collection_context(
                  sum(a.amount - COALESCE(al.paid, 0)) AS remaining \
              FROM assessments a \
              LEFT JOIN ( \
-                 SELECT assessment_id, sum(amount) AS paid \
-                 FROM payment_allocations WHERE status = 'active' GROUP BY assessment_id \
+                 SELECT assessment_id, sum(amount) AS paid FROM ( \
+                     SELECT assessment_id, amount FROM payment_allocations \
+                     WHERE status = 'active' \
+                     UNION ALL \
+                     SELECT assessment_id, amount FROM credit_applications \
+                     WHERE status = 'active' \
+                 ) settled GROUP BY assessment_id \
              ) al ON al.assessment_id = a.id \
              WHERE a.status = 'active' \
              GROUP BY a.shareholder_id \
          ) o ON o.shareholder_id = s.id \
+         LEFT JOIN ( \
+             SELECT c.shareholder_id, sum(c.amount - COALESCE(ap.applied, 0)) AS available \
+             FROM shareholder_credits c \
+             LEFT JOIN ( \
+                 SELECT credit_id, sum(amount) AS applied FROM credit_applications \
+                 WHERE status = 'active' GROUP BY credit_id \
+             ) ap ON ap.credit_id = c.id \
+             WHERE c.status = 'active' \
+             GROUP BY c.shareholder_id \
+         ) cv ON cv.shareholder_id = s.id \
          WHERE m.family_id = $1 AND m.ended_at IS NULL \
          ORDER BY sp.search_name, s.id",
     )
@@ -456,6 +499,11 @@ pub enum PaymentCommandError {
     /// account's derived balance below zero (funds already moved
     /// out by a Transfer) — 409, requires operator resolution.
     AccountEffectBlocked,
+    /// STEP-009: the Payment funds Shareholder Credits that are
+    /// ALREADY consumed by active Credit Applications — reversing
+    /// would leave debt-settlement effects backed by nothing. The
+    /// applications must be corrected first — 409.
+    CreditEffectBlocked,
     Database(sqlx::Error),
 }
 
@@ -535,22 +583,17 @@ async fn lock_assessments(
     Ok(rows.into_iter().map(|(id, a, s)| (id, (a, s))).collect())
 }
 
-/// SUM of ACTIVE allocations per assessment — recomputed under the row
-/// locks, never trusted from a preview.
+/// SUM of ACTIVE settlement effects per assessment — Payment
+/// allocations PLUS Credit applications (STEP-009: both satisfy debt;
+/// a Credit Application is not a Payment but settles identically).
+/// Recomputed under the row locks, never trusted from a preview.
 async fn paid_map(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Decimal>, PaymentCommandError> {
-    let rows: Vec<(Uuid, Decimal)> = sqlx::query_as(
-        "SELECT assessment_id, sum(amount) FROM payment_allocations \
-         WHERE assessment_id = ANY($1) AND status = 'active' \
-         GROUP BY assessment_id",
-    )
-    .bind(ids)
-    .fetch_all(tx.as_mut())
-    .await
-    .map_err(PaymentCommandError::Database)?;
-    Ok(rows.into_iter().collect())
+    credit_repo::settled_map(tx, ids)
+        .await
+        .map_err(PaymentCommandError::Database)
 }
 
 /// Validate a set of NEW allocations against freshly locked
@@ -625,6 +668,14 @@ pub async fn create_payment(
         .fetch_one(tx.as_mut())
         .await
         .map_err(PaymentCommandError::Database)?;
+        let credited: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(sum(amount), 0) FROM shareholder_credits \
+             WHERE source_payment_id = $1 AND status = 'active'",
+        )
+        .bind(id)
+        .fetch_one(tx.as_mut())
+        .await
+        .map_err(PaymentCommandError::Database)?;
         tx.rollback().await.map_err(PaymentCommandError::Database)?;
         return Ok(PaymentOutcome {
             payment_id: id,
@@ -633,7 +684,7 @@ pub async fn create_payment(
             payer_person_id: command.payer_person_id.unwrap_or_default(),
             created_person: false,
             allocated_amount: allocated,
-            unallocated_amount: command.amount - allocated,
+            unallocated_amount: command.amount - allocated - credited,
             allocation_count: 0,
         });
     }
@@ -719,6 +770,14 @@ pub async fn create_payment(
             .fetch_one(pool)
             .await
             .map_err(PaymentCommandError::Database)?;
+            let credited: Decimal = sqlx::query_scalar(
+                "SELECT COALESCE(sum(amount), 0) FROM shareholder_credits \
+                 WHERE source_payment_id = $1 AND status = 'active'",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .map_err(PaymentCommandError::Database)?;
             let allocation_count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM payment_allocations \
                  WHERE payment_id = $1 AND status = 'active'",
@@ -734,7 +793,7 @@ pub async fn create_payment(
                 payer_person_id,
                 created_person: false,
                 allocated_amount: allocated,
-                unallocated_amount: command.amount - allocated,
+                unallocated_amount: command.amount - allocated - credited,
                 allocation_count,
             });
         }
@@ -824,6 +883,17 @@ pub async fn add_allocations(
     .fetch_one(tx.as_mut())
     .await
     .map_err(PaymentCommandError::Database)?;
+    // STEP-009: remainder already attributed as Shareholder Credit is
+    // NOT allocatable — the reconciliation invariant is
+    // `payment = allocations + credits + unassigned remainder`.
+    let credited: Decimal = sqlx::query_scalar(
+        "SELECT COALESCE(sum(amount), 0) FROM shareholder_credits \
+         WHERE source_payment_id = $1 AND status = 'active'",
+    )
+    .bind(payment_id)
+    .fetch_one(tx.as_mut())
+    .await
+    .map_err(PaymentCommandError::Database)?;
 
     // Existing targets can never receive a second line.
     let existing: HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
@@ -846,7 +916,7 @@ pub async fn add_allocations(
     ids.sort_unstable();
     let locked = lock_assessments(&mut tx, &ids).await?;
     let paid = paid_map(&mut tx, &ids).await?;
-    validate_allocations(&allocations, &locked, &paid, amount - allocated)?;
+    validate_allocations(&allocations, &locked, &paid, amount - allocated - credited)?;
 
     for allocation in &allocations {
         sqlx::query(
@@ -872,7 +942,7 @@ pub async fn add_allocations(
         payer_person_id: Uuid::nil(),
         created_person: false,
         allocated_amount: allocated + added,
-        unallocated_amount: amount - allocated - added,
+        unallocated_amount: amount - allocated - credited - added,
         allocation_count: allocations.len() as i64,
     })
 }
@@ -945,6 +1015,22 @@ pub async fn reverse_payment(
         .await
         .map_err(account_err)?;
     }
+
+    // STEP-009 credit effect: the Payment's Shareholder Credits are
+    // status-based reversed with the same actor/time/reason — unless
+    // one is already CONSUMED by an active Credit Application, in
+    // which case the reversal is rejected (no debt-settlement may be
+    // left backed by an invalid Payment; correct the application
+    // first). Lock order is preserved: payment -> account -> credits.
+    credit_repo::reconcile_credits_of_payment_reversal(&mut tx, payment_id, actor, &reason, now)
+        .await
+        .map_err(|error| match error {
+            credit_repo::CreditCommandError::Consumed => PaymentCommandError::CreditEffectBlocked,
+            credit_repo::CreditCommandError::Database(db) => PaymentCommandError::Database(db),
+            _ => PaymentCommandError::Database(sqlx::Error::Protocol(
+                "unexpected credit error during payment reversal".into(),
+            )),
+        })?;
 
     let reversed = sqlx::query(
         "UPDATE payment_allocations SET status = 'reversed', \

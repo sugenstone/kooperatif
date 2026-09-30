@@ -24,7 +24,7 @@
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { formatTry } from '$lib/money';
+	import { compareDecimals, formatTry } from '$lib/money';
 	import {
 		FAMILIES_PATH,
 		PERSONS_PATH,
@@ -41,9 +41,15 @@
 		shareholderOpenAssessmentsPath,
 		type OpenAssessment,
 		type ShareholderAssessment,
+		type ShareholderCredits,
 		type ShareholderDetail,
 		type ShareholderFinancialSummary,
 		type UpdateShareholderRequest
+	} from '@kooperatif/contracts';
+	import {
+		creditApplicationReversePath,
+		creditReversePath,
+		shareholderCreditsPath
 	} from '@kooperatif/contracts';
 
 	type GuardianChoice = 'keep' | 'none' | 'new' | 'existing';
@@ -55,6 +61,10 @@
 	let assessments = $state<ShareholderAssessment[]>([]);
 	let financialSummary = $state<ShareholderFinancialSummary | null>(null);
 	let openAssessments = $state<OpenAssessment[]>([]);
+	let creditLedger = $state<ShareholderCredits | null>(null);
+	let reversingCreditId = $state<string | null>(null);
+	let reversingApplicationId = $state<string | null>(null);
+	let creditReason = $state('');
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
@@ -99,6 +109,9 @@
 					shareholderFinancialSummaryPath(data.id)
 				);
 				openAssessments = await apiFetch<OpenAssessment[]>(shareholderOpenAssessmentsPath(data.id));
+			}
+			if (can('credits.read')) {
+				creditLedger = await apiFetch<ShareholderCredits>(shareholderCreditsPath(data.id));
 			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
@@ -217,6 +230,46 @@
 				csrfToken: auth.csrfToken,
 				body: { to }
 			});
+			await refresh();
+		} catch (error) {
+			actionError = apiErrorKey(error);
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function reverseCreditRow(): Promise<void> {
+		if (busy || !reversingCreditId || !creditReason.trim()) return;
+		busy = true;
+		actionError = null;
+		try {
+			await apiFetch(creditReversePath(reversingCreditId), {
+				method: 'POST',
+				csrfToken: auth.csrfToken,
+				body: { reversalReason: creditReason.trim() }
+			});
+			reversingCreditId = null;
+			creditReason = '';
+			await refresh();
+		} catch (error) {
+			actionError = apiErrorKey(error);
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function reverseApplicationRow(): Promise<void> {
+		if (busy || !reversingApplicationId || !creditReason.trim()) return;
+		busy = true;
+		actionError = null;
+		try {
+			await apiFetch(creditApplicationReversePath(reversingApplicationId), {
+				method: 'POST',
+				csrfToken: auth.csrfToken,
+				body: { reversalReason: creditReason.trim() }
+			});
+			reversingApplicationId = null;
+			creditReason = '';
 			await refresh();
 		} catch (error) {
 			actionError = apiErrorKey(error);
@@ -597,6 +650,164 @@
 								{/each}
 							</TableBody>
 						</Table>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if can('credits.read') && creditLedger}
+			<Card class="w-full max-w-2xl">
+				<CardHeader>
+					<CardTitle>{t('credits.section')}</CardTitle>
+					<CardDescription>
+						{t('credits.summary.available')}: {formatTry(creditLedger.summary.available)}
+					</CardDescription>
+				</CardHeader>
+				<CardContent class="flex flex-col gap-4">
+					<dl class="grid grid-cols-[minmax(180px,auto)_1fr] gap-x-6 gap-y-2 text-sm">
+						<dt class="font-medium">{t('credits.summary.originated')}</dt>
+						<dd>{formatTry(creditLedger.summary.totalOriginated)}</dd>
+						<dt class="font-medium">{t('credits.summary.applied')}</dt>
+						<dd>{formatTry(creditLedger.summary.totalApplied)}</dd>
+						<dt class="font-medium">{t('credits.summary.available')}</dt>
+						<dd>{formatTry(creditLedger.summary.available)}</dd>
+					</dl>
+					{#if creditLedger.credits.length > 0}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('credits.number')}</TableHead>
+									<TableHead>{t('credits.sourcePayment')}</TableHead>
+									<TableHead>{t('credits.amount')}</TableHead>
+									<TableHead>{t('credits.availableAmount')}</TableHead>
+									<TableHead>{t('credits.status')}</TableHead>
+									<TableHead></TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each creditLedger.credits as credit (credit.id)}
+									<TableRow>
+										<TableCell>{credit.creditNumber}</TableCell>
+										<TableCell>
+											<a
+												class="underline-offset-2 hover:underline"
+												href={resolve(`/tahsilatlar/${credit.sourcePaymentId}`)}
+											>
+												#{credit.paymentNumber}
+											</a>
+										</TableCell>
+										<TableCell>{formatTry(credit.amount)}</TableCell>
+										<TableCell>{formatTry(credit.availableAmount)}</TableCell>
+										<TableCell>
+											{#if credit.status === 'active'}
+												<Badge>{t('credits.statusActive')}</Badge>
+											{:else}
+												<Badge variant="outline">{t('credits.statusReversed')}</Badge>
+											{/if}
+										</TableCell>
+										<TableCell>
+											{#if credit.status === 'active' && compareDecimals(credit.appliedAmount, '0.00') === 0 && can('credits.manage')}
+												<Button
+													variant="ghost"
+													size="sm"
+													onclick={() => (reversingCreditId = credit.id)}
+												>
+													{t('credits.reverse')}
+												</Button>
+											{/if}
+										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+					{#if creditLedger.applications.length > 0}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('assessments.period')}</TableHead>
+									<TableHead>{t('credits.applicationAmount')}</TableHead>
+									<TableHead>{t('credits.mode')}</TableHead>
+									<TableHead>{t('credits.status')}</TableHead>
+									<TableHead></TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each creditLedger.applications as app (app.id)}
+									<TableRow>
+										<TableCell>
+											<a
+												class="underline-offset-2 hover:underline"
+												href={resolve(`/tahakkuklar/${app.assessmentId}`)}
+											>
+												{app.periodName}
+											</a>
+										</TableCell>
+										<TableCell>{formatTry(app.amount)}</TableCell>
+										<TableCell>
+											{app.mode === 'automatic'
+												? t('credits.modeAutomatic')
+												: t('credits.modeManual')}
+										</TableCell>
+										<TableCell>
+											{#if app.status === 'active'}
+												<Badge>{t('credits.statusActive')}</Badge>
+											{:else}
+												<Badge variant="outline">{t('credits.statusReversed')}</Badge>
+											{/if}
+										</TableCell>
+										<TableCell>
+											{#if app.status === 'active' && can('credits.manage')}
+												<Button
+													variant="ghost"
+													size="sm"
+													onclick={() => (reversingApplicationId = app.id)}
+												>
+													{t('credits.reverseApplication')}
+												</Button>
+											{/if}
+										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+					{#if reversingCreditId || reversingApplicationId}
+						<div class="flex flex-col gap-2 border-t pt-4">
+							<Label for="ledger-reason">{t('payments.reversalReason')}</Label>
+							<Input
+								id="ledger-reason"
+								bind:value={creditReason}
+								placeholder={t('payments.reverseReasonPlaceholder')}
+							/>
+							<p class="text-xs text-muted-foreground">
+								{reversingCreditId
+									? t('credits.confirmReverse')
+									: t('credits.confirmReverseApplication')}
+							</p>
+							<div class="flex gap-2">
+								<Button
+									variant="destructive"
+									size="sm"
+									disabled={busy || !creditReason.trim()}
+									onclick={() =>
+										void (reversingCreditId ? reverseCreditRow() : reverseApplicationRow())}
+								>
+									{t('payments.reverse')}
+								</Button>
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => {
+										reversingCreditId = null;
+										reversingApplicationId = null;
+										creditReason = '';
+									}}
+								>
+									{t('common.cancel')}
+								</Button>
+							</div>
+						</div>
 					{/if}
 				</CardContent>
 			</Card>

@@ -673,6 +673,9 @@ pub async fn generate_assessments(
             "assessment_count": summary.assessment_count,
             "share_source_count": summary.share_source_count,
             "total_amount": period_model::canonical_amount(summary.total_amount),
+            "credit_applied_amount":
+                period_model::canonical_amount(summary.credit_applied_amount),
+            "credit_application_count": summary.credit_application_count,
         }),
     )
     .await;

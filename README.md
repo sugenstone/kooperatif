@@ -578,6 +578,62 @@ number: it is the sum of valid account movements (`inflow` adds,
   refund/disbursement or manual-balance-editing surface exists —
   deferred domains (docs/07 open decisions).
 
+## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
+
+The money-who boundary. **Money location is not credit ownership: a
+Shareholder Credit ("Fazla Ödeme") is an entitlement over a Payment's
+explicitly assigned remainder — it is not new cash and it never creates
+an Account Movement. A credit application is not a Payment. Credit
+balance is never a stored number: it is `SUM(active credits) −
+SUM(active applications)`, always derived.**
+
+- **`shareholder_credits`** — the origin record: `source_payment_id` +
+  exactly one beneficiary `shareholder_id` + `credit_number` (identity,
+  also the FIFO order). The beneficiary is always chosen explicitly —
+  never inferred from payer, guardian or Family. `SUM(credits) <=
+  payment remainder` is enforced under the Payment row lock.
+- **`credit_applications`** — settlement history: which credit consumed
+  which Assessment, `mode` `automatic | manual`. Applications are not
+  Payments and create no movements; the Assessment's settled amount is
+  `SUM(active allocations) + SUM(active applications)`.
+- **Automatic offset**: assigning a credit sweeps the beneficiary's
+  existing open Assessments oldest-due-first; generating new
+  Assessments sweeps the beneficiary's held credit FIFO
+  (`credit_number` ASC) inside the same transaction — deterministic
+  and explainable (docs/05).
+- **Manual apply**: `POST /api/assessments/{id}/credit-applications`
+  consumes the Assessment's own debtor's credits FIFO — a manual
+  command may span multiple credit rows, the idempotency key lands on
+  the first inserted row only (UNIQUE key).
+- **Status-based reversal** (docs/19): credits and applications flip
+  `active → reversed` with actor/time/reason; originals survive. An
+  unconsumed credit reversal restores the Payment remainder; a consumed
+  credit cannot be reversed and also blocks the source Payment's
+  reversal (`409`) — money ownership is never silently rewritten.
+- **Derived surfaces**: `GET /api/shareholders/{id}/credits` (ledger:
+  summary + origins + applications), `GET|POST
+  /api/payments/{id}/credits`, `POST /api/credits/{id}/reverse`,
+  `GET|POST /api/assessments/{id}/credit-applications`,
+  `POST /api/credit-applications/{id}/reverse`. Payment detail exposes
+  its sourced credits; unallocated amount subtracts assigned credit.
+- **Idempotent commands** (ADR-006): assign + manual apply carry
+  durable `idempotency_key` + payload fingerprint — same key + same
+  payload replays, different payload answers `409 conflict`; a
+  first-writer race resolves via replay lookup (unique-violation →
+  re-read).
+- **Permissions**: `credits.read`, `credits.manage` — granted to
+  `Sistem Yöneticisi` by migration 0009.
+- **Frontend**: credit assign panel + origin list on
+  `/tahsilatlar/{id}`, credit ledger on `/hissedarlar/{id}`, mahsup
+  history + manual apply + reversal on `/tahakkuklar/{id}`, member
+  credit column on `/aileler/{id}`. Turkish-first i18n.
+- **E2E**: `node scripts/e2e-step009.mjs` drives the real stack through
+  payment remainder → UI credit assign → auto-offset on generation →
+  application reversal → manual apply → consumed-credit reversal
+  blockade — asserting zero extra account movements throughout.
+- **Boundary**: no refund/disbursement, no credit transfer between
+  shareholders, no interest/indexation/expiry — deferred.
+
 ## Backup & Disaster Recovery (BACKUP-READINESS-001, ADR-013)
 
 PostgreSQL logical-backup toolkit plus a proven restore path. Operator

@@ -23,14 +23,17 @@
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { compareDecimals, formatTry, parseTryInput } from '$lib/money';
+	import { canonicalToTryInput, compareDecimals, formatTry, parseTryInput } from '$lib/money';
 	import {
 		PAYMENT_PAYER_PERSONS_PATH,
+		creditReversePath,
 		paymentAllocationsPath,
 		paymentAllocationReversePath,
+		paymentCreditsPath,
 		paymentPath,
 		paymentReversePath,
 		shareholderOpenAssessmentsPath,
+		type AssignCreditResponse,
 		type OpenAssessment,
 		type PayerCandidate,
 		type PaymentDetail,
@@ -173,6 +176,81 @@
 		}
 	}
 
+	// --- Credit assignment (STEP-009 "Fazla Ödeme") -----------------------
+	let assignOpen = $state(false);
+	let assignQuery = $state('');
+	let assignResults = $state<PayerCandidate[]>([]);
+	let assignBeneficiary = $state<PayerCandidate | null>(null);
+	let assignAmount = $state('');
+	let reversingCreditId = $state<string | null>(null);
+
+	async function searchBeneficiary(): Promise<void> {
+		assignResults = await apiFetch<PayerCandidate[]>(
+			`${PAYMENT_PAYER_PERSONS_PATH}?search=${encodeURIComponent(assignQuery.trim())}`
+		).catch(() => []);
+	}
+
+	function chooseBeneficiary(candidate: PayerCandidate): void {
+		if (!candidate.shareholderId) return;
+		assignBeneficiary = candidate;
+		assignResults = [];
+		assignAmount = canonicalToTryInput(detail?.unallocatedAmount ?? '');
+	}
+
+	async function confirmAssignCredit(): Promise<void> {
+		if (acting || !assignBeneficiary?.shareholderId) return;
+		const parsed = parseTryInput(assignAmount);
+		if (
+			parsed === null ||
+			compareDecimals(parsed, '0.00') <= 0 ||
+			compareDecimals(parsed, detail?.unallocatedAmount ?? '0.00') > 0
+		) {
+			actionError = 'payments.new.error.invalidAmount';
+			return;
+		}
+		acting = true;
+		actionError = null;
+		try {
+			await apiFetch<AssignCreditResponse>(paymentCreditsPath(data.id), {
+				method: 'POST',
+				csrfToken: auth.csrfToken,
+				body: {
+					shareholderId: assignBeneficiary.shareholderId,
+					amount: parsed,
+					idempotencyKey: crypto.randomUUID()
+				}
+			});
+			assignOpen = false;
+			assignBeneficiary = null;
+			assignAmount = '';
+			await refresh();
+		} catch (error) {
+			actionError = apiErrorKey(error);
+		} finally {
+			acting = false;
+		}
+	}
+
+	async function confirmReverseCredit(): Promise<void> {
+		if (acting || !reversalReason.trim() || !reversingCreditId) return;
+		acting = true;
+		actionError = null;
+		try {
+			await apiFetch(creditReversePath(reversingCreditId), {
+				method: 'POST',
+				csrfToken: auth.csrfToken,
+				body: { reversalReason: reversalReason.trim() }
+			});
+			reversingCreditId = null;
+			reversalReason = '';
+			await refresh();
+		} catch (error) {
+			actionError = apiErrorKey(error);
+		} finally {
+			acting = false;
+		}
+	}
+
 	$effect(() => {
 		void refresh();
 	});
@@ -226,6 +304,8 @@
 					<dd>{formatTry(detail.amount)}</dd>
 					<dt class="font-medium">{t('payments.allocated')}</dt>
 					<dd>{formatTry(detail.allocatedAmount)}</dd>
+					<dt class="font-medium">{t('payments.credited')}</dt>
+					<dd>{formatTry(detail.creditedAmount)}</dd>
 					<dt class="font-medium">{t('payments.unallocated')}</dt>
 					<dd>{formatTry(detail.unallocatedAmount)}</dd>
 					<dt class="font-medium">{t('payments.method')}</dt>
@@ -516,6 +596,187 @@
 									{/each}
 								</ul>
 							{/if}
+						{/if}
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if detail.credits.length > 0 || can('credits.read')}
+			<Card class="w-full max-w-3xl">
+				<CardHeader>
+					<CardTitle>{t('credits.section')}</CardTitle>
+					<CardDescription>{t('credits.sectionHelp')}</CardDescription>
+				</CardHeader>
+				<CardContent>
+					{#if detail.credits.length === 0}
+						<p class="text-sm text-muted-foreground">{t('credits.empty')}</p>
+					{:else}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('credits.number')}</TableHead>
+									<TableHead>{t('credits.beneficiary')}</TableHead>
+									<TableHead>{t('credits.amount')}</TableHead>
+									<TableHead>{t('credits.appliedAmount')}</TableHead>
+									<TableHead>{t('credits.availableAmount')}</TableHead>
+									<TableHead>{t('credits.status')}</TableHead>
+									<TableHead></TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each detail.credits as credit (credit.id)}
+									<TableRow>
+										<TableCell>{credit.creditNumber}</TableCell>
+										<TableCell>
+											<a
+												class="font-medium underline-offset-2 hover:underline"
+												href={resolve(`/hissedarlar/${credit.shareholderId}`)}
+											>
+												{credit.shareholderName}
+											</a>
+										</TableCell>
+										<TableCell>{formatTry(credit.amount)}</TableCell>
+										<TableCell>{formatTry(credit.appliedAmount)}</TableCell>
+										<TableCell>{formatTry(credit.availableAmount)}</TableCell>
+										<TableCell>
+											{#if credit.status === 'active'}
+												<Badge>{t('credits.statusActive')}</Badge>
+											{:else}
+												<Badge variant="outline">{t('credits.statusReversed')}</Badge>
+											{/if}
+											{#if credit.reversalReason}
+												<p class="mt-1 text-xs text-muted-foreground">
+													{credit.reversalReason}
+												</p>
+											{/if}
+										</TableCell>
+										<TableCell>
+											{#if credit.status === 'active' && compareDecimals(credit.appliedAmount, '0.00') === 0 && can('credits.manage')}
+												<Button
+													variant="ghost"
+													size="sm"
+													onclick={() => {
+														reversingCreditId = credit.id;
+														reversingPayment = false;
+														reversingAllocationId = null;
+													}}
+												>
+													{t('credits.reverse')}
+												</Button>
+											{/if}
+										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+
+					{#if reversingCreditId}
+						<div class="mt-4 flex flex-col gap-2 border-t pt-4">
+							<Label for="credit-reason">{t('payments.reversalReason')}</Label>
+							<Input
+								id="credit-reason"
+								bind:value={reversalReason}
+								placeholder={t('payments.reverseReasonPlaceholder')}
+							/>
+							<p class="text-xs text-muted-foreground">{t('credits.confirmReverse')}</p>
+							<div class="flex gap-2">
+								<Button
+									variant="destructive"
+									size="sm"
+									disabled={acting || !reversalReason.trim()}
+									onclick={() => void confirmReverseCredit()}
+								>
+									{t('credits.reverse')}
+								</Button>
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => {
+										reversingCreditId = null;
+										reversalReason = '';
+									}}
+								>
+									{t('common.cancel')}
+								</Button>
+							</div>
+						</div>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if detail.status === 'posted' && compareDecimals(detail.unallocatedAmount, '0.00') > 0 && can('credits.manage')}
+			<Card class="w-full max-w-3xl">
+				<CardHeader>
+					<CardTitle>{t('credits.assign')}</CardTitle>
+					<CardDescription>{t('credits.assignHelp')}</CardDescription>
+				</CardHeader>
+				<CardContent class="flex flex-col gap-3">
+					<p class="text-xs text-muted-foreground">{t('credits.autoAppliedNote')}</p>
+					{#if !assignOpen}
+						<div>
+							<Button variant="outline" size="sm" onclick={() => (assignOpen = true)}>
+								{t('credits.assign')}
+							</Button>
+						</div>
+					{:else if assignBeneficiary}
+						<div class="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+							<strong>{assignBeneficiary.fullName}</strong>
+							<Button
+								variant="ghost"
+								size="sm"
+								onclick={() => {
+									assignBeneficiary = null;
+								}}
+							>
+								{t('common.cancel')}
+							</Button>
+						</div>
+						<div>
+							<Label for="assign-amount">{t('credits.amount')}</Label>
+							<Input id="assign-amount" bind:value={assignAmount} placeholder="300,00" />
+						</div>
+						<div class="flex gap-2">
+							<Button size="sm" disabled={acting} onclick={() => void confirmAssignCredit()}>
+								{t('credits.assignSubmit')}
+							</Button>
+							<Button variant="outline" size="sm" onclick={() => (assignOpen = false)}>
+								{t('common.cancel')}
+							</Button>
+						</div>
+					{:else}
+						<form
+							class="flex gap-2"
+							onsubmit={(e) => {
+								e.preventDefault();
+								void searchBeneficiary();
+							}}
+						>
+							<Input bind:value={assignQuery} placeholder={t('payments.new.shareholderSearch')} />
+							<Button type="submit" variant="outline" disabled={!assignQuery.trim()}>
+								{t('common.search')}
+							</Button>
+						</form>
+						{#if assignResults.length > 0}
+							<ul class="divide-y rounded-md border">
+								{#each assignResults as candidate (candidate.personId)}
+									<li>
+										<button
+											type="button"
+											class="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-accent"
+											disabled={!candidate.shareholderId}
+											onclick={() => chooseBeneficiary(candidate)}
+										>
+											<span>{candidate.fullName}</span>
+											{#if candidate.shareholderId}
+												<Badge variant="secondary">{t('nav.shareholders')}</Badge>
+											{/if}
+										</button>
+									</li>
+								{/each}
+							</ul>
 						{/if}
 					{/if}
 				</CardContent>

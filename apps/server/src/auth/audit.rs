@@ -51,6 +51,10 @@ pub enum SecurityEventType {
     FinancialAccountStatusChanged,
     AccountTransferPosted,
     AccountTransferReversed,
+    ShareholderCreditAssigned,
+    ShareholderCreditReversed,
+    CreditApplied,
+    CreditApplicationReversed,
 }
 
 impl SecurityEventType {
@@ -96,6 +100,10 @@ impl SecurityEventType {
             Self::FinancialAccountStatusChanged => "financial_account_status_changed",
             Self::AccountTransferPosted => "account_transfer_posted",
             Self::AccountTransferReversed => "account_transfer_reversed",
+            Self::ShareholderCreditAssigned => "shareholder_credit_assigned",
+            Self::ShareholderCreditReversed => "shareholder_credit_reversed",
+            Self::CreditApplied => "credit_applied",
+            Self::CreditApplicationReversed => "credit_application_reversed",
         }
     }
 }

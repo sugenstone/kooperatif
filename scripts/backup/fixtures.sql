@@ -14,6 +14,8 @@
 --   payments + allocations (incl. a fully reversed receipt)
 --   financial accounts + payment/transfer-sourced movements +
 --   a posted account transfer (derived balances must survive restore)
+--   shareholder credits + credit applications (automatic + a REVERSED
+--   manual application) — entitlement history, never new movements
 
 BEGIN;
 
@@ -305,5 +307,68 @@ VALUES
      'f3f3f3f3-0000-4000-8000-000000000001', '2026-01-25T10:00:00Z',
      'active', NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z');
+
+-- STEP-009: Shareholder Credit (Excess Payment) + applications.
+-- Payment 9003 leaves an 80.00 remainder explicitly assigned to
+-- shareholder A; 30.00 auto-offsets assessment ...0001 and a 25.00
+-- manual application is reversed. A credit is an ENTITLEMENT over
+-- already-received cash — exactly one payment inflow exists, credit
+-- operations never create movements.
+INSERT INTO payments
+    (id, payment_number, payer_person_id, amount, currency, method,
+     received_at, note, status, idempotency_key, idempotency_fingerprint,
+     destination_account_id, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('dddddddd-0000-4000-8000-000000000003', 9003,
+     '22222222-0000-4000-8000-000000000001', 80.00, 'TRY', 'cash',
+     '2026-01-28T10:00:00Z', 'drill: avans kaynağı', 'posted',
+     'drill-idem-0003', 'drill-fp-0003',
+     'f1f1f1f1-0000-4000-8000-000000000001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-28T10:00:00Z', '2026-01-28T10:00:00Z');
+
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, created_by, created_at)
+VALUES
+    ('f2f2f2f2-0000-4000-8000-000000000005',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 80.00, 'payment',
+     'dddddddd-0000-4000-8000-000000000003', '2026-01-28T10:00:00Z',
+     'active',
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:00:00Z');
+
+INSERT INTO shareholder_credits
+    (id, credit_number, source_payment_id, shareholder_id, amount,
+     currency, status, note, idempotency_key, idempotency_fingerprint,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('a9a9a9a9-0000-4000-8000-000000000001', 9001,
+     'dddddddd-0000-4000-8000-000000000003',
+     '44444444-0000-4000-8000-000000000001', 80.00, 'TRY', 'active',
+     'drill: tahsilat kalanı', 'drill-cidem-0001', 'drill-cfp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-28T10:05:00Z', '2026-01-28T10:05:00Z');
+
+INSERT INTO credit_applications
+    (id, credit_id, assessment_id, amount, currency, mode, status,
+     idempotency_key, idempotency_fingerprint,
+     reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    -- Automatic offset during assessment generation (no client key).
+    ('b1b1b1b1-0000-4000-8000-000000000001',
+     'a9a9a9a9-0000-4000-8000-000000000001',
+     'acacacac-0000-4000-8000-000000000001', 30.00, 'TRY', 'automatic',
+     'active', NULL, NULL, NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:06:00Z'),
+    -- A REVERSED manual application — reversal bookkeeping survives.
+    ('b1b1b1b1-0000-4000-8000-000000000002',
+     'a9a9a9a9-0000-4000-8000-000000000001',
+     'acacacac-0000-4000-8000-000000000001', 25.00, 'TRY', 'manual',
+     'reversed', 'drill-capp-0001', 'drill-capfp-0001',
+     '2026-01-29T09:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı mahsup',
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:07:00Z');
 
 COMMIT;

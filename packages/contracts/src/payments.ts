@@ -39,7 +39,9 @@ export interface PaymentListItem {
 	amount: DecimalString;
 	/** Derived: SUM of ACTIVE allocations — never a stored flag. */
 	allocatedAmount: DecimalString;
-	/** amount - allocatedAmount (>= 0). Held on the Payment. */
+	/** STEP-009 derived: SUM of ACTIVE Shareholder Credits sourced from this Payment's remainder. */
+	creditedAmount: DecimalString;
+	/** amount - allocatedAmount - creditedAmount (>= 0). Held on the Payment, owned by nobody. */
 	unallocatedAmount: DecimalString;
 	currency: string;
 	method: PaymentMethod;
@@ -76,6 +78,23 @@ export interface PaymentDetail extends PaymentListItem {
 	reversedByName: string | null;
 	/** Complete history — active AND reversed lines. */
 	allocations: PaymentAllocation[];
+	/** STEP-009: Shareholder Credits sourced from this Payment's remainder. */
+	credits: PaymentCredit[];
+}
+
+/** A Payment-remainder disposition (STEP-009): explicitly attributed beneficiary. */
+export interface PaymentCredit {
+	id: string;
+	creditNumber: number;
+	shareholderId: string;
+	shareholderName: string;
+	amount: DecimalString;
+	appliedAmount: DecimalString;
+	availableAmount: DecimalString;
+	status: 'active' | 'reversed';
+	createdAt: string;
+	reversedAt: string | null;
+	reversalReason: string | null;
 }
 
 export interface CreatePaymentResponse {
@@ -170,6 +189,8 @@ export interface FamilyMemberContext {
 	member: ShareholderIdentity;
 	openAssessmentCount: number;
 	remainingAmount: DecimalString;
+	/** This member's OWN derived credit — attribution only, never pooled. */
+	creditAvailable: DecimalString;
 }
 
 /** Member-wise obligations — the Family itself is NEVER the debtor. */

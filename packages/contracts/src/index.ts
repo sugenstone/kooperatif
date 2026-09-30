@@ -140,6 +140,7 @@ export type {
 	Payer,
 	PayerCandidate,
 	PaymentAllocation,
+	PaymentCredit,
 	PaymentDetail,
 	PaymentListItem,
 	PaymentMethod,
@@ -161,6 +162,26 @@ export {
 	shareholderFinancialSummaryPath,
 	shareholderOpenAssessmentsPath
 } from './payments';
+export type {
+	ApplyCreditRequest,
+	ApplyCreditResponse,
+	AssignCreditRequest,
+	AssignCreditResponse,
+	CreditApplication,
+	CreditApplicationMode,
+	CreditStatus,
+	CreditSummary,
+	ReverseCreditRequest,
+	ShareholderCredit,
+	ShareholderCredits
+} from './credits';
+export {
+	assessmentCreditApplicationsPath,
+	creditApplicationReversePath,
+	creditReversePath,
+	paymentCreditsPath,
+	shareholderCreditsPath
+} from './credits';
 export type {
 	AccountMovement,
 	AccountMovementList,

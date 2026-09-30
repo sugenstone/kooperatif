@@ -51,6 +51,10 @@ pub mod catalog {
     pub const FINANCIAL_ACCOUNTS_READ: &str = "financial_accounts.read";
     pub const FINANCIAL_ACCOUNTS_MANAGE: &str = "financial_accounts.manage";
 
+    /// STEP-009 — Shareholder Credit ("Fazla Ödeme") surfaces.
+    pub const CREDITS_READ: &str = "credits.read";
+    pub const CREDITS_MANAGE: &str = "credits.manage";
+
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
     /// contracts (see README "adding a new permission").
@@ -73,6 +77,8 @@ pub mod catalog {
         PAYMENTS_MANAGE,
         FINANCIAL_ACCOUNTS_READ,
         FINANCIAL_ACCOUNTS_MANAGE,
+        CREDITS_READ,
+        CREDITS_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -206,11 +212,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(
-            catalog::ALL.len(),
-            18,
-            "STEP-003 + STEP-004 + STEP-005 + STEP-006 + STEP-007 + STEP-008 catalog"
-        );
+        assert_eq!(catalog::ALL.len(), 20, "STEP-003..STEP-009 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

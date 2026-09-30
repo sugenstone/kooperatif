@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 18],
+			['permissions', 20],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -184,11 +184,13 @@ async function main() {
 			['assessment_rules', 3],
 			['assessments', 4],
 			['assessment_share_sources', 4],
-			['payments', 2],
+			['payments', 3],
 			['payment_allocations', 3],
 			['financial_accounts', 2],
-			['account_movements', 4],
-			['account_transfers', 1]
+			['account_movements', 5],
+			['account_transfers', 1],
+			['shareholder_credits', 1],
+			['credit_applications', 2]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -250,6 +252,16 @@ async function main() {
 			[
 				"SELECT s.name||'→'||d.name||'|'||count(*) FROM account_transfers t JOIN financial_accounts s ON s.id=t.source_account_id JOIN financial_accounts d ON d.id=t.destination_account_id JOIN account_movements m ON m.source_type='transfer' AND m.source_id=t.id WHERE t.transfer_number=9001 GROUP BY s.name, d.name",
 				'Yedek Kasa→Yedek Banka|2'
+			],
+			// Credit → explicit beneficiary + source payment (never payer).
+			[
+				"SELECT p.first_name||' '||p.last_name||'|'||pay.payment_number FROM shareholder_credits c JOIN shareholders s ON s.id=c.shareholder_id JOIN persons p ON p.id=s.person_id JOIN payments pay ON pay.id=c.source_payment_id WHERE c.credit_number=9001",
+				'Yedek Hissedarı|9003'
+			],
+			// Application → credit origin + obligation target + mode.
+			[
+				"SELECT c.credit_number||'|'||p.name||'|'||ap.mode FROM credit_applications ap JOIN shareholder_credits c ON c.id=ap.credit_id JOIN assessments a ON a.id=ap.assessment_id JOIN periods p ON p.id=a.period_id WHERE ap.status='active'",
+				'9001|Yedek Dönem A|automatic'
 			]
 		];
 		let allRel = true;
@@ -288,8 +300,8 @@ async function main() {
 		// Payment precision + derived paid total for assessment ...0001:
 		// 100.00 active + 30.00 reversed → only the ACTIVE row counts.
 		expect(
-			'Payment precision (150.00/30.00)',
-			"SELECT json_agg(amount::text ORDER BY amount)::jsonb = '[\"30.00\",\"150.00\"]'::jsonb FROM payments",
+			'Payment precision (150.00/30.00/80.00)',
+			"SELECT json_agg(amount::text ORDER BY amount)::jsonb = '[\"30.00\",\"80.00\",\"150.00\"]'::jsonb FROM payments",
 			't'
 		);
 		expect(
@@ -301,9 +313,9 @@ async function main() {
 		// bank: +30 reversed (excluded) +40 = 40. Balances are never
 		// stored; the restored movement history must derive them.
 		expect(
-			'Derived cash balance (150-40=110.00)',
+			'Derived cash balance (150-40+80=190.00)',
 			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000001' AND status='active'",
-			'110.00'
+			'190.00'
 		);
 		expect(
 			'Derived bank balance (reversed leg excluded → 40.00)',
@@ -314,6 +326,26 @@ async function main() {
 			'Reversed movement history preserved',
 			"SELECT count(*) FROM account_movements WHERE status='reversed' AND reversed_by IS NOT NULL AND reversal_reason IS NOT NULL",
 			'1'
+		);
+
+		// STEP-009 derived truths on the restored copy:
+		// available credit = active credits − active applications
+		// (80.00 − 30.00 = 50.00; the reversed 25.00 is excluded).
+		expect(
+			'Derived credit available (80-30=50.00)',
+			"SELECT (coalesce((SELECT sum(amount) FROM shareholder_credits WHERE status='active'),0) - coalesce((SELECT sum(amount) FROM credit_applications WHERE status='active'),0))::text",
+			'50.00'
+		);
+		// Assessment ...0001 settled = 100.00 allocations + 30.00 credit.
+		expect(
+			'Settled incl. credit application (100+30=130.00)',
+			"SELECT (coalesce((SELECT sum(amount) FROM payment_allocations WHERE assessment_id='acacacac-0000-4000-8000-000000000001' AND status='active'),0) + coalesce((SELECT sum(amount) FROM credit_applications WHERE assessment_id='acacacac-0000-4000-8000-000000000001' AND status='active'),0))::text",
+			'130.00'
+		);
+		expect(
+			'Credit created NO account movement',
+			"SELECT count(*) FROM account_movements WHERE source_type IN ('credit','credit_application') OR source_id IN ('a9a9a9a9-0000-4000-8000-000000000001','b1b1b1b1-0000-4000-8000-000000000001','b1b1b1b1-0000-4000-8000-000000000002')",
+			'0'
 		);
 
 		// Constraints must still BEHAVE after restore — not just exist.
@@ -384,6 +416,36 @@ async function main() {
 				'payment destination FK',
 				`INSERT INTO payments (payer_person_id, amount, method, received_at, destination_account_id, idempotency_key, idempotency_fingerprint, created_by)
 				 VALUES ('22222222-0000-4000-8000-000000000004',1,'cash',now(),'f1f1f1f1-0000-4000-8000-00000000ffff','drill-z','drill-z','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'credit positive amount check',
+				`INSERT INTO shareholder_credits (source_payment_id, shareholder_id, amount, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('dddddddd-0000-4000-8000-000000000003','44444444-0000-4000-8000-000000000001',0,'drill-cx','drill-cx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'credit idempotency key unique',
+				`INSERT INTO shareholder_credits (source_payment_id, shareholder_id, amount, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('dddddddd-0000-4000-8000-000000000003','44444444-0000-4000-8000-000000000001',1,'drill-cidem-0001','drill-cy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'credit reversal consistency check',
+				`INSERT INTO shareholder_credits (source_payment_id, shareholder_id, amount, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('dddddddd-0000-4000-8000-000000000003','44444444-0000-4000-8000-000000000001',1,'reversed','drill-cz','drill-cz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'credit beneficiary shareholder FK',
+				`INSERT INTO shareholder_credits (source_payment_id, shareholder_id, amount, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('dddddddd-0000-4000-8000-000000000003','44444444-0000-4000-8000-00000000ffff',1,'drill-cw','drill-cw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'credit application mode check',
+				`INSERT INTO credit_applications (credit_id, assessment_id, amount, mode, created_by)
+				 VALUES ('a9a9a9a9-0000-4000-8000-000000000001','acacacac-0000-4000-8000-000000000001',1,'legacy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'credit application idempotency key unique',
+				`INSERT INTO credit_applications (credit_id, assessment_id, amount, mode, idempotency_key, created_by)
+				 VALUES ('a9a9a9a9-0000-4000-8000-000000000001','acacacac-0000-4000-8000-000000000001',1,'manual','drill-capp-0001','11111111-0000-4000-8000-0000000000aa')`
 			]
 		];
 		let allConstraints = true;

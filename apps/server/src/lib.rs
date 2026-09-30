@@ -11,6 +11,7 @@
 pub mod auth;
 pub mod clock;
 pub mod config;
+pub mod credits;
 pub mod db;
 pub mod financial_accounts;
 pub mod http;

@@ -35,6 +35,7 @@ use crate::auth::authz;
 use crate::auth::csrf;
 use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
+use crate::credits::repo as credit_repo;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::repo as party_repo;
@@ -116,7 +117,8 @@ fn command_error(error: payment_repo::PaymentCommandError) -> ApiError {
         | AssessmentOverAllocated
         | IdempotencyConflict
         | NotPosted
-        | AccountEffectBlocked => ApiError::Conflict,
+        | AccountEffectBlocked
+        | CreditEffectBlocked => ApiError::Conflict,
         Database(error) => {
             tracing::error!(error = %error, "payment command failed");
             ApiError::Internal
@@ -148,8 +150,12 @@ pub struct PaymentListItemDto {
     pub amount: String,
     /// Derived: SUM of ACTIVE allocations — never a stored flag.
     pub allocated_amount: String,
-    /// amount - allocatedAmount; >= 0 by command invariant. Value held
-    /// on the Payment awaiting explicit disposition (docs/06).
+    /// STEP-009 derived: SUM of ACTIVE Shareholder Credits sourced
+    /// from this Payment's remainder ("Fazla Ödeme" disposition).
+    pub credited_amount: String,
+    /// amount - allocatedAmount - creditedAmount; >= 0 by command
+    /// invariant. Value held on the Payment awaiting explicit
+    /// disposition (docs/06) — NEVER implied to belong to anyone.
     pub unallocated_amount: String,
     pub currency: String,
     pub method: String,
@@ -200,6 +206,30 @@ pub struct PaymentDetailDto {
     pub reversed_by_name: Option<String>,
     /// Complete history — active AND reversed lines.
     pub allocations: Vec<AllocationDto>,
+    /// STEP-009: Shareholder Credits sourced from this Payment's
+    /// remainder ("Fazla Ödeme" disposition) — each names its explicit
+    /// beneficiary Shareholder; a credit is never a Movement.
+    pub credits: Vec<PaymentCreditDto>,
+}
+
+/// A Payment-remainder disposition line (STEP-009): the explicitly
+/// chosen beneficiary Shareholder and the credit's derived state.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentCreditDto {
+    pub id: Uuid,
+    pub credit_number: i64,
+    pub shareholder_id: Uuid,
+    pub shareholder_name: String,
+    pub amount: String,
+    pub applied_amount: String,
+    pub available_amount: String,
+    pub status: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub reversed_at: Option<OffsetDateTime>,
+    pub reversal_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,6 +312,9 @@ pub struct FamilyMemberContextDto {
     pub member: ShareholderIdentityDto,
     pub open_assessment_count: i64,
     pub remaining_amount: String,
+    /// This member's OWN derived credit — attribution surface only;
+    /// never an interchangeable family pool.
+    pub credit_available: String,
 }
 
 /// Family collection context (docs/06 §26): member-wise obligations —
@@ -337,7 +370,10 @@ fn payment_item(row: &payment_repo::PaymentRow) -> PaymentListItemDto {
         payer: payer_dto(row),
         amount: payment_model::canonical_amount(row.amount),
         allocated_amount: payment_model::canonical_amount(row.allocated_amount),
-        unallocated_amount: payment_model::canonical_amount(row.amount - row.allocated_amount),
+        credited_amount: payment_model::canonical_amount(row.credited_amount),
+        unallocated_amount: payment_model::canonical_amount(
+            row.amount - row.allocated_amount - row.credited_amount,
+        ),
         currency: row.currency.clone(),
         method: row.method.clone(),
         received_at: row.received_at,
@@ -658,6 +694,9 @@ async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentDetailDto, 
     let allocations = payment_repo::payment_allocations(pool, id)
         .await
         .map_err(db_err("payment allocations failed"))?;
+    let credits = credit_repo::list_payment_credits(pool, id)
+        .await
+        .map_err(db_err("payment credits failed"))?;
     Ok(PaymentDetailDto {
         item: payment_item(&row),
         destination_account_id: row.destination_account_id,
@@ -668,6 +707,25 @@ async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentDetailDto, 
         created_by_name: row.created_by_name.clone(),
         reversed_by_name: row.reversed_by_name.clone(),
         allocations: allocations.iter().map(allocation_dto).collect(),
+        credits: credits
+            .iter()
+            .map(|c| PaymentCreditDto {
+                id: c.id,
+                credit_number: c.credit_number,
+                shareholder_id: c.shareholder_id,
+                shareholder_name: format!(
+                    "{} {}",
+                    c.shareholder_first_name, c.shareholder_last_name
+                ),
+                amount: payment_model::canonical_amount(c.amount),
+                applied_amount: payment_model::canonical_amount(c.applied_amount),
+                available_amount: payment_model::canonical_amount(c.available_amount),
+                status: c.status.clone(),
+                created_at: c.created_at,
+                reversed_at: c.reversed_at,
+                reversal_reason: c.reversal_reason.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -678,24 +736,12 @@ pub async fn get_payment(
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
     authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let row = payment_repo::find_payment(pool, id)
+    let exists = payment_repo::find_payment(pool, id)
         .await
         .map_err(db_err("payment load failed"))?
         .ok_or(ApiError::NotFound)?;
-    let allocations = payment_repo::payment_allocations(pool, id)
-        .await
-        .map_err(db_err("payment allocations failed"))?;
-    Ok(Json(PaymentDetailDto {
-        item: payment_item(&row),
-        destination_account_id: row.destination_account_id,
-        destination_account_name: row.destination_account_name.clone(),
-        note: row.note.clone(),
-        reversed_at: row.reversed_at,
-        reversal_reason: row.reversal_reason.clone(),
-        created_by_name: row.created_by_name.clone(),
-        reversed_by_name: row.reversed_by_name.clone(),
-        allocations: allocations.iter().map(allocation_dto).collect(),
-    }))
+    let _ = exists;
+    load_detail(pool, id).await.map(Json)
 }
 
 /// Apply (part of) the unallocated remainder to further obligations.
@@ -994,6 +1040,7 @@ pub async fn family_collection_context(
                 .expect("member row always carries a shareholder"),
                 open_assessment_count: m.open_assessment_count,
                 remaining_amount: payment_model::canonical_amount(m.remaining_amount),
+                credit_available: payment_model::canonical_amount(m.credit_available),
             })
             .collect(),
         total_remaining: payment_model::canonical_amount(total_remaining),

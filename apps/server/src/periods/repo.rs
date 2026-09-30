@@ -14,6 +14,7 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::model::{AssessmentRuleType, PeriodStatus};
+use crate::credits::repo as credit_repo;
 use crate::parties::model as party_model;
 use crate::shares::repo::ShareholderIdentityRow;
 
@@ -701,6 +702,11 @@ pub struct GenerationSummary {
     pub assessment_count: i64,
     pub share_source_count: i64,
     pub total_amount: Decimal,
+    /// STEP-009: total held credit auto-offset onto the newly
+    /// generated obligations inside the same transaction (docs/05
+    /// "Automatic use of existing excess" — never new cash).
+    pub credit_applied_amount: Decimal,
+    pub credit_application_count: i64,
 }
 
 /// Finalization (§30–§33): the explicit, confirmed, atomic command.
@@ -780,6 +786,27 @@ pub async fn generate_assessments(
         .map_err(PeriodCommandError::Database)?;
     }
 
+    // STEP-009 automatic offset (docs/05 §"Automatic use of existing
+    // excess"): each new obligation immediately consumes its own
+    // Shareholder's available credit — FIFO by credit_number — inside
+    // this same transaction. The engine locks credit rows ascending
+    // then each assessment; consumption is therefore deterministic,
+    // serialized against concurrent applies, and never creates cash.
+    let targets: Vec<(Uuid, Uuid)> = plan
+        .rows
+        .iter()
+        .zip(assessment_ids.iter())
+        .map(|((shareholder, _, _), id)| (*id, shareholder.shareholder_id))
+        .collect();
+    let credit_applied = credit_repo::auto_apply_to_assessments(&mut tx, actor, &targets)
+        .await
+        .map_err(|error| match error {
+            credit_repo::CreditCommandError::Database(db) => PeriodCommandError::Database(db),
+            _ => PeriodCommandError::Database(sqlx::Error::Protocol(
+                "unexpected credit engine error during generation".into(),
+            )),
+        })?;
+
     sqlx::query("UPDATE periods SET status = 'open', updated_at = now() WHERE id = $1")
         .bind(period_id)
         .execute(tx.as_mut())
@@ -790,6 +817,8 @@ pub async fn generate_assessments(
         assessment_count: assessment_ids.len() as i64,
         share_source_count: plan.sources.len() as i64,
         total_amount: plan.total_amount,
+        credit_applied_amount: credit_applied.values().sum(),
+        credit_application_count: credit_applied.len() as i64,
     };
     tx.commit().await.map_err(PeriodCommandError::Database)?;
     Ok(summary)
