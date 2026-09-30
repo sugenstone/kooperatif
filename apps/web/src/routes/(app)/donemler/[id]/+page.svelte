@@ -25,7 +25,7 @@
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { formatTry, parseTryInput } from '$lib/money';
+	import { canonicalToTryInput, formatTry, parseTryInput } from '$lib/money';
 	import {
 		periodAssessmentPreviewPath,
 		periodAssessmentsPath,
@@ -131,7 +131,7 @@
 		editStart = detail.collectionStartDate;
 		editDue = detail.dueDate;
 		editRuleType = detail.ruleType ?? 'per_shareholder';
-		editAmount = detail.baseAmount ? formatTry(detail.baseAmount).replace(' ₺', '') : '';
+		editAmount = detail.baseAmount ? canonicalToTryInput(detail.baseAmount) : '';
 		editEffective = detail.assessmentEffectiveDate ?? '';
 		editOpen = true;
 	}

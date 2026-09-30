@@ -147,7 +147,7 @@
 			).catch(() => [])
 		).filter((a) => !taken.has(a.id) && compareDecimals(a.remainingAmount, '0.00') > 0);
 		allocAssessmentId = allocAssessments[0]?.id ?? '';
-		allocAmount = allocAssessments[0]?.remainingAmount ?? '';
+		allocAmount = canonicalToTryInput(allocAssessments[0]?.remainingAmount ?? '');
 	}
 
 	async function confirmAddAllocation(): Promise<void> {
@@ -539,7 +539,7 @@
 											bind:value={allocAssessmentId}
 											onchange={() => {
 												const chosen = allocAssessments.find((a) => a.id === allocAssessmentId);
-												if (chosen) allocAmount = chosen.remainingAmount;
+												if (chosen) allocAmount = canonicalToTryInput(chosen.remainingAmount);
 											}}
 										>
 											{#each allocAssessments as assessment (assessment.id)}
