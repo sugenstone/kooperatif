@@ -276,6 +276,40 @@ export {
 	shareReturnPath
 } from './share_returns';
 export type {
+	CancelInvestmentRequest,
+	CancelInvestmentValuationRequest,
+	CreateInvestmentRequest,
+	DisposalProceedsLegInput,
+	DisposeInvestmentRequest,
+	InvestmentDetail,
+	InvestmentDisposal,
+	InvestmentFunding,
+	InvestmentIncome,
+	InvestmentListItem,
+	InvestmentProceedsLeg,
+	InvestmentStatus,
+	InvestmentType,
+	InvestmentValuation,
+	PostInvestmentFundingRequest,
+	PostInvestmentIncomeRequest,
+	PostedEventStatus,
+	RecordInvestmentValuationRequest,
+	ReverseInvestmentEventRequest,
+	ValuationStatus
+} from './investments';
+export {
+	INVESTMENTS_PATH,
+	investmentCancelPath,
+	investmentDisposePath,
+	investmentFundingReversePath,
+	investmentFundingsPath,
+	investmentIncomeReversePath,
+	investmentIncomesPath,
+	investmentPath,
+	investmentValuationCancelPath,
+	investmentValuationsPath
+} from './investments';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

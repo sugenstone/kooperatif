@@ -877,7 +877,7 @@ async fn shares_authorization_and_permission_upgrade() {
     .unwrap();
     assert!(perms.contains(&"shares.read".to_string()), "{perms:?}");
     assert!(perms.contains(&"shares.manage".to_string()), "{perms:?}");
-    assert_eq!(perms.len(), 24);
+    assert_eq!(perms.len(), 26);
 
     let plain_name = format!("plain.{}", Uuid::new_v4().simple());
     let plain_id = create_plain_user(&test.pool, &plain_name).await;

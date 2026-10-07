@@ -62,6 +62,8 @@ pub mod catalog {
     /// STEP-011 — Share Return / Entitlement / Settlement surfaces.
     pub const SHARE_RETURNS_READ: &str = "share_returns.read";
     pub const SHARE_RETURNS_MANAGE: &str = "share_returns.manage";
+    pub const INVESTMENTS_READ: &str = "investments.read";
+    pub const INVESTMENTS_MANAGE: &str = "investments.manage";
 
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
@@ -91,6 +93,8 @@ pub mod catalog {
         INCOME_EXPENSE_MANAGE,
         SHARE_RETURNS_READ,
         SHARE_RETURNS_MANAGE,
+        INVESTMENTS_READ,
+        INVESTMENTS_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -224,7 +228,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 24, "STEP-003..STEP-011 catalog");
+        assert_eq!(catalog::ALL.len(), 26, "STEP-003..STEP-012 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

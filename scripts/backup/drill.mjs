@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 24],
+			['permissions', 26],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -187,7 +187,7 @@ async function main() {
 			['payments', 3],
 			['payment_allocations', 3],
 			['financial_accounts', 2],
-			['account_movements', 10],
+			['account_movements', 15],
 			['account_transfers', 1],
 			['shareholder_credits', 1],
 			['credit_applications', 2],
@@ -196,7 +196,13 @@ async function main() {
 			['expense_entries', 2],
 			['share_returns', 1],
 			['share_return_entitlements', 2],
-			['share_return_settlements', 2]
+			['share_return_settlements', 2],
+			['investments', 2],
+			['investment_fundings', 2],
+			['investment_valuations', 2],
+			['investment_incomes', 2],
+			['investment_disposals', 1],
+			['investment_disposal_proceeds', 1]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -310,6 +316,48 @@ async function main() {
 			[
 				"SELECT st.status||'|'||m.status||'|'||st.reversal_reason FROM share_return_settlements st JOIN account_movements m ON m.id=st.account_movement_id WHERE st.settlement_number=9002",
 				'reversed|reversed|drill: hatalı ödeme'
+			],
+			// STEP-012: investment 9001 disposed real estate + identity.
+			[
+				"SELECT investment_type||'|'||status||'|'||coalesce(location,'-') FROM investments WHERE investment_number=9001",
+				'real_estate|disposed|Organize Sanayi Bölgesi'
+			],
+			// Funding 9001 → its ONE movement, provenance
+			// 'investment_funding' — never expense/payment/transfer.
+			[
+				"SELECT m.direction||'|'||m.source_type||'|'||a.name FROM investment_fundings f JOIN account_movements m ON m.id=f.account_movement_id JOIN financial_accounts a ON a.id=f.financial_account_id WHERE f.funding_number=9001",
+				'outflow|investment_funding|Yedek Kasa'
+			],
+			// Reversed funding 9002 keeps entry AND movement reversal.
+			[
+				"SELECT f.status||'|'||m.status||'|'||f.reversal_reason FROM investment_fundings f JOIN account_movements m ON m.id=f.account_movement_id WHERE f.funding_number=9002",
+				'reversed|reversed|drill: hatalı finansman'
+			],
+			// Valuation 9001 preserves method + source; 9002 stays
+			// cancelled with its reason (history, never deleted).
+			[
+				"SELECT v.amount::text||'|'||v.method||'|'||v.source FROM investment_valuations v WHERE v.valuation_number=9001",
+				'300.00|Emsal karşılaştırma|Eksper raporu ER-9'
+			],
+			[
+				"SELECT v.status||'|'||v.cancellation_reason FROM investment_valuations v WHERE v.valuation_number=9002",
+				'cancelled|drill: hatalı değerleme'
+			],
+			// Investment income 9001 → its ONE 'investment_income'
+			// inflow — NOT a STEP-010 incomes row.
+			[
+				"SELECT m.direction||'|'||m.source_type FROM investment_incomes i JOIN account_movements m ON m.id=i.account_movement_id WHERE i.income_number=9001",
+				'inflow|investment_income'
+			],
+			// Disposal 9001 → agreed consideration is metadata; the ONE
+			// proceeds leg is the real cash inflow on the BANK account.
+			[
+				"SELECT d.consideration_amount::text||'|'||d.counterparty_name||'|'||d.status FROM investment_disposals d WHERE d.disposal_number=9001",
+				'350.00|Drill Alıcı AŞ|posted'
+			],
+			[
+				"SELECT m.direction||'|'||m.source_type||'|'||a.name||'|'||p.amount::text FROM investment_disposal_proceeds p JOIN account_movements m ON m.id=p.account_movement_id JOIN financial_accounts a ON a.id=p.financial_account_id WHERE p.disposal_id='18181818-0000-4000-8000-000000000001'",
+				'inflow|investment_disposal|Yedek Banka|320.00'
 			]
 		];
 		let allRel = true;
@@ -358,24 +406,27 @@ async function main() {
 			'100.00'
 		);
 		// Derived balances on the RESTORED copy — cash: +150 -40 +80
-		// +500 (income) −60 (expense) −300 (settlement) = 330; the
-		// reversed 25.00 expense and reversed 100.00 settlement are
-		// excluded. Bank: +30 reversed (excluded) +40 = 40. Balances are
-		// never stored; the restored movement history must derive them.
+		// +500 (income) −60 (expense) −300 (settlement) −200 (funding)
+		// +25 (investment income) = 155; the reversed 25.00 expense,
+		// reversed 100.00 settlement, reversed 50.00 funding and
+		// reversed 10.00 investment income are excluded. Bank:
+		// +30 reversed (excluded) +40 +320 (disposal proceeds) = 360.
+		// Balances are never stored; the restored movement history
+		// must derive them.
 		expect(
-			'Derived cash balance (150-40+80+500-60-300=330.00)',
+			'Derived cash balance (…-200+25=155.00)',
 			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000001' AND status='active'",
-			'330.00'
+			'155.00'
 		);
 		expect(
-			'Derived bank balance (reversed leg excluded → 40.00)',
+			'Derived bank balance (40+320=360.00)',
 			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000002' AND status='active'",
-			'40.00'
+			'360.00'
 		);
 		expect(
 			'Reversed movement history preserved',
 			"SELECT count(*) FROM account_movements WHERE status='reversed' AND reversed_by IS NOT NULL AND reversal_reason IS NOT NULL",
-			'3'
+			'5'
 		);
 		// STEP-011 derived truth: remaining principal = determined amount
 		// − POSTED settlements (1000 − 300 = 700; the reversed 100 is
@@ -417,6 +468,37 @@ async function main() {
 			'Credit created NO account movement',
 			"SELECT count(*) FROM account_movements WHERE source_type IN ('credit','credit_application') OR source_id IN ('a9a9a9a9-0000-4000-8000-000000000001','b1b1b1b1-0000-4000-8000-000000000001','b1b1b1b1-0000-4000-8000-000000000002')",
 			'0'
+		);
+
+		// STEP-012 derived truths on the restored copy:
+		//   cost = POSTED fundings only (200; reversed 50 excluded),
+		//   value = LATEST recorded valuation (300; cancelled 310 is
+		//   never "latest"), cash result = posted incomes + proceeds
+		//   (25 + 320). Consideration 350 is metadata — no gain math.
+		expect(
+			'Derived investment cost (posted fundings = 200.00)',
+			"SELECT coalesce(sum(amount),0)::text FROM investment_fundings WHERE investment_id='10101010-0000-4000-8000-000000000001' AND status='posted'",
+			'200.00'
+		);
+		expect(
+			'Latest recorded valuation (300.00, cancelled excluded)',
+			"SELECT amount::text FROM investment_valuations WHERE investment_id='10101010-0000-4000-8000-000000000001' AND status='recorded' ORDER BY valuation_date DESC, valuation_number DESC LIMIT 1",
+			'300.00'
+		);
+		expect(
+			'Valuation created NO account movement',
+			"SELECT count(*) FROM account_movements WHERE source_id IN ('14141414-0000-4000-8000-000000000001','14141414-0000-4000-8000-000000000002')",
+			'0'
+		);
+		expect(
+			'Posted investment income (25.00; no incomes row)',
+			"SELECT coalesce(sum(amount),0)::text FROM investment_incomes WHERE status='posted'",
+			'25.00'
+		);
+		expect(
+			'Disposal proceeds = actual cash (320.00 ≠ agreed 350.00)',
+			"SELECT coalesce(sum(amount),0)::text FROM investment_disposal_proceeds WHERE disposal_id='18181818-0000-4000-8000-000000000001'",
+			'320.00'
 		);
 
 		// Constraints must still BEHAVE after restore — not just exist.
@@ -603,6 +685,77 @@ async function main() {
 				'settlement movement leg uniqueness',
 				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
 				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','outflow',1,'share_return_settlement','f4f4f4f4-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
+			],
+			// STEP-012 invariants must still BEHAVE after restore.
+			[
+				'investment type enum',
+				`INSERT INTO investments (name, investment_type, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','vehicle','drill-iex','drill-iex','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'investment idempotency key unique',
+				`INSERT INTO investments (name, investment_type, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','business','drill-iidem-0001','drill-x','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'investment disposed consistency check',
+				`INSERT INTO investments (name, investment_type, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','business','disposed','drill-iy','drill-iy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'funding positive amount check',
+				`INSERT INTO investment_fundings (investment_id, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','f1f1f1f1-0000-4000-8000-000000000001',0,now(),'f2f2f2f2-0000-4000-8000-00000000b0b0','drill-fx','drill-fx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'funding idempotency key unique',
+				`INSERT INTO investment_fundings (investment_id, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-00000000b1b1','drill-fidem-0001','drill-fy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'funding reversal consistency check',
+				`INSERT INTO investment_fundings (investment_id, financial_account_id, amount, occurred_at, account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-00000000b2b2','reversed','drill-fz','drill-fz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'funding→movement 1:1 unique',
+				`INSERT INTO investment_fundings (investment_id, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-000000000011','drill-fw','drill-fw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'valuation positive amount check',
+				`INSERT INTO investment_valuations (investment_id, valuation_date, amount, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','2026-03-01',0,'drill-vx','drill-vx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'valuation cancelled consistency check',
+				`INSERT INTO investment_valuations (investment_id, valuation_date, amount, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','2026-03-01',1,'cancelled','drill-vy','drill-vy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'investment income positive amount check',
+				`INSERT INTO investment_incomes (investment_id, financial_account_id, amount, occurred_at, description, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','f1f1f1f1-0000-4000-8000-000000000001',0,now(),'drill','f2f2f2f2-0000-4000-8000-00000000b3b3','drill-gx','drill-gx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'investment income reversal consistency check',
+				`INSERT INTO investment_incomes (investment_id, financial_account_id, amount, occurred_at, description, account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000002','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-00000000b4b4','reversed','drill-gz','drill-gz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'one disposal per investment',
+				`INSERT INTO investment_disposals (investment_id, disposed_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('10101010-0000-4000-8000-000000000001','2026-05-01','drill-dx','drill-dx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'proceeds→movement 1:1 unique',
+				`INSERT INTO investment_disposal_proceeds (disposal_id, financial_account_id, amount, occurred_at, account_movement_id)
+				 VALUES ('18181818-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-000000000015')`
+			],
+			[
+				'investment movement leg uniqueness',
+				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','outflow',1,'investment_funding','12121212-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
 			]
 		];
 		let allConstraints = true;

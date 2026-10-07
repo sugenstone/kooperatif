@@ -598,4 +598,182 @@ VALUES
      '11111111-0000-4000-8000-0000000000aa',
      '2026-02-12T10:00:00Z', '2026-02-12T14:00:00Z');
 
+-- =====================================================================
+-- STEP-012: Investments — identity, acquisition funding, valuation
+-- history, investment income, disposal + actual proceeds.
+-- =====================================================================
+
+INSERT INTO investments
+    (id, investment_number, name, investment_type, description,
+     location, reference, counterparty_name, acquired_at, status,
+     disposed_at, disposed_by, cancelled_at, cancelled_by,
+     cancellation_reason, idempotency_key, idempotency_fingerprint,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- 9001: disposed real estate — funded, valued, earned, sold.
+    ('10101010-0000-4000-8000-000000000001', 9001, 'Drill Deposu',
+     'real_estate', 'drill: depo', 'Organize Sanayi Bölgesi',
+     'TAPU-9001', NULL, '2026-01-10', 'disposed',
+     '2026-04-01T10:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     NULL, NULL, NULL,
+     'drill-iidem-0001', 'drill-ifp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-10T10:00:00Z', '2026-04-01T10:00:00Z'),
+    -- 9002: active business holding — identity only, no events.
+    ('10101010-0000-4000-8000-000000000002', 9002, 'Drill Ortaklığı',
+     'business', NULL, NULL, NULL, 'Drill İşletmesi AŞ', '2026-01-15',
+     'active', NULL, NULL, NULL, NULL, NULL,
+     'drill-iidem-0002', 'drill-ifp-0002',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-15T10:00:00Z', '2026-01-15T10:00:00Z');
+
+-- Movements first: every funding/income/proceeds row hard-FKs its leg.
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    -- Funding 9001: −200.00 outflow on cash, posted.
+    ('f2f2f2f2-0000-4000-8000-000000000011',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 200.00,
+     'investment_funding',
+     '12121212-0000-4000-8000-000000000001', '2026-01-10T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-10T10:00:00Z'),
+    -- Funding 9002: −50.00 outflow on cash, REVERSED.
+    ('f2f2f2f2-0000-4000-8000-000000000012',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 50.00,
+     'investment_funding',
+     '12121212-0000-4000-8000-000000000002', '2026-01-11T10:00:00Z',
+     'reversed', '2026-01-11T15:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı finansman',
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-11T10:00:00Z'),
+    -- Investment income 9001: +25.00 inflow on cash, posted.
+    ('f2f2f2f2-0000-4000-8000-000000000013',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 25.00,
+     'investment_income',
+     '16161616-0000-4000-8000-000000000001', '2026-02-01T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-01T10:00:00Z'),
+    -- Investment income 9002: +10.00 inflow on cash, REVERSED.
+    ('f2f2f2f2-0000-4000-8000-000000000014',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 10.00,
+     'investment_income',
+     '16161616-0000-4000-8000-000000000002', '2026-02-02T10:00:00Z',
+     'reversed', '2026-02-02T14:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı gelir',
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-02T10:00:00Z'),
+    -- Disposal proceeds leg: +320.00 inflow on BANK, posted.
+    ('f2f2f2f2-0000-4000-8000-000000000015',
+     'f1f1f1f1-0000-4000-8000-000000000002', 'inflow', 320.00,
+     'investment_disposal',
+     '20202020-0000-4000-8000-000000000001', '2026-04-01T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-04-01T10:00:00Z');
+
+INSERT INTO investment_fundings
+    (id, funding_number, investment_id, financial_account_id, amount,
+     currency, occurred_at, reference, note, account_movement_id, status,
+     idempotency_key, idempotency_fingerprint, reversed_at, reversed_by,
+     reversal_reason, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('12121212-0000-4000-8000-000000000001', 9001,
+     '10101010-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 200.00, 'TRY',
+     '2026-01-10T10:00:00Z', 'SÖZ-9001', NULL,
+     'f2f2f2f2-0000-4000-8000-000000000011', 'posted',
+     'drill-fidem-0001', 'drill-ffp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-10T10:00:00Z', '2026-01-10T10:00:00Z'),
+    ('12121212-0000-4000-8000-000000000002', 9002,
+     '10101010-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 50.00, 'TRY',
+     '2026-01-11T10:00:00Z', NULL, NULL,
+     'f2f2f2f2-0000-4000-8000-000000000012', 'reversed',
+     'drill-fidem-0002', 'drill-ffp-0002',
+     '2026-01-11T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı finansman',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-11T10:00:00Z', '2026-01-11T15:00:00Z');
+
+INSERT INTO investment_valuations
+    (id, valuation_number, investment_id, valuation_date, amount,
+     currency, method, source, note, status, idempotency_key,
+     idempotency_fingerprint, cancelled_at, cancelled_by,
+     cancellation_reason, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('14141414-0000-4000-8000-000000000001', 9001,
+     '10101010-0000-4000-8000-000000000001', '2026-02-15', 300.00, 'TRY',
+     'Emsal karşılaştırma', 'Eksper raporu ER-9', NULL, 'recorded',
+     'drill-videm-0001', 'drill-vfp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-15T10:00:00Z', '2026-02-15T10:00:00Z'),
+    -- Cancelled valuation keeps the row + reason; never deleted.
+    ('14141414-0000-4000-8000-000000000002', 9002,
+     '10101010-0000-4000-8000-000000000001', '2026-02-20', 310.00, 'TRY',
+     'Emsal karşılaştırma', NULL, NULL, 'cancelled',
+     'drill-videm-0002', 'drill-vfp-0002',
+     '2026-02-20T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı değerleme',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-20T10:00:00Z', '2026-02-20T15:00:00Z');
+
+INSERT INTO investment_incomes
+    (id, income_number, investment_id, financial_account_id, amount,
+     currency, occurred_at, description, counterparty, reference_no,
+     account_movement_id, status, idempotency_key,
+     idempotency_fingerprint, reversed_at, reversed_by, reversal_reason,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('16161616-0000-4000-8000-000000000001', 9001,
+     '10101010-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 25.00, 'TRY',
+     '2026-02-01T10:00:00Z', 'drill: Şubat kirası', 'Kiracı AŞ', NULL,
+     'f2f2f2f2-0000-4000-8000-000000000013', 'posted',
+     'drill-gidem-0001', 'drill-gfp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-01T10:00:00Z', '2026-02-01T10:00:00Z'),
+    ('16161616-0000-4000-8000-000000000002', 9002,
+     '10101010-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 10.00, 'TRY',
+     '2026-02-02T10:00:00Z', 'drill: hatalı gelir', NULL, NULL,
+     'f2f2f2f2-0000-4000-8000-000000000014', 'reversed',
+     'drill-gidem-0002', 'drill-gfp-0002',
+     '2026-02-02T14:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı gelir',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-02T10:00:00Z', '2026-02-02T14:00:00Z');
+
+INSERT INTO investment_disposals
+    (id, disposal_number, investment_id, disposed_at,
+     consideration_amount, currency, counterparty_name, reference, note,
+     status, idempotency_key, idempotency_fingerprint, created_by,
+     created_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- Agreed price 350.00 is informational; actual cash received is
+    -- the 320.00 proceeds leg — the difference is NEVER a computed
+    -- gain/loss (formula UNRESOLVED, docs/08).
+    ('18181818-0000-4000-8000-000000000001', 9001,
+     '10101010-0000-4000-8000-000000000001', '2026-04-01',
+     350.00, 'TRY', 'Drill Alıcı AŞ', 'SAT-9001', NULL, 'posted',
+     'drill-didem-0001', 'drill-dfp-0001',
+     '11111111-0000-4000-8000-0000000000aa', '2026-04-01T10:00:00Z');
+
+INSERT INTO investment_disposal_proceeds
+    (id, disposal_id, financial_account_id, amount, currency,
+     occurred_at, reference, account_movement_id, created_at)
+VALUES
+    ('20202020-0000-4000-8000-000000000001',
+     '18181818-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000002', 320.00, 'TRY',
+     '2026-04-01T10:00:00Z', 'EFT-9001',
+     'f2f2f2f2-0000-4000-8000-000000000015', '2026-04-01T10:00:00Z');
+
 COMMIT;

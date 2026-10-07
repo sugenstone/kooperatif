@@ -156,7 +156,8 @@ pub async fn list_movements(
     sqlx::query_as(
         "SELECT m.id, m.account_id, m.direction, m.amount, m.source_type, m.source_id, \
             COALESCE(p.payment_number, t.transfer_number, i.income_number, e.expense_number, \
-                s.settlement_number) AS source_number, \
+                s.settlement_number, ivf.funding_number, ivn.income_number, \
+                ivd.disposal_number) AS source_number, \
             m.occurred_at, m.status, m.reversed_at, m.reversal_reason, m.created_at, \
             count(*) OVER() AS total_count \
         FROM account_movements m \
@@ -166,6 +167,13 @@ pub async fn list_movements(
         LEFT JOIN expense_entries e ON m.source_type = 'expense' AND m.source_id = e.id \
         LEFT JOIN share_return_settlements s \
             ON m.source_type = 'share_return_settlement' AND m.source_id = s.id \
+        LEFT JOIN investment_fundings ivf \
+            ON m.source_type = 'investment_funding' AND m.source_id = ivf.id \
+        LEFT JOIN investment_incomes ivn \
+            ON m.source_type = 'investment_income' AND m.source_id = ivn.id \
+        LEFT JOIN investment_disposal_proceeds ivp \
+            ON m.source_type = 'investment_disposal' AND m.source_id = ivp.id \
+        LEFT JOIN investment_disposals ivd ON ivd.id = ivp.disposal_id \
         WHERE m.account_id = $1 \
         ORDER BY m.occurred_at DESC, m.id LIMIT $2 OFFSET $3",
     )

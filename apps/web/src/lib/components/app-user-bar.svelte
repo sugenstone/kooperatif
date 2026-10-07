@@ -32,6 +32,9 @@
 		{#if can('share_returns.read')}
 			<Button variant="ghost" size="sm" href="/hisse-iadeleri">{t('nav.shareReturns')}</Button>
 		{/if}
+		{#if can('investments.read')}
+			<Button variant="ghost" size="sm" href="/yatirimlar">{t('nav.investments')}</Button>
+		{/if}
 		{#if can('periods.read')}
 			<Button variant="ghost" size="sm" href="/donemler">{t('nav.periods')}</Button>
 		{/if}

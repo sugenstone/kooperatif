@@ -312,7 +312,7 @@
 												{t('movements.sourcePayment')}
 												{movement.sourceNumber ?? ''}
 											</a>
-										{:else}
+										{:else if movement.sourceType === 'transfer'}
 											<a
 												class="underline-offset-2 hover:underline"
 												href={resolve(`/transferler/${movement.sourceId}`)}
@@ -320,6 +320,24 @@
 												{t('movements.sourceTransfer')}
 												{movement.sourceNumber ?? ''}
 											</a>
+										{:else if movement.sourceType === 'income'}
+											{t('movements.sourceIncome')}
+											{movement.sourceNumber ?? ''}
+										{:else if movement.sourceType === 'expense'}
+											{t('movements.sourceExpense')}
+											{movement.sourceNumber ?? ''}
+										{:else if movement.sourceType === 'share_return_settlement'}
+											{t('movements.sourceSettlement')}
+											{movement.sourceNumber ?? ''}
+										{:else if movement.sourceType === 'investment_funding'}
+											{t('movements.sourceInvestmentFunding')}
+											{movement.sourceNumber ?? ''}
+										{:else if movement.sourceType === 'investment_income'}
+											{t('movements.sourceInvestmentIncome')}
+											{movement.sourceNumber ?? ''}
+										{:else}
+											{t('movements.sourceInvestmentDisposal')}
+											{movement.sourceNumber ?? ''}
 										{/if}
 									</TableCell>
 									<TableCell>

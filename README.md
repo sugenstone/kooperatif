@@ -745,6 +745,87 @@ settled | cancelled`; remaining is always derived
   no profit distribution, no approval workflow, no automatic payment
   plan — deferred (docs/10 open decisions, docs/17).
 
+## Investment & Investment Cash-Flow (STEP-012, docs/08 + docs/03 + docs/15)
+
+The cooperative investment domain. **Four concepts stay strictly
+separate: (1) the Investment identity — what the cooperative owns,
+which moves NO money; (2) Acquisition Cost — funding legs of real
+money paid out, each bound 1:1 to ONE outflow Account Movement;
+(3) Estimated Value — valuation history that moves ZERO cash and is
+never "profit"; and (4) Cash Result — actual investment income and
+disposal proceeds, one inflow movement per leg. Owning an asset is
+not spending money, an estimated value is not cash, and an agreed
+sale price is not money received.**
+
+- **`investments`** — the cooperative-owned asset: stable
+  `investment_number`, `investment_type ∈ {real_estate, business}`
+  (the minimal authoritative distinction — the full taxonomy is an
+  open decision in docs/08), bounded metadata (`location`,
+  `reference` — title deed/contract, `counterparty_name`), business
+  `acquired_at` DATE. Lifecycle `active → disposed | cancelled` with
+  DB-enforced consistency CHECKs; cancellation requires zero
+  financial events. **No money column exists on the row** — cost,
+  value and cash are always derived.
+- **`investment_fundings`** — acquisition funding legs: real cash
+  leaving a Financial Account through exactly ONE `outflow` movement
+  with `source_type = 'investment_funding'`. It is **not** Expense,
+  Payment, Transfer or Shareholder Credit and never touches those
+  tables — the operational income/expense summary is untouched
+  (docs/03: asset acquisition is not automatically Expense).
+  Insufficient funds reject `409` under the account row lock; a leg
+  reversal restores the balance while preserving history.
+- **`investment_valuations`** — dated value records preserving
+  `method` + `source` (docs/08, docs/17 POLICY_DRIVEN). A valuation
+  creates **zero** Account Movements and zero Income; a mistaken
+  record is `cancelled` with actor + reason — never deleted, never
+  rewrites acquisition cost.
+- **`investment_incomes`** — real money received because of the
+  investment (rent, business distribution): exactly ONE `inflow`
+  movement with `source_type = 'investment_income'`. It creates **no**
+  `incomes` row — one real receipt, one authoritative cash effect, no
+  double counting in the operational summary.
+- **`investment_disposals` + `investment_disposal_proceeds`** — the
+  derecognition event plus ACTUAL cash legs per Financial Account
+  (`source_type = 'investment_disposal'`). `consideration_amount` is
+  the agreed sale price — informational metadata, never treated as
+  cash received. **No realized gain/loss is computed**: the formula
+  is UNRESOLVED in docs/08 + docs/17 and was not invented. A posted
+  disposal is terminal in STEP-012 (reversal semantics undefined).
+- **Idempotent commands** (ADR-006): create, fund, value, earn,
+  dispose and reversals all carry durable `idempotency_key` + payload
+  fingerprints; replay returns the stored result, a conflicting reuse
+  answers `409`.
+- **API**: `GET|POST /api/investments`, `GET /api/investments/{id}`,
+  `POST …/cancel`, `POST …/fundings`,
+  `POST /api/investment-fundings/{id}/reverse`, `POST …/valuations`,
+  `POST /api/investment-valuations/{id}/cancel`, `POST …/incomes`,
+  `POST /api/investment-incomes/{id}/reverse`, `POST …/dispose`.
+  Movement listings resolve the new investment provenance labels.
+- **Permissions**: `investments.read`, `investments.manage` — granted
+  to `Sistem Yöneticisi` by migration 0012; every route is
+  backend-authorized and every mutation is CSRF-protected.
+- **Audit**: `investment_created`, `investment_cancelled`,
+  `investment_funding_posted`, `investment_funding_reversed`,
+  `investment_valuation_recorded`, `investment_valuation_cancelled`,
+  `investment_income_posted`, `investment_income_reversed`,
+  `investment_disposed` land in `security_events`.
+- **Frontend**: `/yatirimlar` (filtered, paginated list with derived
+  totals), `/yatirimlar/yeni` (identity-only creation),
+  `/yatirimlar/{id}` (funding, valuation, income and disposal panels
+  + per-row reversal with reasons). Turkish-first i18n; tr-TR money
+  inputs go through `parseTryInput`; the estimated value always
+  carries the "informational, not cash/profit" notice.
+- **E2E**: `node scripts/e2e-step012.mjs` drives the real stack —
+  UI-created investment (zero money), UI funding (exactly one
+  `investment_funding` outflow, summary untouched), UI valuation
+  (zero movements), UI income (one `investment_income` inflow, no
+  `incomes` row), UI disposal with agreed price + actual proceeds
+  leg, and a disposed investment that accepts no further actions.
+- **Boundary**: no investment expense classification (UNRESOLVED in
+  docs/08), no expected/forecast income engine, no realized-gain
+  formula, no disposal reversal, no partial disposal, no
+  profit-distribution or NAV policy — deferred.
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a

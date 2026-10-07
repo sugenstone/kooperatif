@@ -32,7 +32,10 @@ export type MovementSourceType =
 	| 'transfer'
 	| 'income'
 	| 'expense'
-	| 'share_return_settlement';
+	| 'share_return_settlement'
+	| 'investment_funding'
+	| 'investment_income'
+	| 'investment_disposal';
 export type TransferStatus = 'posted' | 'reversed';
 
 export interface FinancialAccount {

@@ -103,6 +103,12 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'movements.outflow': 'Outflow',
 	'movements.sourcePayment': 'Collection',
 	'movements.sourceTransfer': 'Transfer',
+	'movements.sourceIncome': 'Income',
+	'movements.sourceExpense': 'Expense',
+	'movements.sourceSettlement': 'Return Settlement',
+	'movements.sourceInvestmentFunding': 'Investment Funding',
+	'movements.sourceInvestmentIncome': 'Investment Income',
+	'movements.sourceInvestmentDisposal': 'Investment Disposal',
 	'movements.statusActive': 'Valid',
 	'movements.statusReversed': 'Reversed',
 	'transfers.title': 'Account Transfers',
@@ -194,5 +200,15 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'entitlements.typePrincipal': 'Principal Right',
 	'entitlements.typeProfit': 'Profit Right',
 	'entitlements.undetermined': 'Not yet determined',
-	'settlements.section': 'Settlements'
+	'settlements.section': 'Settlements',
+	'nav.investments': 'Investments',
+	'investments.title': 'Investments',
+	'investments.create': 'New Investment',
+	'investments.typeRealEstate': 'Real Estate',
+	'investments.typeBusiness': 'Business',
+	'investments.statusActive': 'Active',
+	'investments.statusDisposed': 'Disposed',
+	'investments.statusCancelled': 'Cancelled',
+	'valuations.new.description':
+		'This valuation is informational only; it does not change account balances or create income/expense.'
 };

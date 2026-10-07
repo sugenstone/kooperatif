@@ -16,6 +16,7 @@ pub mod db;
 pub mod financial_accounts;
 pub mod http;
 pub mod income_expense;
+pub mod investments;
 pub mod observability;
 pub mod parties;
 pub mod payments;

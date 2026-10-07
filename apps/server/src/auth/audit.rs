@@ -70,6 +70,15 @@ pub enum SecurityEventType {
     ShareReturnEntitlementCancelled,
     ShareReturnSettlementPosted,
     ShareReturnSettlementReversed,
+    InvestmentCreated,
+    InvestmentCancelled,
+    InvestmentFundingPosted,
+    InvestmentFundingReversed,
+    InvestmentValuationRecorded,
+    InvestmentValuationCancelled,
+    InvestmentIncomePosted,
+    InvestmentIncomeReversed,
+    InvestmentDisposed,
 }
 
 impl SecurityEventType {
@@ -134,6 +143,15 @@ impl SecurityEventType {
             Self::ShareReturnEntitlementCancelled => "share_return_entitlement_cancelled",
             Self::ShareReturnSettlementPosted => "share_return_settlement_posted",
             Self::ShareReturnSettlementReversed => "share_return_settlement_reversed",
+            Self::InvestmentCreated => "investment_created",
+            Self::InvestmentCancelled => "investment_cancelled",
+            Self::InvestmentFundingPosted => "investment_funding_posted",
+            Self::InvestmentFundingReversed => "investment_funding_reversed",
+            Self::InvestmentValuationRecorded => "investment_valuation_recorded",
+            Self::InvestmentValuationCancelled => "investment_valuation_cancelled",
+            Self::InvestmentIncomePosted => "investment_income_posted",
+            Self::InvestmentIncomeReversed => "investment_income_reversed",
+            Self::InvestmentDisposed => "investment_disposed",
         }
     }
 }

@@ -121,8 +121,9 @@ impl MovementDirection {
 
 /// Structured movement provenance — the ONLY allowed movement sources
 /// (docs/07 §movements). STEP-008: payment/transfer. STEP-010 adds
-/// income/expense. STEP-011 adds share_return_settlement — domain
-/// commands only, still no arbitrary movement endpoint.
+/// income/expense. STEP-011 adds share_return_settlement; STEP-012 adds
+/// investment_funding / investment_income / investment_disposal —
+/// domain commands only, still no arbitrary movement endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovementSource {
     Payment,
@@ -130,6 +131,9 @@ pub enum MovementSource {
     Income,
     Expense,
     ShareReturnSettlement,
+    InvestmentFunding,
+    InvestmentIncome,
+    InvestmentDisposal,
 }
 
 impl MovementSource {
@@ -140,6 +144,9 @@ impl MovementSource {
             Self::Income => "income",
             Self::Expense => "expense",
             Self::ShareReturnSettlement => "share_return_settlement",
+            Self::InvestmentFunding => "investment_funding",
+            Self::InvestmentIncome => "investment_income",
+            Self::InvestmentDisposal => "investment_disposal",
         }
     }
 
@@ -150,6 +157,9 @@ impl MovementSource {
             "income" => Some(Self::Income),
             "expense" => Some(Self::Expense),
             "share_return_settlement" => Some(Self::ShareReturnSettlement),
+            "investment_funding" => Some(Self::InvestmentFunding),
+            "investment_income" => Some(Self::InvestmentIncome),
+            "investment_disposal" => Some(Self::InvestmentDisposal),
             _ => None,
         }
     }
