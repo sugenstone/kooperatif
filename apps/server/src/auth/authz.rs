@@ -77,6 +77,13 @@ pub mod catalog {
     pub const GOVERNANCE_READ: &str = "governance.read";
     pub const GOVERNANCE_MANAGE: &str = "governance.manage";
 
+    /// STEP-015 — cross-domain reporting. A single read permission
+    /// guards the reporting surface: holding one domain's read grant
+    /// never implies cross-domain report access (docs/14 §permissions,
+    /// docs/18). There is no `reports.manage` — reports are read-only
+    /// projections and never mutate state.
+    pub const REPORTS_READ: &str = "reports.read";
+
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
     /// contracts (see README "adding a new permission").
@@ -111,6 +118,7 @@ pub mod catalog {
         SOCIAL_AID_MANAGE,
         GOVERNANCE_READ,
         GOVERNANCE_MANAGE,
+        REPORTS_READ,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -244,7 +252,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 30, "STEP-003..STEP-014 catalog");
+        assert_eq!(catalog::ALL.len(), 31, "STEP-003..STEP-015 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

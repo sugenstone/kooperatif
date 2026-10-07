@@ -980,6 +980,64 @@ those rules are open decisions in docs/09 and are not invented.**
   on business actions, no decision-to-transaction linkage, no vote
   change/withdrawal (undefined correction policy) — deferred.
 
+## Reporting & Traceable Analytics (STEP-015, docs/14 + docs/15 + docs/17)
+
+The read-only projection layer over authoritative domain history.
+**Every reported number is derived at query time from the canonical
+  domain formula of its owning module — nothing is stored, recomputed
+  differently, or invented. Reports mutate ZERO rows; reversed records
+  never contribute to current totals yet stay traceable; NULL is never
+  rendered as zero; a metric without an authoritative policy is absent,
+  not guessed (no Net Worth/NAV/Profit/Balance-Sheet/gain arithmetic).**
+
+- **Endpoint surface** (`/api/reports/*`, all `reports.read`, all
+  `no-store`, all GET): `overview` (single-snapshot dashboard),
+  `financial-accounts`, `movements` (provenance ledger with
+  source-type join + external/internal classification), `assessments`
+  + `assessments/summary`, `periods` (docs/14 collection semantics:
+  payment allocations vs credit applications kept separate),
+  `shareholders`, `families`, `payments` + `payments/summary`
+  (posted/allocated/credited/unassigned + payer≠debtor names),
+  `credits`, `share-returns` (undetermined entitlements stay NULL),
+  `investments` (funding/valuation/income/disposal separate),
+  `social-aid` (fund + (fund,account) pair restriction), `governance`
+  (recorded evidence, zero money), `income-expense-trend` (monthly
+  business-date buckets).
+- **Summary/detail contract**: a list's `summary` always spans the
+  FULL filtered set regardless of page; filtered summaries are queried
+  with the identical filter set (`assessments/summary` is a dedicated
+  endpoint sharing the same filters). Movement totals default to
+  `status=active` — an explicit `status=reversed` filter reports the
+  reversed subset instead.
+- **Permission**: `reports.read` — a single cross-domain grant seeded
+  by migration 0015 onto `Sistem Yöneticisi`. Holding a domain read
+  permission does NOT open reports; holding `reports.read` grants no
+  mutation capability (proven: scoped-user 403/200 matrix + a denied
+  POST).
+- **Money**: aggregation runs in SQL `NUMERIC(19,2)`; the API carries
+  canonical scale-2 decimal strings; the UI formats with the string
+  level `formatTry` — no browser float arithmetic anywhere.
+- **Frontend**: `/raporlar` hub — overview cards grouped by domain
+  (each boundary metric carries its "not cash / not additive" note),
+  a report-type selector, shared filter bar + summary chips +
+  paginated tables, and drill-down links into the owning domain
+  detail screens (payments→Tahsilatlar, entitlements→Hisse İadeleri,
+  funds→Sosyal Yardım, decisions→Yönetim, …).
+- **Verification**: `apps/server/tests/reports.rs` (18 tests — golden
+  cross-domain fixture with hand-computed expectations, canonical
+  formula reuse, reversal exclusion + traceability, NULL preservation,
+  exact-decimal scale-2 proof at NUMERIC limits, filter/summary
+  agreement, pagination total independence, read-only row-count proof,
+  permission matrix); `src/specs/reports-pages.spec.ts` (6 tests);
+  `scripts/e2e-step015.mjs` (real stack); backup drill parity stage
+  compares every report metric SOURCE-vs-RESTORED — reports need no
+  report-table backup because no report state exists.
+- **Boundary**: no PDF/XLSX/print export (docs/14 rendering decision
+  open), no scheduled or snapshot reports, no as-of point-in-time
+  reporting (historical reversal semantics undefined), no receivable
+  statements/documents (separate transactional-document class), no
+  drill-through pages beyond canonical detail links — deferred.
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a

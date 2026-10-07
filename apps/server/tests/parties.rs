@@ -947,7 +947,7 @@ async fn parties_authorization_and_permission_upgrade() {
         perms.contains(&"assessments.manage".to_string()),
         "{perms:?}"
     );
-    assert_eq!(perms.len(), 30);
+    assert_eq!(perms.len(), 31);
     assert!(
         perms.contains(&"financial_accounts.manage".to_string()),
         "{perms:?}"

@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 30],
+			['permissions', 31],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -600,6 +600,90 @@ async function main() {
 			'Vote survives later membership end',
 			"SELECT v.choice||'|'||(m.ended_at IS NOT NULL) FROM governance_votes v JOIN governance_memberships m ON m.id=v.membership_id WHERE v.id='43434343-0000-4000-8000-000000000002'",
 			'abstain|true'
+		);
+
+		// STEP-015 derived truths on the restored copy — every reported
+		// metric is a projection over authoritative rows; NO report state
+		// exists to be backed up, so a correct restore must reconstruct
+		// the identical numbers. Each metric is compared SOURCE-vs-RESTORE
+		// (parity), and headline figures are pinned to literals.
+		const reportParity = [
+			[
+				'overview.financialAccountsBalance',
+				"SELECT coalesce(sum(bal),0)::text FROM (SELECT account_id, sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END) AS bal FROM account_movements WHERE status='active' GROUP BY account_id) b"
+			],
+			[
+				'overview.outstandingAssessmentDebt',
+				"SELECT coalesce(sum(a.amount - COALESCE(pa.paid,0) - COALESCE(ca.applied,0)),0)::text FROM assessments a LEFT JOIN (SELECT assessment_id, sum(amount) paid FROM payment_allocations WHERE status='active' GROUP BY assessment_id) pa ON pa.assessment_id=a.id LEFT JOIN (SELECT assessment_id, sum(amount) applied FROM credit_applications WHERE status='active' GROUP BY assessment_id) ca ON ca.assessment_id=a.id WHERE a.status='active'"
+			],
+			[
+				'overview.availableShareholderCredit',
+				"SELECT (coalesce((SELECT sum(amount) FROM shareholder_credits WHERE status='active'),0) - coalesce((SELECT sum(amount) FROM credit_applications WHERE status='active'),0))::text"
+			],
+			[
+				'overview.operationalIncome|Expense|Net',
+				"SELECT (SELECT coalesce(sum(amount),0)::text FROM income_entries WHERE status='posted')||'|'||(SELECT coalesce(sum(amount),0)::text FROM expense_entries WHERE status='posted')||'|'||((SELECT coalesce(sum(amount),0) FROM income_entries WHERE status='posted')-(SELECT coalesce(sum(amount),0) FROM expense_entries WHERE status='posted'))::text"
+			],
+			[
+				'overview.postedPaymentsTotal|Count',
+				"SELECT coalesce(sum(amount),0)::text||'|'||count(*) FROM payments WHERE status='posted'"
+			],
+			[
+				'overview.entitlementDetermined|Undetermined|Settled',
+				"SELECT coalesce(sum(e.amount - COALESCE(s.settled,0)) FILTER (WHERE e.amount IS NOT NULL),0)::text||'|'||count(*) FILTER (WHERE e.amount IS NULL)||'|'||coalesce(sum(COALESCE(s.settled,0)),0)::text FROM share_return_entitlements e LEFT JOIN (SELECT entitlement_id, sum(amount) settled FROM share_return_settlements WHERE status='posted' GROUP BY entitlement_id) s ON s.entitlement_id=e.id WHERE e.status <> 'cancelled'"
+			],
+			[
+				'overview.investmentFunded|LatestValuation|Income',
+				"SELECT coalesce((SELECT sum(amount) FROM investment_fundings WHERE status='posted'),0)::text||'|'||coalesce((SELECT sum(amount) FROM (SELECT DISTINCT ON (investment_id) amount FROM investment_valuations WHERE status='recorded' ORDER BY investment_id, valuation_date DESC, valuation_number DESC) lv),0)::text||'|'||coalesce((SELECT sum(amount) FROM investment_incomes WHERE status='posted'),0)::text"
+			],
+			[
+				'overview.socialAidRestricted|Donations|Disbursements',
+				"SELECT (coalesce((SELECT sum(amount) FROM social_aid_donations WHERE status='posted'),0) - coalesce((SELECT sum(amount) FROM social_aid_disbursements WHERE status='posted'),0))::text||'|'||coalesce((SELECT sum(amount) FROM social_aid_donations WHERE status='posted'),0)::text||'|'||coalesce((SELECT sum(amount) FROM social_aid_disbursements WHERE status='posted'),0)::text"
+			],
+			[
+				'overview.activeShareholders|Shares|Bodies|Approved',
+				"SELECT (SELECT count(*) FROM shareholders WHERE status='active')||'|'||(SELECT count(*) FROM shares s WHERE s.status='active' AND EXISTS (SELECT 1 FROM share_ownerships o WHERE o.share_id=s.id AND o.ended_at IS NULL))||'|'||(SELECT count(*) FROM governance_bodies WHERE status='active')||'|'||(SELECT count(*) FROM governance_decisions WHERE status='approved')"
+			],
+			[
+				'movements.externalInflow|Outflow|InternalTransfer',
+				"SELECT coalesce(sum(amount) FILTER (WHERE direction='inflow' AND source_type <> 'transfer'),0)::text||'|'||coalesce(sum(amount) FILTER (WHERE direction='outflow' AND source_type <> 'transfer'),0)::text||'|'||coalesce(sum(amount) FILTER (WHERE direction='inflow' AND source_type='transfer'),0)::text FROM account_movements WHERE status='active'"
+			],
+			[
+				'periods.totalAssessed|Allocated|CreditApplied|Outstanding',
+				"SELECT coalesce(sum(a.amount),0)::text||'|'||coalesce(sum(COALESCE(pa.paid,0)),0)::text||'|'||coalesce(sum(COALESCE(ca.applied,0)),0)::text||'|'||coalesce(sum(a.amount - COALESCE(pa.paid,0) - COALESCE(ca.applied,0)),0)::text FROM assessments a LEFT JOIN (SELECT assessment_id, sum(amount) paid FROM payment_allocations WHERE status='active' GROUP BY assessment_id) pa ON pa.assessment_id=a.id LEFT JOIN (SELECT assessment_id, sum(amount) applied FROM credit_applications WHERE status='active' GROUP BY assessment_id) ca ON ca.assessment_id=a.id WHERE a.status='active'"
+			]
+		];
+		for (const [name, sql] of reportParity) {
+			const src = adminSql(sql, SOURCE_DB);
+			const dst = adminSql(sql, RESTORE_DB);
+			stage(`Report parity ${name}`, src === dst && src !== '');
+			if (src !== dst) log(`    source=${src} restored=${dst}`);
+		}
+		// Headline metrics pinned to literals on the restored copy.
+		expect(
+			'Report metric: total balance (335+360=695.00)',
+			"SELECT coalesce(sum(bal),0)::text FROM (SELECT account_id, sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END) AS bal FROM account_movements WHERE status='active' GROUP BY account_id) b",
+			'695.00'
+		);
+		expect(
+			'Report metric: restricted availability (180.00)',
+			"SELECT (coalesce((SELECT sum(amount) FROM social_aid_donations WHERE status='posted'),0) - coalesce((SELECT sum(amount) FROM social_aid_disbursements WHERE status='posted'),0))::text",
+			'180.00'
+		);
+		expect(
+			'Report metric: determined entitlement outstanding (700.00)',
+			"SELECT coalesce(sum(e.amount - COALESCE(s.settled,0)) FILTER (WHERE e.amount IS NOT NULL),0)::text FROM share_return_entitlements e LEFT JOIN (SELECT entitlement_id, sum(amount) settled FROM share_return_settlements WHERE status='posted' GROUP BY entitlement_id) s ON s.entitlement_id=e.id WHERE e.status <> 'cancelled'",
+			'700.00'
+		);
+		expect(
+			'Report metric: undetermined entitlement stays NULL-counted (1)',
+			"SELECT count(*) FROM share_return_entitlements WHERE amount IS NULL AND status <> 'cancelled'",
+			'1'
+		);
+		expect(
+			'Report metric: reports.read permission restored',
+			"SELECT count(*) FROM permissions WHERE key='reports.read'",
+			'1'
 		);
 
 		// Constraints must still BEHAVE after restore — not just exist.

@@ -172,11 +172,38 @@ pub struct CreateFamilyRequest {
     pub sequence_number: i64,
 }
 
+/// Tolerates both `?page=2` (number) and the stringified values a
+/// `#[serde(flatten)]` parent delivers (serde_urlencoded buffers
+/// flattened fields as untyped content, so a plain Option<i64> would
+/// fail to deserialize "2").
+fn query_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(i64),
+        Str(String),
+    }
+    match Option::<NumOrStr>::deserialize(deserializer)? {
+        Some(NumOrStr::Num(n)) => Ok(Some(n)),
+        Some(NumOrStr::Str(raw)) => raw
+            .trim()
+            .parse()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ListQuery {
     pub search: Option<String>,
+    #[serde(default, deserialize_with = "query_i64")]
     pub page: Option<i64>,
+    #[serde(default, deserialize_with = "query_i64")]
     pub page_size: Option<i64>,
 }
 
