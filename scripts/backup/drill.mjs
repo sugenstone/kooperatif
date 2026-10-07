@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 28],
+			['permissions', 30],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -205,7 +205,11 @@ async function main() {
 			['investment_disposal_proceeds', 1],
 			['social_aid_funds', 2],
 			['social_aid_donations', 2],
-			['social_aid_disbursements', 2]
+			['social_aid_disbursements', 2],
+			['governance_bodies', 2],
+			['governance_memberships', 3],
+			['governance_decisions', 3],
+			['governance_votes', 3]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -394,6 +398,32 @@ async function main() {
 			[
 				"SELECT d.status||'|'||m.status||'|'||d.reversal_reason FROM social_aid_disbursements d JOIN account_movements m ON m.id=d.account_movement_id WHERE d.disbursement_number=9002",
 				'reversed|reversed|drill: hatalı yardım'
+			],
+			// STEP-014: governance evidence survives restore exactly.
+			[
+				"SELECT name||'|'||status FROM governance_bodies WHERE body_number=9001",
+				'Drill Yönetim Kurulu|active'
+			],
+			[
+				"SELECT status||'|'||(closed_by IS NOT NULL) FROM governance_bodies WHERE body_number=9002",
+				'closed|true'
+			],
+			[
+				"SELECT end_reason FROM governance_memberships WHERE id='41414141-0000-4000-8000-000000000002'",
+				'drill: görev süresi doldu'
+			],
+			// Approved decision keeps its FROZEN finalization snapshot.
+			[
+				"SELECT status||'|'||eligible_count||'|'||approve_count||'|'||reject_count||'|'||abstain_count FROM governance_decisions WHERE decision_number=9001",
+				'approved|2|1|0|1'
+			],
+			[
+				"SELECT status||'|'||cancellation_reason FROM governance_decisions WHERE decision_number=9002",
+				'cancelled|drill: gündemden düştü'
+			],
+			[
+				"SELECT p.first_name||' '||p.last_name||'|'||v.choice FROM governance_votes v JOIN persons p ON p.id=v.person_id WHERE v.id='43434343-0000-4000-8000-000000000001'",
+				'Yedek Hissedarı|approve'
 			]
 		];
 		let allRel = true;
@@ -554,6 +584,22 @@ async function main() {
 			'Social aid ≠ income/expense/payment/transfer',
 			"SELECT count(*) FROM account_movements WHERE source_type IN ('social_aid_donation','social_aid_disbursement') AND (source_id IN (SELECT id FROM payments) OR source_id IN (SELECT id FROM income_entries) OR source_id IN (SELECT id FROM expense_entries) OR source_id IN (SELECT id FROM account_transfers))",
 			'0'
+		);
+
+		// STEP-014 derived truths on the restored copy — governance is
+		// pure evidence: bodies/memberships/decisions/votes exist but no
+		// account movement ever carries a governance leg.
+		expect(
+			'Governance wrote ZERO account movements',
+			"SELECT count(*) FROM account_movements WHERE source_type LIKE 'governance%' OR source_id IN (SELECT id FROM governance_bodies) OR source_id IN (SELECT id FROM governance_decisions) OR source_id IN (SELECT id FROM governance_votes)",
+			'0'
+		);
+		// A vote cast while the seat was active stays valid evidence even
+		// though the membership later ended (membership_id snapshot).
+		expect(
+			'Vote survives later membership end',
+			"SELECT v.choice||'|'||(m.ended_at IS NOT NULL) FROM governance_votes v JOIN governance_memberships m ON m.id=v.membership_id WHERE v.id='43434343-0000-4000-8000-000000000002'",
+			'abstain|true'
 		);
 
 		// Constraints must still BEHAVE after restore — not just exist.
@@ -881,6 +927,60 @@ async function main() {
 				'social aid movement leg uniqueness',
 				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
 				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','inflow',1,'social_aid_donation','31313131-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
+			],
+			// STEP-014 invariants must still BEHAVE after restore.
+			[
+				'body status enum',
+				`UPDATE governance_bodies SET status='archived' WHERE body_number=9001`
+			],
+			[
+				'body idempotency key unique',
+				`INSERT INTO governance_bodies (name, body_type, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','drill','drill-gbidem-0001','drill-gx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'body closed consistency check',
+				`INSERT INTO governance_bodies (name, body_type, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','drill','closed','drill-gy','drill-gy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'membership window check (end before start)',
+				`INSERT INTO governance_memberships (body_id, person_id, started_at, ended_at, ended_by, end_reason, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('40404040-0000-4000-8000-000000000001','22222222-0000-4000-8000-000000000003','2026-05-02','2026-05-01','11111111-0000-4000-8000-0000000000aa','drill','drill-gmx','drill-gmx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'membership ended consistency check',
+				`INSERT INTO governance_memberships (body_id, person_id, started_at, ended_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('40404040-0000-4000-8000-000000000001','22222222-0000-4000-8000-000000000003','2026-05-01','2026-05-02','drill-gmy','drill-gmy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'one active membership per (body,person)',
+				`INSERT INTO governance_memberships (body_id, person_id, started_at, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('40404040-0000-4000-8000-000000000001','22222222-0000-4000-8000-000000000001',now(),'drill-gmz','drill-gmz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'decision status enum',
+				`UPDATE governance_decisions SET status='pending' WHERE decision_number=9001`
+			],
+			[
+				'decision finalized consistency check',
+				`INSERT INTO governance_decisions (body_id, title, decision_text, decision_on, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('40404040-0000-4000-8000-000000000001','drill','drill','2026-05-01','approved','drill-gdx','drill-gdx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'decision cancelled consistency check',
+				`INSERT INTO governance_decisions (body_id, title, decision_text, decision_on, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('40404040-0000-4000-8000-000000000001','drill','drill','2026-05-01','cancelled','drill-gdy','drill-gdy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'vote (decision,person) unique',
+				`INSERT INTO governance_votes (decision_id, membership_id, person_id, choice, recorded_by, idempotency_key, idempotency_fingerprint)
+				 VALUES ('42424242-0000-4000-8000-000000000001','41414141-0000-4000-8000-000000000001','22222222-0000-4000-8000-000000000001','reject','11111111-0000-4000-8000-0000000000aa','drill-gvx','drill-gvx')`
+			],
+			[
+				'vote choice enum',
+				`INSERT INTO governance_votes (decision_id, membership_id, person_id, choice, recorded_by, idempotency_key, idempotency_fingerprint)
+				 VALUES ('42424242-0000-4000-8000-000000000001','41414141-0000-4000-8000-000000000002','22222222-0000-4000-8000-000000000002','yes','11111111-0000-4000-8000-0000000000aa','drill-gvy','drill-gvy')`
 			]
 		];
 		let allConstraints = true;

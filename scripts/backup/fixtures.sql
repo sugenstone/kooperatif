@@ -23,6 +23,9 @@
 --   disposal proceeds; social aid funds + donations + disbursements
 --   (incl. REVERSED rows) bound 1:1 to social_aid-sourced movements —
 --   restricted availability is DERIVED, never stored
+--   governance bodies (active + closed) + temporal memberships +
+--   decisions (approved w/ frozen snapshot, cancelled, rejected) +
+--   votes — pure evidence, ZERO account movements
 
 BEGIN;
 
@@ -911,5 +914,140 @@ VALUES
      'drill: hatalı yardım',
      '11111111-0000-4000-8000-0000000000aa',
      '2026-02-16T10:00:00Z', '2026-02-16T15:00:00Z');
+
+-- ---------------------------------------------------------------------
+-- STEP-014: Governance — bodies, temporal memberships, decisions, votes.
+-- Governance is EVIDENCE, never money: zero account_movements legs.
+-- ---------------------------------------------------------------------
+
+INSERT INTO governance_bodies
+    (id, body_number, name, body_type, description, status,
+     closed_at, closed_by, idempotency_key, idempotency_fingerprint,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- Active organ.
+    ('40404040-0000-4000-8000-000000000001', 9001,
+     'Drill Yönetim Kurulu', 'Yönetim Kurulu', 'drill: ana organ',
+     'active', NULL, NULL,
+     'drill-gbidem-0001', 'drill-gbfp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-05T10:00:00Z', '2026-01-05T10:00:00Z'),
+    -- Closed organ keeps close evidence + ALL history.
+    ('40404040-0000-4000-8000-000000000002', 9002,
+     'Drill Denetim Kurulu', 'Denetim Kurulu', NULL,
+     'closed', '2026-03-01T10:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa',
+     'drill-gbidem-0002', 'drill-gbfp-0002',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-05T11:00:00Z', '2026-03-01T10:00:00Z');
+
+INSERT INTO governance_memberships
+    (id, body_id, person_id, title, started_at, ended_at, ended_by,
+     end_reason, idempotency_key, idempotency_fingerprint,
+     created_by, created_at, updated_at)
+VALUES
+    -- Active seat on the open board.
+    ('41414141-0000-4000-8000-000000000001',
+     '40404040-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000001', 'Üye',
+     '2026-01-06T10:00:00Z', NULL, NULL, NULL,
+     'drill-gmidem-0001', 'drill-gmfp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-06T10:00:00Z', '2026-01-06T10:00:00Z'),
+    -- Seat that was ACTIVE when its vote was cast (2026-02-06) and
+    -- ended later — ending a term never rewrites who voted.
+    ('41414141-0000-4000-8000-000000000002',
+     '40404040-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000002', 'Üye',
+     '2026-01-06T11:00:00Z', '2026-02-28T10:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: görev süresi doldu',
+     'drill-gmidem-0002', 'drill-gmfp-0002',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-06T11:00:00Z', '2026-02-28T10:00:00Z'),
+    -- Historical seat on the closed board.
+    ('41414141-0000-4000-8000-000000000003',
+     '40404040-0000-4000-8000-000000000002',
+     '22222222-0000-4000-8000-000000000003', NULL,
+     '2026-01-06T12:00:00Z', '2026-02-20T10:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa',
+     'drill: kurul kapanışı öncesi',
+     'drill-gmidem-0003', 'drill-gmfp-0003',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-06T12:00:00Z', '2026-02-20T10:00:00Z');
+
+INSERT INTO governance_decisions
+    (id, decision_number, body_id, title, decision_text, decision_on,
+     effective_on, status, opened_at, opened_by, finalized_at,
+     finalized_by, eligible_count, approve_count, reject_count,
+     abstain_count, cancelled_at, cancelled_by, cancellation_reason,
+     idempotency_key, idempotency_fingerprint, created_by, created_at,
+     updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- APPROVED with the frozen finalization snapshot: electorate 2,
+    -- tally 1/0/1. The snapshot is evidence — no pass rule exists.
+    ('42424242-0000-4000-8000-000000000001', 9001,
+     '40404040-0000-4000-8000-000000000001',
+     'Drill Bütçe Kararı', 'drill: 2026 bütçesi onaylansın',
+     '2026-02-05', '2026-03-01', 'approved',
+     '2026-02-05T10:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-05T12:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     2, 1, 0, 1,
+     NULL, NULL, NULL,
+     'drill-gdidem-0001', 'drill-gdfp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-04T10:00:00Z', '2026-02-05T12:00:00Z'),
+    -- CANCELLED draft — cancellation keeps actor + reason, no delete.
+    ('42424242-0000-4000-8000-000000000002', 9002,
+     '40404040-0000-4000-8000-000000000001',
+     'Drill Vazgeçilen Karar', 'drill: gündemden düşürülen taslak',
+     '2026-02-08', NULL, 'cancelled',
+     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+     '2026-02-09T10:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: gündemden düştü',
+     'drill-gdidem-0002', 'drill-gdfp-0002',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-08T10:00:00Z', '2026-02-09T10:00:00Z'),
+    -- REJECTED decision on the closed body — history survives close.
+    ('42424242-0000-4000-8000-000000000003', 9003,
+     '40404040-0000-4000-8000-000000000002',
+     'Drill Denetim Kararı', 'drill: rapor reddedilsin',
+     '2026-01-20', NULL, 'rejected',
+     '2026-01-20T10:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-20T11:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     1, 0, 1, 0,
+     NULL, NULL, NULL,
+     'drill-gdidem-0003', 'drill-gdfp-0003',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-01-19T10:00:00Z', '2026-01-20T11:00:00Z');
+
+INSERT INTO governance_votes
+    (id, decision_id, membership_id, person_id, choice, cast_at, note,
+     recorded_by, idempotency_key, idempotency_fingerprint, created_at)
+VALUES
+    ('43434343-0000-4000-8000-000000000001',
+     '42424242-0000-4000-8000-000000000001',
+     '41414141-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000001', 'approve',
+     '2026-02-05T10:30:00Z', 'drill: lehte',
+     '11111111-0000-4000-8000-0000000000aa',
+     'drill-gvidem-0001', 'drill-gvfp-0001', '2026-02-05T10:30:00Z'),
+    -- membership_id snapshots eligibility: this seat ended AFTER the
+    -- vote — restoring must keep the voter historically eligible.
+    ('43434343-0000-4000-8000-000000000002',
+     '42424242-0000-4000-8000-000000000001',
+     '41414141-0000-4000-8000-000000000002',
+     '22222222-0000-4000-8000-000000000002', 'abstain',
+     '2026-02-06T10:00:00Z', NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     'drill-gvidem-0002', 'drill-gvfp-0002', '2026-02-06T10:00:00Z'),
+    ('43434343-0000-4000-8000-000000000003',
+     '42424242-0000-4000-8000-000000000003',
+     '41414141-0000-4000-8000-000000000003',
+     '22222222-0000-4000-8000-000000000003', 'reject',
+     '2026-01-20T10:30:00Z', NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     'drill-gvidem-0003', 'drill-gvfp-0003', '2026-01-20T10:30:00Z');
 
 COMMIT;

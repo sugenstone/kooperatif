@@ -17,6 +17,7 @@ use crate::auth::routes::auth_router;
 use crate::auth::AuthRuntime;
 use crate::credits::routes::credits_router;
 use crate::financial_accounts::routes::financial_accounts_router;
+use crate::governance::routes::governance_router;
 use crate::http::error::fallback;
 use crate::income_expense::routes::income_expense_router;
 use crate::investments::routes::investments_router;
@@ -100,6 +101,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(share_returns_router())
         .merge(investments_router())
         .merge(social_aid_router())
+        .merge(governance_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

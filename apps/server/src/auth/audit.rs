@@ -86,6 +86,16 @@ pub enum SecurityEventType {
     SocialAidDonationReversed,
     SocialAidDisbursementPosted,
     SocialAidDisbursementReversed,
+    GovernanceBodyCreated,
+    GovernanceBodyClosed,
+    GovernanceMembershipStarted,
+    GovernanceMembershipEnded,
+    GovernanceDecisionCreated,
+    GovernanceDecisionUpdated,
+    GovernanceDecisionOpened,
+    GovernanceDecisionCancelled,
+    GovernanceVoteRecorded,
+    GovernanceDecisionFinalized,
 }
 
 impl SecurityEventType {
@@ -166,6 +176,16 @@ impl SecurityEventType {
             Self::SocialAidDonationReversed => "social_aid_donation_reversed",
             Self::SocialAidDisbursementPosted => "social_aid_disbursement_posted",
             Self::SocialAidDisbursementReversed => "social_aid_disbursement_reversed",
+            Self::GovernanceBodyCreated => "governance_body_created",
+            Self::GovernanceBodyClosed => "governance_body_closed",
+            Self::GovernanceMembershipStarted => "governance_membership_started",
+            Self::GovernanceMembershipEnded => "governance_membership_ended",
+            Self::GovernanceDecisionCreated => "governance_decision_created",
+            Self::GovernanceDecisionUpdated => "governance_decision_updated",
+            Self::GovernanceDecisionOpened => "governance_decision_opened",
+            Self::GovernanceDecisionCancelled => "governance_decision_cancelled",
+            Self::GovernanceVoteRecorded => "governance_vote_recorded",
+            Self::GovernanceDecisionFinalized => "governance_decision_finalized",
         }
     }
 }

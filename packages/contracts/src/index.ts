@@ -337,6 +337,41 @@ export {
 	socialAidFundPath
 } from './social-aid';
 export type {
+	CancelGovernanceDecisionRequest,
+	CastGovernanceVoteRequest,
+	CreateGovernanceBodyRequest,
+	CreateGovernanceDecisionRequest,
+	CreateGovernanceMembershipRequest,
+	EndGovernanceMembershipRequest,
+	FinalizeGovernanceDecisionRequest,
+	GovernanceBodyDetail,
+	GovernanceBodyListItem,
+	GovernanceBodyStatus,
+	GovernanceDecisionDetail,
+	GovernanceDecisionListItem,
+	GovernanceDecisionOutcome,
+	GovernanceDecisionStatus,
+	GovernanceMembership,
+	GovernanceVote,
+	GovernanceVoteChoice,
+	UpdateGovernanceDecisionRequest
+} from './governance';
+export {
+	GOVERNANCE_BODIES_PATH,
+	GOVERNANCE_DECISIONS_PATH,
+	GOVERNANCE_PERSONS_PATH,
+	governanceBodyClosePath,
+	governanceBodyMembershipsPath,
+	governanceBodyPath,
+	governanceDecisionCancelPath,
+	governanceDecisionFinalizePath,
+	governanceDecisionOpenPath,
+	governanceDecisionPath,
+	governanceDecisionUpdatePath,
+	governanceDecisionVotesPath,
+	governanceMembershipEndPath
+} from './governance';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

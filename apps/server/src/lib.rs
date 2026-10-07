@@ -14,6 +14,7 @@ pub mod config;
 pub mod credits;
 pub mod db;
 pub mod financial_accounts;
+pub mod governance;
 pub mod http;
 pub mod income_expense;
 pub mod investments;

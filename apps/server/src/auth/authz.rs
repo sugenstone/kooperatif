@@ -71,6 +71,12 @@ pub mod catalog {
     pub const SOCIAL_AID_READ: &str = "social_aid.read";
     pub const SOCIAL_AID_MANAGE: &str = "social_aid.manage";
 
+    /// STEP-014 — Governance surfaces. `governance.manage` lets an
+    /// operator RECORD governance facts; it never makes the user a
+    /// body member or voter (docs/18: RBAC != governance).
+    pub const GOVERNANCE_READ: &str = "governance.read";
+    pub const GOVERNANCE_MANAGE: &str = "governance.manage";
+
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
     /// contracts (see README "adding a new permission").
@@ -103,6 +109,8 @@ pub mod catalog {
         INVESTMENTS_MANAGE,
         SOCIAL_AID_READ,
         SOCIAL_AID_MANAGE,
+        GOVERNANCE_READ,
+        GOVERNANCE_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -236,7 +244,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 28, "STEP-003..STEP-013 catalog");
+        assert_eq!(catalog::ALL.len(), 30, "STEP-003..STEP-014 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

@@ -903,6 +903,83 @@ Allocation, Credit, Income, Expense, Transfer or Share Return row.**
   transfers, no donor/beneficiary deduplication policy, no campaign
   targets or pledge tracking — deferred.
 
+## Governance, Decisions & Voting (STEP-014, docs/09 + docs/16 + docs/18)
+
+The governance-evidence domain. **Governance is EVIDENCE, never money:
+bodies, memberships, decisions and votes write ZERO account movements
+and authorize nothing by themselves. RBAC permission is not governance
+membership — `governance.manage` lets an operator RECORD facts; only an
+active Person membership in the decision's body makes a vote eligible.
+The final outcome is recorded by an authorized operator (Model B): the
+system never computes quorum, majority or any vote-weight arithmetic —
+those rules are open decisions in docs/09 and are not invented.**
+
+- **`governance_bodies`** — configurable governing-organ identity
+  (`body_type` is bounded free text; the legal organ catalog is an open
+  decision). Stable `body_number`; lifecycle `active → closed`, closing
+  only with no draft/open decisions and no active memberships. Closed
+  bodies keep every historical decision and membership.
+- **`governance_memberships`** — temporal Person → Body link for
+  `[started_at, ended_at)`; `ended_at IS NULL` means active. At most
+  one active membership per (body, person). `title` is a label with no
+  attached powers. Ending a term sets the marker — history is never
+  rewritten and rejoining creates a new row.
+- **`governance_decisions`** — first-class evidence:
+  `draft → open → approved | rejected`, plus `draft → cancelled`; no
+  DELETE exists. Decision Date (`decision_on`) and Effective Date
+  (`effective_on`) are distinct business dates; reaching the effective
+  date never mutates status. Material content (title, text, dates,
+  body) freezes the moment voting opens. Finalization stores the
+  recorded outcome AND a frozen snapshot (`eligible_count`,
+  approve/reject/abstain counts) under consistency CHECKs.
+- **`governance_votes`** — one immutable row per (decision, person);
+  choices are `approve`/`reject`/`abstain`. Eligibility is evaluated
+  server-side at cast time against an ACTIVE membership; the vote row
+  snapshots `membership_id` so ending the seat later can never rewrite
+  who voted. `recorded_by` is the login actor — never conflated with
+  the voting Person (User ≠ Person).
+- **Idempotent commands** (ADR-006): body/membership/decision/vote
+  creation carries `idempotency_key` + payload fingerprint; state
+  transitions (open/cancel/finalize/end/close) replay-safe under the
+  canonical lock order (decision row → membership row).
+- **API**: `GET|POST /api/governance/bodies`, `GET …/bodies/{id}`,
+  `POST …/bodies/{id}/close`, `GET|POST …/bodies/{id}/memberships`,
+  `POST …/memberships/{id}/end`, `GET|POST /api/governance/decisions`,
+  `GET …/decisions/{id}`, `POST …/decisions/{id}/update|open|cancel`,
+  `POST …/decisions/{id}/votes`, `POST …/decisions/{id}/finalize`,
+  `GET /api/governance/persons` (canonical Person lookup scoped to
+  `governance.manage`).
+- **Permissions**: `governance.read`, `governance.manage` — granted to
+  `Sistem Yöneticisi` by migration 0014; backend-authorized routes,
+  CSRF on every mutation. System Administrator is NOT automatically a
+  governance member.
+- **Audit**: `governance_body_created`, `governance_body_closed`,
+  `governance_membership_started`, `governance_membership_ended`,
+  `governance_decision_created`, `governance_decision_updated`,
+  `governance_decision_opened`, `governance_decision_cancelled`,
+  `governance_decision_finalized`, `governance_vote_recorded` land in
+  `security_events`.
+- **Frontend**: `/yonetim` (decision register with body filter),
+  `/yonetim/kurullar` + `/yeni`, `/yonetim/kurullar/{id}` (membership
+  timeline with current/historical distinction, Person-resolution
+  member add, term end, body close), `/yonetim/kararlar/yeni`,
+  `/yonetim/kararlar/{id}` (draft edit, voting open, per-member vote
+  recording limited to the live electorate, finalize with recorded
+  outcome, frozen tally snapshot, votes + evidence list). Turkish-first
+  i18n; manage actions require `governance.manage`.
+- **E2E**: `node scripts/e2e-step014.mjs` drives the real stack —
+  UI body creation (zero money), Person-resolved membership, term end
+  preserving history, draft → open with content freeze, eligible-only
+  vote recording, ended-member and duplicate votes rejected (403/409),
+  finalize with recorded outcome + frozen snapshot, all mutations on
+  finalized evidence rejected, cancelled draft preserved, and zero
+  financial accounts/movements at the end.
+- **Boundary**: no quorum/majority/pass-rule computation, no vote
+  weighting, no proxy/secret/electronic-ballot model, no meeting or
+  agenda entities, no Policy/PolicyVersion engine, no approval gating
+  on business actions, no decision-to-transaction linkage, no vote
+  change/withdrawal (undefined correction policy) — deferred.
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a

@@ -966,7 +966,115 @@ export const trTR = {
 	'aidDisbursements.reverse': 'Ödemeyi Ters Kaydet',
 	'aidDisbursements.reverseConfirm':
 		'Yardım ödemesi ters kaydedilecek; tutar hesaba iade edilecek ve tahsisli bakiye geri yüklenecek. Onaylıyor musunuz?',
-	'aidDisbursements.availableHint': 'Bu hesaptaki tahsisli bakiye'
+	'aidDisbursements.availableHint': 'Bu hesaptaki tahsisli bakiye',
+
+	// STEP-014 — Yönetim, karar ve oylama
+	'nav.governance': 'Yönetim',
+	'governance.title': 'Yönetim',
+	'governance.description':
+		'Kurullar, üyelikler, kararlar ve oylar yalnızca kanıt kaydıdır: hiçbir yönetim işlemi para hareketi oluşturmaz. Oylamayı kaydetme yetkisi üye olmak anlamına gelmez; üyelik bir kişi kaydıdır, giriş hesabı değildir.',
+	'governance.bodies': 'Kurullar',
+	'governance.bodies.empty': 'Kurul bulunamadı.',
+	'governance.bodies.create': 'Yeni Kurul',
+	'governance.bodies.createTitle': 'Yeni Kurul',
+	'governance.bodies.createDescription':
+		'Kurul oluşturmak para hareketi veya yetki vermez; yalnızca organ kimliği kaydeder. Kararlar ayrıca açılır.',
+	'governance.bodies.number': 'Kurul No',
+	'governance.bodies.name': 'Kurul Adı',
+	'governance.bodies.type': 'Kurul Türü',
+	'governance.bodies.typeHint':
+		'Serbest sınıflandırma (ör. Yönetim Kurulu, Denetim Kurulu) — kurul türleri tanımlı bir katalogdan değil, kooperatifin kendi yapısından gelir.',
+	'governance.bodies.status': 'Durum',
+	'governance.bodies.statusActive': 'Aktif',
+	'governance.bodies.statusClosed': 'Kapatıldı',
+	'governance.bodies.activeMembers': 'Aktif Üye',
+	'governance.bodies.close': 'Kurulu Kapat',
+	'governance.bodies.closeConfirm':
+		'Kurul kapatılacak. Taslak veya oylamada karar ya da aktif üyelik varken kurul kapatılamaz. Onaylıyor musunuz?',
+	'governance.bodies.closedAt': 'Kapanış Zamanı',
+	'governance.search': 'Ad, tür veya numara ile ara',
+
+	'memberships.title': 'Üyelikler',
+	'memberships.current': 'Aktif',
+	'memberships.historical': 'Geçmiş',
+	'memberships.empty': 'Üyelik kaydı yok.',
+	'memberships.add': 'Üye Ekle',
+	'memberships.person': 'Kişi',
+	'memberships.seatTitle': 'Unvan (isteğe bağlı)',
+	'memberships.seatTitleHint': 'Serbest ünvan etiketi; hiçbir ek yetki vermez.',
+	'memberships.startedAt': 'Başlangıç',
+	'memberships.endedAt': 'Bitiş',
+	'memberships.end': 'Üyeliği Sonlandır',
+	'memberships.endReason': 'Sonlandırma gerekçesi',
+	'memberships.endConfirm':
+		'Üyelik sonlandırılacak. Geçmiş oylar ve karar kayıtları korunur. Onaylıyor musunuz?',
+	'memberships.errors.activeExists': 'Bu kişinin kurulda zaten aktif bir üyeliği var.',
+
+	'decisions.title': 'Kararlar',
+	'decisions.empty': 'Karar bulunamadı.',
+	'decisions.create': 'Yeni Karar',
+	'decisions.createTitle': 'Yeni Karar',
+	'decisions.createDescription':
+		'Karar taslak olarak açılır; metin oylama başlayana kadar düzenlenebilir. Karar kaydı para hareketi oluşturmaz.',
+	'decisions.number': 'Karar No',
+	'decisions.field.title': 'Konu',
+	'decisions.text': 'Karar Metni',
+	'decisions.body': 'Kurul',
+	'decisions.decisionOn': 'Karar Tarihi',
+	'decisions.effectiveOn': 'Yürürlük Tarihi',
+	'decisions.status': 'Durum',
+	'decisions.statusDraft': 'Taslak',
+	'decisions.statusOpen': 'Oylamada',
+	'decisions.statusApproved': 'Onaylandı',
+	'decisions.statusRejected': 'Reddedildi',
+	'decisions.statusCancelled': 'İptal Edildi',
+	'decisions.editDraft': 'Taslağı Düzenle',
+	'decisions.save': 'Kaydet',
+	'decisions.open': 'Oylamayı Aç',
+	'decisions.openConfirm':
+		'Oylama açılacak; karar metni bundan sonra değiştirilemez. Onaylıyor musunuz?',
+	'decisions.openedAt': 'Oylama Açılışı',
+	'decisions.cancel': 'Taslağı İptal Et',
+	'decisions.cancelReason': 'İptal gerekçesi',
+	'decisions.cancelConfirm': 'Taslak iptal edilecek; kayıt korunur. Onaylıyor musunuz?',
+	'decisions.finalize': 'Sonuçlandır',
+	'decisions.finalizeConfirm':
+		'Karar resmi sonuçla kapatılacak ve oylar dondurulacak. Sonuç, kurulun resmi kararını yansıtmalıdır; sistem çoğunluk/nisap hesaplamaz. Onaylıyor musunuz?',
+	'decisions.finalizedAt': 'Sonuçlanma',
+	'decisions.outcome': 'Resmi Sonuç',
+	'decisions.outcomeApproved': 'Onaylandı',
+	'decisions.outcomeRejected': 'Reddedildi',
+	'decisions.outcomeNotice':
+		'Sonuç sisteme yetkili operatör tarafından kaydedilir; sistem nisap veya çoğunluk hesaplamaz. Oy dökümü kanıt olarak dondurulur.',
+	'decisions.snapshot': 'Sonuç Anıtı',
+	'decisions.eligibleCount': 'Yetkili Üye',
+	'decisions.approveCount': 'Kabul',
+	'decisions.rejectCount': 'Red',
+	'decisions.abstainCount': 'Çekimser',
+	'decisions.frozen': 'Oylama açık; karar metni kilitlidir.',
+
+	'votes.title': 'Oylar',
+	'votes.empty': 'Henüz oy kaydedilmedi.',
+	'votes.record': 'Oy Kaydet',
+	'votes.voter': 'Oy Sahibi (Üye)',
+	'votes.recordedBy': 'Kaydı Yapan',
+	'votes.choice': 'Oy',
+	'votes.choiceApprove': 'Kabul',
+	'votes.choiceReject': 'Red',
+	'votes.choiceAbstain': 'Çekimser',
+	'votes.castAt': 'Oy Zamanı',
+	'votes.note': 'Not',
+	'votes.submit': 'Oyu Kaydet',
+	'votes.immutable': 'Kaydedilen oy değiştirilemez veya geri alınamaz.',
+	'votes.eligible': 'Oy Vermeye Yetkili Üyeler',
+	'votes.notEligible': 'Bu kişi bu kararda oy kullanamaz (aktif üyelik yok).',
+	'votes.alreadyVoted': 'Bu üye bu karar için zaten oy kullandı.',
+	'votes.closed': 'Oylama kapalı; yeni oy kaydedilemez.',
+
+	'governance.errors.invalidState': 'Bu işlem kararın/kurulun mevcut durumunda yapılamaz.',
+	'governance.errors.conflict':
+		'İşlem çakışması: kayıt değişti, yinelenen oy/üyelik veya aynı anahtar farklı içerikle kullanıldı.',
+	'governance.errors.forbidden': 'Bu işlem için yetkiniz veya üyelik uygunluğu yok.'
 } as const;
 
 export type MessageKey = keyof typeof trTR;
