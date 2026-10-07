@@ -335,9 +335,17 @@
 										{:else if movement.sourceType === 'investment_income'}
 											{t('movements.sourceInvestmentIncome')}
 											{movement.sourceNumber ?? ''}
-										{:else}
+										{:else if movement.sourceType === 'investment_disposal'}
 											{t('movements.sourceInvestmentDisposal')}
 											{movement.sourceNumber ?? ''}
+										{:else if movement.sourceType === 'social_aid_donation'}
+											{t('movements.sourceSocialAidDonation')}
+											{movement.sourceNumber ?? ''}
+										{:else if movement.sourceType === 'social_aid_disbursement'}
+											{t('movements.sourceSocialAidDisbursement')}
+											{movement.sourceNumber ?? ''}
+										{:else}
+											{movement.sourceType}
 										{/if}
 									</TableCell>
 									<TableCell>

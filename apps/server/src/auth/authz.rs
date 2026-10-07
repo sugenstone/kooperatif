@@ -65,6 +65,12 @@ pub mod catalog {
     pub const INVESTMENTS_READ: &str = "investments.read";
     pub const INVESTMENTS_MANAGE: &str = "investments.manage";
 
+    /// STEP-013 — Social Aid surfaces. Sensitive data (docs/11
+    /// §privacy, docs/22): its own read/manage pair, never folded
+    /// into broader financial permissions.
+    pub const SOCIAL_AID_READ: &str = "social_aid.read";
+    pub const SOCIAL_AID_MANAGE: &str = "social_aid.manage";
+
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
     /// contracts (see README "adding a new permission").
@@ -95,6 +101,8 @@ pub mod catalog {
         SHARE_RETURNS_MANAGE,
         INVESTMENTS_READ,
         INVESTMENTS_MANAGE,
+        SOCIAL_AID_READ,
+        SOCIAL_AID_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -228,7 +236,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 26, "STEP-003..STEP-012 catalog");
+        assert_eq!(catalog::ALL.len(), 28, "STEP-003..STEP-013 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

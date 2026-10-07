@@ -35,6 +35,9 @@
 		{#if can('investments.read')}
 			<Button variant="ghost" size="sm" href="/yatirimlar">{t('nav.investments')}</Button>
 		{/if}
+		{#if can('social_aid.read')}
+			<Button variant="ghost" size="sm" href="/sosyal-yardim">{t('nav.socialAid')}</Button>
+		{/if}
 		{#if can('periods.read')}
 			<Button variant="ghost" size="sm" href="/donemler">{t('nav.periods')}</Button>
 		{/if}

@@ -109,6 +109,8 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'movements.sourceInvestmentFunding': 'Investment Funding',
 	'movements.sourceInvestmentIncome': 'Investment Income',
 	'movements.sourceInvestmentDisposal': 'Investment Disposal',
+	'movements.sourceSocialAidDonation': 'Donation',
+	'movements.sourceSocialAidDisbursement': 'Aid Disbursement',
 	'movements.statusActive': 'Valid',
 	'movements.statusReversed': 'Reversed',
 	'transfers.title': 'Account Transfers',
@@ -210,5 +212,17 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'investments.statusDisposed': 'Disposed',
 	'investments.statusCancelled': 'Cancelled',
 	'valuations.new.description':
-		'This valuation is informational only; it does not change account balances or create income/expense.'
+		'This valuation is informational only; it does not change account balances or create income/expense.',
+	// STEP-013 — Social Aid
+	'nav.socialAid': 'Social Aid',
+	'socialAid.title': 'Social Aid',
+	'socialAid.create': 'New Fund',
+	'socialAid.statusActive': 'Active',
+	'socialAid.statusClosed': 'Closed',
+	'socialAid.statusCancelled': 'Cancelled',
+	'socialAid.available': 'Restricted Balance',
+	'donations.title': 'Donations',
+	'donations.new.title': 'Record Donation',
+	'aidDisbursements.title': 'Aid Payments',
+	'aidDisbursements.new.title': 'Record Aid Payment'
 };

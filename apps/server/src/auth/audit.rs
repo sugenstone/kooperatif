@@ -79,6 +79,13 @@ pub enum SecurityEventType {
     InvestmentIncomePosted,
     InvestmentIncomeReversed,
     InvestmentDisposed,
+    SocialAidFundCreated,
+    SocialAidFundClosed,
+    SocialAidFundCancelled,
+    SocialAidDonationPosted,
+    SocialAidDonationReversed,
+    SocialAidDisbursementPosted,
+    SocialAidDisbursementReversed,
 }
 
 impl SecurityEventType {
@@ -152,6 +159,13 @@ impl SecurityEventType {
             Self::InvestmentIncomePosted => "investment_income_posted",
             Self::InvestmentIncomeReversed => "investment_income_reversed",
             Self::InvestmentDisposed => "investment_disposed",
+            Self::SocialAidFundCreated => "social_aid_fund_created",
+            Self::SocialAidFundClosed => "social_aid_fund_closed",
+            Self::SocialAidFundCancelled => "social_aid_fund_cancelled",
+            Self::SocialAidDonationPosted => "social_aid_donation_posted",
+            Self::SocialAidDonationReversed => "social_aid_donation_reversed",
+            Self::SocialAidDisbursementPosted => "social_aid_disbursement_posted",
+            Self::SocialAidDisbursementReversed => "social_aid_disbursement_reversed",
         }
     }
 }

@@ -826,6 +826,83 @@ sale price is not money received.**
   formula, no disposal reversal, no partial disposal, no
   profit-distribution or NAV policy — deferred.
 
+## Social Aid, Donation & Restricted Fund (STEP-013, docs/11 + docs/15 + docs/19)
+
+The restricted-finance domain. **Social Aid is a separate financial
+context — never merged into cooperative finance. A Social Aid Fund is a
+restriction purpose, not an account: the row carries NO balance.
+Restricted availability is always derived per (fund, financial_account)
+pair — posted donations minus posted disbursements — so a donation
+restricted to Fund F deposited in Account A can only fund aid paid FROM
+Account A. Donation receipt and aid disbursement are distinct business
+events; each owns exactly ONE Account Movement and creates NO Payment,
+Allocation, Credit, Income, Expense, Transfer or Share Return row.**
+
+- **`social_aid_funds`** — the purpose restriction ("Eğitim Yardımı"…):
+  stable `fund_number`, optional `starts_on`/`ends_on` window metadata
+  (never auto-expiring), lifecycle `active → closed | cancelled`.
+  Cancellation requires zero financial events; closing requires every
+  per-(fund, account) restricted availability to be zero — restricted
+  money must never become ownerless. All transitions keep actor +
+  timestamp + (cancel) reason under DB consistency CHECKs.
+- **`social_aid_donations`** — real money received FOR a restricted
+  purpose: exactly ONE `inflow` movement with
+  `source_type = 'social_aid_donation'`. Donor identity is the
+  canonical Person link (`donor_person_id` — shareholder, guardian or
+  any registered person, membership never required) OR a bounded
+  `donor_display_name` for external persons/organizations; at least
+  one is mandatory (anonymous-donation policy is an open decision in
+  docs/11 — deferred).
+- **`social_aid_disbursements`** — real restricted money paid TO a
+  beneficiary: exactly ONE `outflow` movement with
+  `source_type = 'social_aid_disbursement'`, never Expense/Transfer.
+  `reason` is required (the aid must answer why it was granted; the
+  Aid Request/Decision approval pipeline is deferred — docs/11 open
+  decisions). Beneficiary identity mirrors the donor rule. A posting
+  must satisfy BOTH bounds under the account row lock: physical
+  account balance AND the fund's restricted availability in that
+  account — restricted money sitting in another account can never
+  fund it.
+- **Status-based reversal** (docs/19): donation/disbursement
+  `posted → reversed` flips the bound movement `active → reversed`
+  in the same transaction; rows and bookkeeping are never deleted.
+  Donation reversal is refused when it would overdraw the physical
+  account OR restricted availability already consumed.
+- **Idempotent commands** (ADR-006): create, donate, disburse and
+  reversals carry durable `idempotency_key` + payload fingerprints;
+  replay returns the stored result, a conflicting reuse answers `409`.
+- **API**: `GET|POST /api/social-aid/funds`, `GET …/funds/{id}`,
+  `POST …/funds/{id}/close`, `POST …/funds/{id}/cancel`,
+  `GET|POST /api/social-aid/donations`, `GET …/donations/{id}`,
+  `POST …/donations/{id}/reverse`, `GET|POST …/disbursements`,
+  `GET …/disbursements/{id}`, `POST …/disbursements/{id}/reverse`.
+  Fund detail returns derived totals + per-account restricted
+  availability next to the physical balance.
+- **Permissions**: `social_aid.read`, `social_aid.manage` — granted to
+  `Sistem Yöneticisi` by migration 0013; backend-authorized routes,
+  CSRF on every mutation.
+- **Audit**: `social_aid_fund_created`, `social_aid_fund_closed`,
+  `social_aid_fund_cancelled`, `social_aid_donation_posted`,
+  `social_aid_donation_reversed`, `social_aid_disbursement_posted`,
+  `social_aid_disbursement_reversed` land in `security_events`.
+- **Frontend**: `/sosyal-yardim` (list with derived restricted totals),
+  `/sosyal-yardim/yeni`, `/sosyal-yardim/{id}` (fund info +
+  per-account restricted distribution, donation/disbursement panels
+  with the restricted-availability hint, lifecycle actions, per-row
+  reversals with reasons, optional Person lookup). Turkish-first i18n;
+  manage actions require `social_aid.manage`.
+- **E2E**: `node scripts/e2e-step013.mjs` drives the real stack —
+  UI fund creation (zero money), external-donor donation (one
+  `social_aid_donation` inflow, operational income untouched),
+  disbursement (one `social_aid_disbursement` outflow, expense
+  untouched), over-disbursement and cross-account misuse rejected,
+  reversal restoring both balance dimensions, consumed-restriction
+  reversal refused, close gated on zero availability.
+- **Boundary**: no aid request/approval workflow, no anonymous
+  donations, no fund-to-fund reallocation or restricted-money account
+  transfers, no donor/beneficiary deduplication policy, no campaign
+  targets or pledge tracking — deferred.
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a

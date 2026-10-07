@@ -23,3 +23,4 @@ pub mod payments;
 pub mod periods;
 pub mod share_returns;
 pub mod shares;
+pub mod social_aid;

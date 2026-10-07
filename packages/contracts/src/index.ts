@@ -310,6 +310,33 @@ export {
 	investmentValuationsPath
 } from './investments';
 export type {
+	CancelSocialAidFundRequest,
+	CreateSocialAidFundRequest,
+	PostSocialAidDisbursementRequest,
+	PostSocialAidDonationRequest,
+	ReverseSocialAidEventRequest,
+	SocialAidDisbursement,
+	SocialAidDonation,
+	SocialAidFundAccount,
+	SocialAidFundDetail,
+	SocialAidFundListItem,
+	SocialAidFundStatus,
+	SocialAidPostedStatus
+} from './social-aid';
+export {
+	SOCIAL_AID_DISBURSEMENTS_PATH,
+	SOCIAL_AID_DONATIONS_PATH,
+	SOCIAL_AID_FUNDS_PATH,
+	SOCIAL_AID_PERSONS_PATH,
+	socialAidDisbursementPath,
+	socialAidDisbursementReversePath,
+	socialAidDonationPath,
+	socialAidDonationReversePath,
+	socialAidFundCancelPath,
+	socialAidFundClosePath,
+	socialAidFundPath
+} from './social-aid';
+export type {
 	ApiErrorBody,
 	ApiErrorCode,
 	DependencyCheckStatus,

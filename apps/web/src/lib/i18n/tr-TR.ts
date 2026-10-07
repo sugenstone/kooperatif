@@ -478,6 +478,8 @@ export const trTR = {
 	'movements.sourceInvestmentFunding': 'Yatırım Finansmanı',
 	'movements.sourceInvestmentIncome': 'Yatırım Geliri',
 	'movements.sourceInvestmentDisposal': 'Yatırım Tasfiyesi',
+	'movements.sourceSocialAidDonation': 'Bağış',
+	'movements.sourceSocialAidDisbursement': 'Yardım Ödemesi',
 	'movements.occurredAt': 'İşlem Zamanı',
 	'movements.status': 'Durum',
 	'movements.statusActive': 'Geçerli',
@@ -869,7 +871,102 @@ export const trTR = {
 	'disposals.submitting': 'Kaydediliyor…',
 	'disposals.confirm':
 		'Yatırım tasfiye edilecek ve tahsilat tutarları hesaba giriş olarak işlenecek. Bu işlem geri alınamaz. Onaylıyor musunuz?',
-	'disposals.empty': 'Tasfiye kaydı yok.'
+	'disposals.empty': 'Tasfiye kaydı yok.',
+
+	// STEP-013 — Sosyal yardım, bağış ve tahsisli fon
+	'nav.socialAid': 'Sosyal Yardım',
+	'socialAid.title': 'Sosyal Yardım',
+	'socialAid.description':
+		'Sosyal yardım fonları ayrı bir mali bağlamdır: bağışlar ve yardım ödemeleri aidat, gelir, gider veya transfer değildir. Fon, hesap değildir; tahsisli bakiye yalnızca o fonun amacı için harcanabilir.',
+	'socialAid.create': 'Yeni Fon',
+	'socialAid.createTitle': 'Yeni Sosyal Yardım Fonu',
+	'socialAid.createDescription':
+		'Fon oluşturmak para hareketi oluşturmaz; bağışlar ayrıca kaydedilir ve fonun tahsisli bakiyesini artırır.',
+	'socialAid.empty': 'Sosyal yardım fonu bulunamadı.',
+	'socialAid.number': 'Fon No',
+	'socialAid.name': 'Fon Adı',
+	'socialAid.status': 'Durum',
+	'socialAid.statusActive': 'Aktif',
+	'socialAid.statusClosed': 'Kapatıldı',
+	'socialAid.statusCancelled': 'İptal Edildi',
+	'socialAid.window': 'Program Dönemi',
+	'socialAid.startsOn': 'Başlangıç',
+	'socialAid.endsOn': 'Bitiş',
+	'socialAid.totalDonated': 'Toplanan Bağış',
+	'socialAid.totalDisbursed': 'Dağıtılan Yardım',
+	'socialAid.available': 'Tahsisli Kalan',
+	'socialAid.search': 'Ad veya numara ile ara',
+	'socialAid.general': 'Genel Bilgiler',
+	'socialAid.field.description': 'Açıklama',
+	'socialAid.accounts.title': 'Tahsisli Bakiye Dağılımı',
+	'socialAid.accounts.donated': 'Toplanan',
+	'socialAid.accounts.disbursed': 'Dağıtılan',
+	'socialAid.accounts.available': 'Tahsisli Kalan',
+	'socialAid.accounts.physical': 'Hesap Bakiyesi',
+	'socialAid.accounts.empty': 'Bu fon henüz hiçbir hesapta bakiye taşımıyor.',
+	'socialAid.restrictionNotice':
+		'Tahsisli bakiye yalnızca bu fonun amacı için ve yalnızca bulunduğu hesaptan harcanabilir; hesap bakiyesinden ayrı izlenir.',
+	'socialAid.close': 'Fonu Kapat',
+	'socialAid.closeConfirm':
+		'Fon kapatılacak. Kalan tahsisli bakiyesi olan fon kapatılamaz. Onaylıyor musunuz?',
+	'socialAid.closedAt': 'Kapanış Tarihi',
+	'socialAid.cancel': 'Fonu İptal Et',
+	'socialAid.cancelReason': 'İptal gerekçesi',
+	'socialAid.cancelConfirm':
+		'Fon iptal edilecek. Yalnızca hiç finansal kaydı olmayan fonlar iptal edilebilir. Onaylıyor musunuz?',
+	'socialAid.cancelledAt': 'İptal Tarihi',
+	'socialAid.errors.hasRestrictedBalance':
+		'Tahsisli bakiyesi veya finansal kaydı olan fon kapatılamaz/iptal edilemez.',
+	'socialAid.errors.invalidState': 'Bu işlem yalnızca aktif fonlarda yapılabilir.',
+	'socialAid.errors.insufficientRestricted':
+		'Fonun bu hesaptaki tahsisli bakiyesi bu ödeme için yetersiz.',
+	'socialAid.errors.insufficientFunds': 'Seçilen hesabın fiziksel bakiyesi bu işlem için yetersiz.',
+	'socialAid.errors.conflict':
+		'İşlem çakışması: kayıt değişti veya aynı anahtar farklı içerikle kullanıldı.',
+	'socialAid.errors.identityRequired':
+		'Kimlik gerekli: kayıtlı bir kişi seçin veya ad/kurum girin. Anonim kayıt desteklenmez.',
+	'socialAid.personSearch': 'Kişi ara (ad soyad)',
+	'socialAid.personSearchEmpty': 'Sonuç yok — serbest ad kullanabilirsiniz.',
+
+	'donations.title': 'Bağışlar',
+	'donations.empty': 'Bağış kaydı yok.',
+	'donations.new.title': 'Bağış Kaydet',
+	'donations.new.description':
+		'Seçilen hesaba tam olarak bir giriş hareketi oluşur ve fonun o hesaptaki tahsisli bakiyesi artar. Bu bir aidat ödemesi, gelir veya transfer değildir; ortaklık hakkı doğurmaz.',
+	'donations.donor': 'Bağışçı',
+	'donations.donorPerson': 'Kayıtlı Kişi',
+	'donations.donorDisplayName': 'Bağışçı Adı / Kurum',
+	'donations.account': 'Hedef Hesap',
+	'donations.amount': 'Tutar',
+	'donations.occurredAt': 'İşlem Zamanı',
+	'donations.reference': 'Referans / Makbuz No',
+	'donations.note': 'Not',
+	'donations.submit': 'Bağışı Kaydet',
+	'donations.submitting': 'Kaydediliyor…',
+	'donations.reverse': 'Bağışı Ters Kaydet',
+	'donations.reverseReason': 'Ters kayıt gerekçesi',
+	'donations.reverseConfirm':
+		'Bağış ters kaydedilecek; tutar hesaptan düşülecek ve tahsisli bakiye azalacak. Harcanmış tutar içeren bağışlar ters kaydedilemez. Onaylıyor musunuz?',
+	'donations.statusPosted': 'Kayıtlı',
+	'donations.statusReversed': 'Ters Kayıt',
+
+	'aidDisbursements.title': 'Yardım Ödemeleri',
+	'aidDisbursements.empty': 'Yardım ödemesi kaydı yok.',
+	'aidDisbursements.new.title': 'Yardım Ödemesi Kaydet',
+	'aidDisbursements.new.description':
+		'Seçilen hesaptan tam olarak bir çıkış hareketi oluşur ve fonun tahsisli bakiyesi azalır. Ödeme hem fonun bu hesaptaki tahsisli bakiyesini hem hesabın fiziksel bakiyesini aşamaz. Bu bir gider veya transfer değildir.',
+	'aidDisbursements.beneficiary': 'İhtiyaç Sahibi',
+	'aidDisbursements.beneficiaryPerson': 'Kayıtlı Kişi',
+	'aidDisbursements.beneficiaryDisplayName': 'İhtiyaç Sahibi Adı',
+	'aidDisbursements.account': 'Ödeme Hesabı',
+	'aidDisbursements.reason': 'Yardım Gerekçesi',
+	'aidDisbursements.reference': 'Referans',
+	'aidDisbursements.submit': 'Ödemeyi Kaydet',
+	'aidDisbursements.submitting': 'Kaydediliyor…',
+	'aidDisbursements.reverse': 'Ödemeyi Ters Kaydet',
+	'aidDisbursements.reverseConfirm':
+		'Yardım ödemesi ters kaydedilecek; tutar hesaba iade edilecek ve tahsisli bakiye geri yüklenecek. Onaylıyor musunuz?',
+	'aidDisbursements.availableHint': 'Bu hesaptaki tahsisli bakiye'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

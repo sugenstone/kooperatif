@@ -157,7 +157,8 @@ pub async fn list_movements(
         "SELECT m.id, m.account_id, m.direction, m.amount, m.source_type, m.source_id, \
             COALESCE(p.payment_number, t.transfer_number, i.income_number, e.expense_number, \
                 s.settlement_number, ivf.funding_number, ivn.income_number, \
-                ivd.disposal_number) AS source_number, \
+                ivd.disposal_number, sad.donation_number, say.disbursement_number) \
+                AS source_number, \
             m.occurred_at, m.status, m.reversed_at, m.reversal_reason, m.created_at, \
             count(*) OVER() AS total_count \
         FROM account_movements m \
@@ -174,6 +175,10 @@ pub async fn list_movements(
         LEFT JOIN investment_disposal_proceeds ivp \
             ON m.source_type = 'investment_disposal' AND m.source_id = ivp.id \
         LEFT JOIN investment_disposals ivd ON ivd.id = ivp.disposal_id \
+        LEFT JOIN social_aid_donations sad \
+            ON m.source_type = 'social_aid_donation' AND m.source_id = sad.id \
+        LEFT JOIN social_aid_disbursements say \
+            ON m.source_type = 'social_aid_disbursement' AND m.source_id = say.id \
         WHERE m.account_id = $1 \
         ORDER BY m.occurred_at DESC, m.id LIMIT $2 OFFSET $3",
     )

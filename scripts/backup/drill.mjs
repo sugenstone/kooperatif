@@ -172,7 +172,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 26],
+			['permissions', 28],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -187,7 +187,7 @@ async function main() {
 			['payments', 3],
 			['payment_allocations', 3],
 			['financial_accounts', 2],
-			['account_movements', 15],
+			['account_movements', 19],
 			['account_transfers', 1],
 			['shareholder_credits', 1],
 			['credit_applications', 2],
@@ -202,7 +202,10 @@ async function main() {
 			['investment_valuations', 2],
 			['investment_incomes', 2],
 			['investment_disposals', 1],
-			['investment_disposal_proceeds', 1]
+			['investment_disposal_proceeds', 1],
+			['social_aid_funds', 2],
+			['social_aid_donations', 2],
+			['social_aid_disbursements', 2]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -358,6 +361,39 @@ async function main() {
 			[
 				"SELECT m.direction||'|'||m.source_type||'|'||a.name||'|'||p.amount::text FROM investment_disposal_proceeds p JOIN account_movements m ON m.id=p.account_movement_id JOIN financial_accounts a ON a.id=p.financial_account_id WHERE p.disposal_id='18181818-0000-4000-8000-000000000001'",
 				'inflow|investment_disposal|Yedek Banka|320.00'
+			],
+			// STEP-013: fund 9001 restricted identity (never an account);
+			// cancelled fund 9002 keeps actor + reason.
+			[
+				"SELECT name||'|'||status FROM social_aid_funds WHERE fund_number=9001",
+				'Drill Eğitim Fonu|active'
+			],
+			[
+				"SELECT status||'|'||cancellation_reason FROM social_aid_funds WHERE fund_number=9002",
+				'cancelled|drill: program iptal'
+			],
+			// Donation 9001 → canonical Person donor (third-party payer —
+			// donor ≠ shareholder) + its ONE 'social_aid_donation' inflow.
+			[
+				"SELECT p.first_name||' '||p.last_name||'|'||m.direction||'|'||m.source_type FROM social_aid_donations d JOIN persons p ON p.id=d.donor_person_id JOIN account_movements m ON m.id=d.account_movement_id WHERE d.donation_number=9001",
+				'Ödeyen Üçüncü|inflow|social_aid_donation'
+			],
+			// Donation 9002 → external organization identity + entry and
+			// movement reversal bookkeeping both survive.
+			[
+				"SELECT d.donor_display_name||'|'||d.status||'|'||m.status||'|'||d.reversal_reason FROM social_aid_donations d JOIN account_movements m ON m.id=d.account_movement_id WHERE d.donation_number=9002",
+				'Drill Hayırsever A.Ş.|reversed|reversed|drill: hatalı bağış'
+			],
+			// Disbursement 9001 → beneficiary Person + required reason +
+			// its ONE 'social_aid_disbursement' outflow — never
+			// expense/payment/transfer.
+			[
+				"SELECT p.first_name||' '||p.last_name||'|'||d.reason||'|'||m.direction||'|'||m.source_type FROM social_aid_disbursements d JOIN persons p ON p.id=d.beneficiary_person_id JOIN account_movements m ON m.id=d.account_movement_id WHERE d.disbursement_number=9001",
+				'Yedek Devralan|drill: burs ödemesi|outflow|social_aid_disbursement'
+			],
+			[
+				"SELECT d.status||'|'||m.status||'|'||d.reversal_reason FROM social_aid_disbursements d JOIN account_movements m ON m.id=d.account_movement_id WHERE d.disbursement_number=9002",
+				'reversed|reversed|drill: hatalı yardım'
 			]
 		];
 		let allRel = true;
@@ -407,16 +443,16 @@ async function main() {
 		);
 		// Derived balances on the RESTORED copy — cash: +150 -40 +80
 		// +500 (income) −60 (expense) −300 (settlement) −200 (funding)
-		// +25 (investment income) = 155; the reversed 25.00 expense,
-		// reversed 100.00 settlement, reversed 50.00 funding and
-		// reversed 10.00 investment income are excluded. Bank:
-		// +30 reversed (excluded) +40 +320 (disposal proceeds) = 360.
-		// Balances are never stored; the restored movement history
-		// must derive them.
+		// +25 (investment income) +300 (donation) −120 (aid) = 335; the
+		// reversed 25.00 expense, 100.00 settlement, 50.00 funding,
+		// 10.00 investment income, 40.00 donation and 50.00 aid are
+		// excluded. Bank: +30 reversed (excluded) +40 +320 (disposal
+		// proceeds) = 360. Balances are never stored; the restored
+		// movement history must derive them.
 		expect(
-			'Derived cash balance (…-200+25=155.00)',
+			'Derived cash balance (…+300−120=335.00)',
 			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000001' AND status='active'",
-			'155.00'
+			'335.00'
 		);
 		expect(
 			'Derived bank balance (40+320=360.00)',
@@ -426,7 +462,7 @@ async function main() {
 		expect(
 			'Reversed movement history preserved',
 			"SELECT count(*) FROM account_movements WHERE status='reversed' AND reversed_by IS NOT NULL AND reversal_reason IS NOT NULL",
-			'5'
+			'7'
 		);
 		// STEP-011 derived truth: remaining principal = determined amount
 		// − POSTED settlements (1000 − 300 = 700; the reversed 100 is
@@ -499,6 +535,25 @@ async function main() {
 			'Disposal proceeds = actual cash (320.00 ≠ agreed 350.00)',
 			"SELECT coalesce(sum(amount),0)::text FROM investment_disposal_proceeds WHERE disposal_id='18181818-0000-4000-8000-000000000001'",
 			'320.00'
+		);
+
+		// STEP-013 derived truths on the restored copy — restricted
+		// availability is NEVER a stored column: posted donations
+		// (300.00; reversed 40.00 excluded) minus posted disbursements
+		// (120.00; reversed 50.00 excluded) = 180.00, per
+		// (fund, financial_account).
+		expect(
+			'Derived restricted availability (300-120=180.00)',
+			"SELECT (coalesce((SELECT sum(d.amount) FROM social_aid_donations d WHERE d.fund_id='30303030-0000-4000-8000-000000000001' AND d.financial_account_id='f1f1f1f1-0000-4000-8000-000000000001' AND d.status='posted'),0) - coalesce((SELECT sum(y.amount) FROM social_aid_disbursements y WHERE y.fund_id='30303030-0000-4000-8000-000000000001' AND y.financial_account_id='f1f1f1f1-0000-4000-8000-000000000001' AND y.status='posted'),0))::text",
+			'180.00'
+		);
+		// Social Aid is a separate financial context: its movements are
+		// NOT income/expense/payment/transfer legs and no donation or
+		// disbursement created a row in the cooperative-finance tables.
+		expect(
+			'Social aid ≠ income/expense/payment/transfer',
+			"SELECT count(*) FROM account_movements WHERE source_type IN ('social_aid_donation','social_aid_disbursement') AND (source_id IN (SELECT id FROM payments) OR source_id IN (SELECT id FROM income_entries) OR source_id IN (SELECT id FROM expense_entries) OR source_id IN (SELECT id FROM account_transfers))",
+			'0'
 		);
 
 		// Constraints must still BEHAVE after restore — not just exist.
@@ -756,6 +811,76 @@ async function main() {
 				'investment movement leg uniqueness',
 				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
 				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','outflow',1,'investment_funding','12121212-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
+			],
+			// STEP-013 invariants must still BEHAVE after restore.
+			[
+				'fund status enum',
+				`UPDATE social_aid_funds SET status='archived' WHERE fund_number=9001`
+			],
+			[
+				'fund idempotency key unique',
+				`INSERT INTO social_aid_funds (name, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','drill-aidem-0001','drill-x','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'fund closed consistency check',
+				`INSERT INTO social_aid_funds (name, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','closed','drill-ay','drill-ay','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'fund window check (ends before starts)',
+				`INSERT INTO social_aid_funds (name, starts_on, ends_on, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('drill','2026-05-02','2026-05-01','drill-aw','drill-aw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'donation identity required',
+				`INSERT INTO social_aid_donations (fund_id, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-00000000c0c0','drill-dx','drill-dx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'donation positive amount check',
+				`INSERT INTO social_aid_donations (fund_id, donor_display_name, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',0,now(),'f2f2f2f2-0000-4000-8000-00000000c1c1','drill-dy','drill-dy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'donation idempotency key unique',
+				`INSERT INTO social_aid_donations (fund_id, donor_display_name, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-00000000c2c2','drill-didem-0001','drill-dz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'donation reversal consistency check',
+				`INSERT INTO social_aid_donations (fund_id, donor_display_name, financial_account_id, amount, occurred_at, account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-00000000c3c3','reversed','drill-dw','drill-dw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'donation→movement 1:1 unique',
+				`INSERT INTO social_aid_donations (fund_id, donor_display_name, financial_account_id, amount, occurred_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-000000000016','drill-dv','drill-dv','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'disbursement identity required',
+				`INSERT INTO social_aid_disbursements (fund_id, financial_account_id, amount, occurred_at, reason, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-00000000c4c4','drill-yx','drill-yx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'disbursement reason required',
+				`INSERT INTO social_aid_disbursements (fund_id, beneficiary_display_name, financial_account_id, amount, occurred_at, reason, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',1,now(),NULL,'f2f2f2f2-0000-4000-8000-00000000c5c5','drill-yy','drill-yy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'disbursement idempotency key unique',
+				`INSERT INTO social_aid_disbursements (fund_id, beneficiary_display_name, financial_account_id, amount, occurred_at, reason, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-00000000c6c6','drill-yidem-0001','drill-yz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'disbursement→movement 1:1 unique',
+				`INSERT INTO social_aid_disbursements (fund_id, beneficiary_display_name, financial_account_id, amount, occurred_at, reason, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('30303030-0000-4000-8000-000000000001','drill','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'drill','f2f2f2f2-0000-4000-8000-000000000018','drill-yw','drill-yw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'social aid movement leg uniqueness',
+				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','inflow',1,'social_aid_donation','31313131-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
 			]
 		];
 		let allConstraints = true;

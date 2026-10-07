@@ -18,6 +18,11 @@
 --   manual application) — entitlement history, never new movements
 --   financial categories + income/expense entries (incl. a REVERSED
 --   expense) bound 1:1 to income/expense-sourced movements
+--   share return + entitlements + settlements (incl. a REVERSED
+--   settlement); investments + fundings + valuations + incomes +
+--   disposal proceeds; social aid funds + donations + disbursements
+--   (incl. REVERSED rows) bound 1:1 to social_aid-sourced movements —
+--   restricted availability is DERIVED, never stored
 
 BEGIN;
 
@@ -775,5 +780,136 @@ VALUES
      'f1f1f1f1-0000-4000-8000-000000000002', 320.00, 'TRY',
      '2026-04-01T10:00:00Z', 'EFT-9001',
      'f2f2f2f2-0000-4000-8000-000000000015', '2026-04-01T10:00:00Z');
+
+-- =====================================================================
+-- STEP-013: Social Aid — restricted fund, donations, aid disbursements.
+-- Fund ≠ Financial Account: the fund row carries NO balance; restricted
+-- availability is always derived (posted 300.00 donation − posted
+-- 120.00 disbursement = 180.00). Donor 9001 links the canonical Person
+-- (a third-party payer — donor ≠ shareholder proof); donor 9002 is an
+-- external organization by display name only. One reversed donation and
+-- one reversed disbursement keep entry + movement bookkeeping.
+-- =====================================================================
+
+INSERT INTO social_aid_funds
+    (id, fund_number, name, description, status, cancelled_at,
+     cancelled_by, cancellation_reason, idempotency_key,
+     idempotency_fingerprint, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('30303030-0000-4000-8000-000000000001', 9001, 'Drill Eğitim Fonu',
+     'drill: burs ve eğitim destekleri', 'active', NULL, NULL, NULL,
+     'drill-aidem-0001', 'drill-afp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-01T10:00:00Z', '2026-02-01T10:00:00Z'),
+    -- Cancelled fund keeps reason + actor; a fund never disappears.
+    ('30303030-0000-4000-8000-000000000002', 9002, 'Drill Gıda Fonu',
+     NULL, 'cancelled', '2026-03-01T10:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: program iptal',
+     'drill-aidem-0002', 'drill-afp-0002',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-05T10:00:00Z', '2026-03-01T10:00:00Z');
+
+-- Movements first: every donation/disbursement hard-FKs its leg.
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    -- Donation 9001: +300.00 inflow on cash, posted.
+    ('f2f2f2f2-0000-4000-8000-000000000016',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 300.00,
+     'social_aid_donation',
+     '31313131-0000-4000-8000-000000000001', '2026-02-10T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-10T10:00:00Z'),
+    -- Donation 9002: +40.00 inflow on cash, REVERSED.
+    ('f2f2f2f2-0000-4000-8000-000000000017',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 40.00,
+     'social_aid_donation',
+     '31313131-0000-4000-8000-000000000002', '2026-02-11T10:00:00Z',
+     'reversed', '2026-02-11T15:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı bağış',
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-11T10:00:00Z'),
+    -- Disbursement 9001: −120.00 outflow on cash, posted.
+    ('f2f2f2f2-0000-4000-8000-000000000018',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 120.00,
+     'social_aid_disbursement',
+     '32323232-0000-4000-8000-000000000001', '2026-02-15T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-15T10:00:00Z'),
+    -- Disbursement 9002: −50.00 outflow on cash, REVERSED.
+    ('f2f2f2f2-0000-4000-8000-000000000019',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 50.00,
+     'social_aid_disbursement',
+     '32323232-0000-4000-8000-000000000002', '2026-02-16T10:00:00Z',
+     'reversed', '2026-02-16T15:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı yardım',
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-16T10:00:00Z');
+
+INSERT INTO social_aid_donations
+    (id, donation_number, fund_id, donor_person_id, donor_display_name,
+     financial_account_id, amount, currency, occurred_at, reference, note,
+     account_movement_id, status, idempotency_key, idempotency_fingerprint,
+     reversed_at, reversed_by, reversal_reason, created_by, created_at,
+     updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- Donor = canonical Person (the third-party payer — membership is
+    -- NEVER required for a donor).
+    ('31313131-0000-4000-8000-000000000001', 9001,
+     '30303030-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000004', NULL,
+     'f1f1f1f1-0000-4000-8000-000000000001', 300.00, 'TRY',
+     '2026-02-10T10:00:00Z', 'MKB-9001', 'drill: burs bağışı',
+     'f2f2f2f2-0000-4000-8000-000000000016', 'posted',
+     'drill-didem-0001', 'drill-dfp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z'),
+    -- Donor = external organization (display name only), REVERSED.
+    ('31313131-0000-4000-8000-000000000002', 9002,
+     '30303030-0000-4000-8000-000000000001',
+     NULL, 'Drill Hayırsever A.Ş.',
+     'f1f1f1f1-0000-4000-8000-000000000001', 40.00, 'TRY',
+     '2026-02-11T10:00:00Z', NULL, NULL,
+     'f2f2f2f2-0000-4000-8000-000000000017', 'reversed',
+     'drill-didem-0002', 'drill-dfp-0002',
+     '2026-02-11T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı bağış',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-11T10:00:00Z', '2026-02-11T15:00:00Z');
+
+INSERT INTO social_aid_disbursements
+    (id, disbursement_number, fund_id, beneficiary_person_id,
+     beneficiary_display_name, financial_account_id, amount, currency,
+     occurred_at, reason, reference, account_movement_id, status,
+     idempotency_key, idempotency_fingerprint, reversed_at, reversed_by,
+     reversal_reason, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- Beneficiary = canonical Person (a shareholder may also be an aid
+    -- beneficiary — the role is independent).
+    ('32323232-0000-4000-8000-000000000001', 9001,
+     '30303030-0000-4000-8000-000000000001',
+     '22222222-0000-4000-8000-000000000002', NULL,
+     'f1f1f1f1-0000-4000-8000-000000000001', 120.00, 'TRY',
+     '2026-02-15T10:00:00Z', 'drill: burs ödemesi', NULL,
+     'f2f2f2f2-0000-4000-8000-000000000018', 'posted',
+     'drill-yidem-0001', 'drill-yfp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-15T10:00:00Z', '2026-02-15T10:00:00Z'),
+    -- Beneficiary = external family (display name only), REVERSED.
+    ('32323232-0000-4000-8000-000000000002', 9002,
+     '30303030-0000-4000-8000-000000000001',
+     NULL, 'Drill Ailesi',
+     'f1f1f1f1-0000-4000-8000-000000000001', 50.00, 'TRY',
+     '2026-02-16T10:00:00Z', 'drill: gıda desteği', NULL,
+     'f2f2f2f2-0000-4000-8000-000000000019', 'reversed',
+     'drill-yidem-0002', 'drill-yfp-0002',
+     '2026-02-16T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı yardım',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-16T10:00:00Z', '2026-02-16T15:00:00Z');
 
 COMMIT;
