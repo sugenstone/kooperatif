@@ -22,6 +22,7 @@ use crate::income_expense::routes::income_expense_router;
 use crate::parties::routes::parties_router;
 use crate::payments::routes::payments_router;
 use crate::periods::routes::periods_router;
+use crate::share_returns::routes::share_returns_router;
 use crate::shares::routes::shares_router;
 
 /// Shared application state (grows with later domain modules).
@@ -94,6 +95,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(financial_accounts_router())
         .merge(credits_router())
         .merge(income_expense_router())
+        .merge(share_returns_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

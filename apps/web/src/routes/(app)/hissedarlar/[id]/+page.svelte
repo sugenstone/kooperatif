@@ -28,6 +28,7 @@
 	import {
 		FAMILIES_PATH,
 		PERSONS_PATH,
+		SHARE_RETURNS_PATH,
 		shareholderFamilyChangePath,
 		shareholderPath,
 		shareholderStatusChangePath,
@@ -37,6 +38,7 @@
 		type Paginated,
 		type PersonLookupItem,
 		type ShareListItem,
+		type ShareReturnListItem,
 		shareholderFinancialSummaryPath,
 		shareholderOpenAssessmentsPath,
 		type OpenAssessment,
@@ -58,6 +60,7 @@
 
 	let detail = $state<ShareholderDetail | null>(null);
 	let shares = $state<ShareListItem[]>([]);
+	let shareReturns = $state<ShareReturnListItem[]>([]);
 	let assessments = $state<ShareholderAssessment[]>([]);
 	let financialSummary = $state<ShareholderFinancialSummary | null>(null);
 	let openAssessments = $state<OpenAssessment[]>([]);
@@ -112,6 +115,12 @@
 			}
 			if (can('credits.read')) {
 				creditLedger = await apiFetch<ShareholderCredits>(shareholderCreditsPath(data.id));
+			}
+			if (can('share_returns.read')) {
+				const returnsPage = await apiFetch<Paginated<ShareReturnListItem>>(
+					`${SHARE_RETURNS_PATH}?shareholderId=${data.id}&pageSize=50`
+				);
+				shareReturns = returnsPage.items;
 			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
@@ -531,8 +540,79 @@
 												<Badge>{t('shares.statusActive')}</Badge>
 											{:else if share.status === 'suspended'}
 												<Badge variant="secondary">{t('shares.statusSuspended')}</Badge>
+											{:else if share.status === 'return_pending'}
+												<Badge variant="secondary">{t('shares.statusReturnPending')}</Badge>
+											{:else if share.status === 'closed'}
+												<Badge variant="outline">{t('shares.statusClosed')}</Badge>
 											{:else}
 												<Badge variant="outline">{t('shares.statusVoided')}</Badge>
+											{/if}
+										</TableCell>
+									</TableRow>
+								{/each}
+							</TableBody>
+						</Table>
+					{/if}
+				</CardContent>
+			</Card>
+		{/if}
+
+		{#if can('share_returns.read')}
+			<Card class="w-full max-w-2xl">
+				<CardHeader>
+					<CardTitle>{t('shareReturns.title')}</CardTitle>
+					<CardDescription>{shareReturns.length}</CardDescription>
+				</CardHeader>
+				<CardContent>
+					{#if shareReturns.length === 0}
+						<p class="text-sm text-muted-foreground">{t('shareReturns.empty')}</p>
+					{:else}
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>{t('shareReturns.number')}</TableHead>
+									<TableHead>{t('shareReturns.share')}</TableHead>
+									<TableHead>{t('shareReturns.effectiveDate')}</TableHead>
+									<TableHead>{t('shareReturns.status')}</TableHead>
+									<TableHead>{t('shareReturns.outstanding')}</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{#each shareReturns as item (item.id)}
+									<TableRow>
+										<TableCell>
+											<a
+												class="font-medium underline-offset-2 hover:underline"
+												href={resolve(`/hisse-iadeleri/${item.id}`)}
+											>
+												{item.returnNumber}
+											</a>
+										</TableCell>
+										<TableCell>
+											<a
+												class="underline-offset-2 hover:underline"
+												href={resolve(`/hisseler/${item.shareId}`)}
+											>
+												{item.shareNumber}
+											</a>
+										</TableCell>
+										<TableCell>
+											{dateFormatter.format(new Date(`${item.effectiveReturnDate}T00:00:00`))}
+										</TableCell>
+										<TableCell>
+											{#if item.status === 'pending'}
+												<Badge variant="secondary">{t('shareReturns.statusPending')}</Badge>
+											{:else if item.status === 'finalized'}
+												<Badge>{t('shareReturns.statusFinalized')}</Badge>
+											{:else}
+												<Badge variant="outline">{t('shareReturns.statusCancelled')}</Badge>
+											{/if}
+										</TableCell>
+										<TableCell>
+											{#if item.outstandingAmount !== null}
+												{formatTry(item.outstandingAmount)}
+											{:else}
+												<span class="text-muted-foreground">—</span>
 											{/if}
 										</TableCell>
 									</TableRow>

@@ -27,7 +27,12 @@ export type FinancialAccountType = 'cash' | 'bank';
 export type FinancialAccountStatus = 'active' | 'inactive';
 export type MovementDirection = 'inflow' | 'outflow';
 export type MovementStatus = 'active' | 'reversed';
-export type MovementSourceType = 'payment' | 'transfer' | 'income' | 'expense';
+export type MovementSourceType =
+	| 'payment'
+	| 'transfer'
+	| 'income'
+	| 'expense'
+	| 'share_return_settlement';
 export type TransferStatus = 'posted' | 'reversed';
 
 export interface FinancialAccount {

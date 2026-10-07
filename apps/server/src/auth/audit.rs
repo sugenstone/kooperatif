@@ -62,6 +62,14 @@ pub enum SecurityEventType {
     FinancialCategoryCreated,
     FinancialCategoryUpdated,
     FinancialCategoryStatusChanged,
+    ShareReturnRequested,
+    ShareReturnCancelled,
+    ShareReturnFinalized,
+    ShareReturnEntitlementRecognized,
+    ShareReturnEntitlementDetermined,
+    ShareReturnEntitlementCancelled,
+    ShareReturnSettlementPosted,
+    ShareReturnSettlementReversed,
 }
 
 impl SecurityEventType {
@@ -118,6 +126,14 @@ impl SecurityEventType {
             Self::FinancialCategoryCreated => "financial_category_created",
             Self::FinancialCategoryUpdated => "financial_category_updated",
             Self::FinancialCategoryStatusChanged => "financial_category_status_changed",
+            Self::ShareReturnRequested => "share_return_requested",
+            Self::ShareReturnCancelled => "share_return_cancelled",
+            Self::ShareReturnFinalized => "share_return_finalized",
+            Self::ShareReturnEntitlementRecognized => "share_return_entitlement_recognized",
+            Self::ShareReturnEntitlementDetermined => "share_return_entitlement_determined",
+            Self::ShareReturnEntitlementCancelled => "share_return_entitlement_cancelled",
+            Self::ShareReturnSettlementPosted => "share_return_settlement_posted",
+            Self::ShareReturnSettlementReversed => "share_return_settlement_reversed",
         }
     }
 }

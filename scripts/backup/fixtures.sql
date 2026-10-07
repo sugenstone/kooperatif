@@ -461,4 +461,141 @@ VALUES
      '11111111-0000-4000-8000-0000000000aa',
      '2026-01-30T12:00:00Z', '2026-01-30T14:00:00Z');
 
+-- STEP-011: Share Return + Entitlement + Settlement.
+-- Share 9003 (owner A) went through the full lifecycle: requested →
+-- finalized → CLOSED, ownership interval ended at the effective cutoff.
+-- The finalized case crystallized TWO rights: a determined principal
+-- (partially settled) and an undetermined profit right (NULL ≠ 0.00).
+-- One posted settlement + one REVERSED settlement — each bound 1:1 to
+-- its own share_return_settlement-sourced movement.
+INSERT INTO shares (id, share_number, status, created_by)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('67676767-0000-4000-8000-000000000001', 9003, 'closed',
+     '11111111-0000-4000-8000-0000000000aa');
+
+INSERT INTO share_events
+    (id, share_id, event_type, occurred_at, from_shareholder_id,
+     to_shareholder_id, status_from, status_to, actor_user_id) VALUES
+    ('77777777-0000-4000-8000-000000000004',
+     '67676767-0000-4000-8000-000000000001', 'initial_acquisition',
+     '2025-03-01T00:00:00Z', NULL, '44444444-0000-4000-8000-000000000001',
+     NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('77777777-0000-4000-8000-000000000005',
+     '67676767-0000-4000-8000-000000000001', 'return_requested',
+     '2026-02-05T10:00:00Z', '44444444-0000-4000-8000-000000000001', NULL,
+     'active', 'return_pending',
+     '11111111-0000-4000-8000-0000000000aa'),
+    ('77777777-0000-4000-8000-000000000006',
+     '67676767-0000-4000-8000-000000000001', 'return_finalized',
+     '2026-02-10T10:00:00Z', '44444444-0000-4000-8000-000000000001', NULL,
+     'return_pending', 'closed',
+     '11111111-0000-4000-8000-0000000000aa');
+
+INSERT INTO share_ownerships
+    (id, share_id, shareholder_id, started_at, ended_at,
+     acquisition_type, source_event_id, created_by) VALUES
+    ('88888888-0000-4000-8000-000000000004',
+     '67676767-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000001',
+     '2025-03-01T00:00:00Z', '2026-02-10T00:00:00+03', 'founder',
+     '77777777-0000-4000-8000-000000000004',
+     '11111111-0000-4000-8000-0000000000aa');
+
+INSERT INTO share_returns
+    (id, return_number, share_id, shareholder_id, owner_display_name,
+     share_number, ownership_started_at, requested_at,
+     effective_return_date, reason, status, finalized_at, finalized_by,
+     idempotency_key, idempotency_fingerprint, created_by,
+     created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('d5d5d5d5-0000-4000-8000-000000000001', 9001,
+     '67676767-0000-4000-8000-000000000001',
+     '44444444-0000-4000-8000-000000000001',
+     'Yedek Hissedarı · Vasi: Vasi Test · Aile No 900002',
+     9003, '2025-03-01T00:00:00Z', '2026-02-05T10:00:00Z',
+     '2026-02-10', 'drill: çıkış', 'finalized',
+     '2026-02-10T10:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill-ridem-0001', 'drill-rfp-0001',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-05T10:00:00Z', '2026-02-10T10:00:00Z');
+
+INSERT INTO share_return_entitlements
+    (id, entitlement_number, share_return_id, entitlement_type,
+     beneficiary_shareholder_id, amount, currency, due_date,
+     policy_reference, description, recognized_at, determined_at,
+     status, created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    -- Principal: determined 1.000,00; 300 posted + 100 reversed →
+    -- remaining 800.00 (derived, never stored).
+    ('e7e7e7e7-0000-4000-8000-000000000001', 9001,
+     'd5d5d5d5-0000-4000-8000-000000000001', 'principal',
+     '44444444-0000-4000-8000-000000000001', 1000.00, 'TRY',
+     '2026-03-10', 'drill: YK-2026-01', 'drill: ana para iadesi',
+     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z',
+     'partially_settled',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-10T10:00:00Z', '2026-02-12T10:00:00Z'),
+    -- Profit right: recognized but the formula is policy-driven —
+    -- amount NULL means "not yet determined", never zero.
+    ('e7e7e7e7-0000-4000-8000-000000000002', 9002,
+     'd5d5d5d5-0000-4000-8000-000000000001', 'profit',
+     '44444444-0000-4000-8000-000000000001', NULL, 'TRY',
+     NULL, 'drill: GK beklenecek', NULL,
+     '2026-02-10T10:00:00Z', NULL,
+     'open',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z');
+
+-- Movements first: each settlement's account_movement_id is a hard FK.
+INSERT INTO account_movements
+    (id, account_id, direction, amount, source_type, source_id, occurred_at,
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+VALUES
+    -- Settlement 9001: −300.00 outflow on cash, posted.
+    ('f2f2f2f2-0000-4000-8000-000000000009',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 300.00,
+     'share_return_settlement',
+     'f4f4f4f4-0000-4000-8000-000000000001', '2026-02-11T10:00:00Z',
+     'active', NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-11T10:00:00Z'),
+    -- Settlement 9002: −100.00 outflow on cash, REVERSED.
+    ('f2f2f2f2-0000-4000-8000-000000000010',
+     'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 100.00,
+     'share_return_settlement',
+     'f4f4f4f4-0000-4000-8000-000000000002', '2026-02-12T10:00:00Z',
+     'reversed', '2026-02-12T14:00:00Z',
+     '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı ödeme',
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-12T10:00:00Z');
+
+INSERT INTO share_return_settlements
+    (id, settlement_number, entitlement_id, financial_account_id, amount,
+     currency, settled_at, account_movement_id, status, idempotency_key,
+     idempotency_fingerprint, reversed_at, reversed_by, reversal_reason,
+     created_by, created_at, updated_at)
+OVERRIDING SYSTEM VALUE
+VALUES
+    ('f4f4f4f4-0000-4000-8000-000000000001', 9001,
+     'e7e7e7e7-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 300.00, 'TRY',
+     '2026-02-11T10:00:00Z',
+     'f2f2f2f2-0000-4000-8000-000000000009', 'posted',
+     'drill-sidem-0001', 'drill-sfp-0001',
+     NULL, NULL, NULL,
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-11T10:00:00Z', '2026-02-11T10:00:00Z'),
+    ('f4f4f4f4-0000-4000-8000-000000000002', 9002,
+     'e7e7e7e7-0000-4000-8000-000000000001',
+     'f1f1f1f1-0000-4000-8000-000000000001', 100.00, 'TRY',
+     '2026-02-12T10:00:00Z',
+     'f2f2f2f2-0000-4000-8000-000000000010', 'reversed',
+     'drill-sidem-0002', 'drill-sfp-0002',
+     '2026-02-12T14:00:00Z', '11111111-0000-4000-8000-0000000000aa',
+     'drill: hatalı ödeme',
+     '11111111-0000-4000-8000-0000000000aa',
+     '2026-02-12T10:00:00Z', '2026-02-12T14:00:00Z');
+
 COMMIT;

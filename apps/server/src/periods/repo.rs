@@ -293,13 +293,20 @@ async fn eligible_shareholders(
     .await
 }
 
-/// Eligible (active) Shares owned at the assessment effective point by
-/// active Shareholders (§25/§26): share status is evaluated at
-/// generation time (share status has no temporal dimension) while
-/// OWNERSHIP is resolved at the effective date — the interval that
-/// covers the end of that business day in Europe/Istanbul, i.e.
-/// `started_at < D+1 00:00 Istanbul AND (ended_at IS NULL OR
-/// ended_at >= D+1 00:00 Istanbul)`.
+/// Eligible Shares owned at the assessment effective point by active
+/// Shareholders (§25/§26): OWNERSHIP is resolved temporally — the
+/// interval that covers the end of that business day in
+/// Europe/Istanbul, i.e. `started_at < D+1 00:00 Istanbul AND
+/// (ended_at IS NULL OR ended_at >= D+1 00:00 Istanbul)`.
+///
+/// Share lifecycle predicate (STEP-011): `active`/`return_pending`/
+/// `closed` Shares may qualify; `voided` and `suspended` never do
+/// (unchanged STEP-006 policy). A `closed` (returned) Share therefore
+/// still participates for effective dates inside its now-ended
+/// ownership interval — history stays temporal — and is excluded for
+/// later dates by the interval predicate. `return_pending` Shares are
+/// still owned, so they keep participating until the return is
+/// finalized.
 async fn eligible_share_ownerships(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     effective_date: Date,
@@ -317,7 +324,8 @@ async fn eligible_share_ownerships(
             gp.first_name AS guardian_first_name, gp.last_name AS guardian_last_name, \
             f.sequence_number AS family_sequence, s.status AS shareholder_status \
          FROM share_ownerships so \
-         JOIN shares sh ON sh.id = so.share_id AND sh.status = 'active' \
+         JOIN shares sh ON sh.id = so.share_id \
+            AND sh.status IN ('active', 'return_pending', 'closed') \
          JOIN shareholders s ON s.id = so.shareholder_id AND s.status = 'active' \
          JOIN persons p ON p.id = s.person_id \
          LEFT JOIN persons gp ON gp.id = s.guardian_person_id \

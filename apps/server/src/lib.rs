@@ -20,4 +20,5 @@ pub mod observability;
 pub mod parties;
 pub mod payments;
 pub mod periods;
+pub mod share_returns;
 pub mod shares;

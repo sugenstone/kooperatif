@@ -85,6 +85,7 @@ export {
 export type {
 	CreateShareRequest,
 	InitialAcquisitionType,
+	ManualShareStatus,
 	OwnershipAcquisitionType,
 	ShareDetail,
 	ShareEventItem,
@@ -243,6 +244,37 @@ export {
 	incomePath,
 	incomeReversePath
 } from './income_expense';
+export type {
+	CancelEntitlementRequest,
+	CancelShareReturnRequest,
+	DetermineEntitlementRequest,
+	EntitlementDueState,
+	EntitlementSpecInput,
+	EntitlementStatus,
+	EntitlementType,
+	FinalizeShareReturnRequest,
+	InitiateShareReturnRequest,
+	PostSettlementRequest,
+	ReverseSettlementRequest,
+	SettlementStatus,
+	ShareReturnDetail,
+	ShareReturnEntitlement,
+	ShareReturnListItem,
+	ShareReturnSettlement,
+	ShareReturnStatus
+} from './share_returns';
+export {
+	SHARE_RETURNS_PATH,
+	SHARE_RETURN_ENTITLEMENTS_PATH,
+	entitlementCancelPath,
+	entitlementDeterminePath,
+	entitlementSettlementsPath,
+	settlementReversePath,
+	shareReturnCancelPath,
+	shareReturnCreateEntitlementPath,
+	shareReturnFinalizePath,
+	shareReturnPath
+} from './share_returns';
 export type {
 	ApiErrorBody,
 	ApiErrorCode,

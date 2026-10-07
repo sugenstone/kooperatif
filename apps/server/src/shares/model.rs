@@ -17,15 +17,19 @@ pub enum ShareError {
     InvalidReason,
 }
 
-/// Share lifecycle (docs/16 candidate subset implemented in STEP-005):
-/// `active` ↔ `suspended`; `active`/`suspended` → `voided` (terminal,
-/// mistaken-record correction). `return_pending`/`closed` belong to the
-/// future Share Return workflow and are intentionally absent.
+/// Share lifecycle (docs/16): `active` ↔ `suspended`; `active`/
+/// `suspended` → `voided` (terminal, mistaken-record correction).
+/// STEP-011 adds `return_pending` → `closed` — driven only by the Share
+/// Return workflow (`share_returns` commands), never by the generic
+/// status-change endpoint: `can_transition_to` intentionally does NOT
+/// include them so no PATCH can jump a Share into the return flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareStatus {
     Active,
     Suspended,
     Voided,
+    ReturnPending,
+    Closed,
 }
 
 impl ShareStatus {
@@ -34,6 +38,8 @@ impl ShareStatus {
             Self::Active => "active",
             Self::Suspended => "suspended",
             Self::Voided => "voided",
+            Self::ReturnPending => "return_pending",
+            Self::Closed => "closed",
         }
     }
 
@@ -42,11 +48,17 @@ impl ShareStatus {
             "active" => Some(Self::Active),
             "suspended" => Some(Self::Suspended),
             "voided" => Some(Self::Voided),
+            "return_pending" => Some(Self::ReturnPending),
+            "closed" => Some(Self::Closed),
             _ => None,
         }
     }
 
-    /// Explicit transition table (docs/16 rule for implementation).
+    /// Explicit transition table for the GENERIC status-change command
+    /// (docs/16 rule for implementation): suspend/reactivate and void.
+    /// `return_pending`/`closed` are reachable only through the
+    /// dedicated Share Return workflow — direct transitions are not
+    /// part of this matrix.
     pub fn can_transition_to(self, target: Self) -> bool {
         matches!(
             (self, target),

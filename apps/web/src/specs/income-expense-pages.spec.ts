@@ -118,8 +118,7 @@ describe('Income list (/gelirler)', () => {
 		stubFetch(async (url) => {
 			if (url.includes('/api/incomes')) return jsonResponse(paged([incomeEntry]));
 			if (url.includes('/api/financial-accounts')) return jsonResponse(paged([accountOption]));
-			if (url.includes('/api/financial-categories/options'))
-				return jsonResponse([incomeCategory]);
+			if (url.includes('/api/financial-categories/options')) return jsonResponse([incomeCategory]);
 			return jsonResponse({});
 		});
 		render(IncomeListPage);
@@ -149,10 +148,8 @@ describe('Income create (/gelirler/yeni)', () => {
 				postedBody = JSON.parse(String(init.body));
 				return jsonResponse(incomeEntry, 201);
 			}
-			if (url.includes('/api/financial-accounts/options'))
-				return jsonResponse([accountOption]);
-			if (url.includes('/api/financial-categories/options'))
-				return jsonResponse([incomeCategory]);
+			if (url.includes('/api/financial-accounts/options')) return jsonResponse([accountOption]);
+			if (url.includes('/api/financial-categories/options')) return jsonResponse([incomeCategory]);
 			return jsonResponse({});
 		});
 		render(IncomeNewPage);
@@ -220,10 +217,8 @@ describe('Expense create (/giderler/yeni)', () => {
 				postedBody = JSON.parse(String(init.body));
 				return jsonResponse({ error: { code: 'conflict' } }, 409);
 			}
-			if (url.includes('/api/financial-accounts/options'))
-				return jsonResponse([accountOption]);
-			if (url.includes('/api/financial-categories/options'))
-				return jsonResponse([expenseCategory]);
+			if (url.includes('/api/financial-accounts/options')) return jsonResponse([accountOption]);
+			if (url.includes('/api/financial-categories/options')) return jsonResponse([expenseCategory]);
 			return jsonResponse({});
 		});
 		render(ExpenseNewPage);
@@ -239,9 +234,7 @@ describe('Expense create (/giderler/yeni)', () => {
 
 		const body = postedBody as Record<string, string>;
 		expect(body.amount).toBe('999999.99');
-		expect(
-			await screen.findByText(/hesap bakiyesi yetersiz/i)
-		).toBeInTheDocument();
+		expect(await screen.findByText(/hesap bakiyesi yetersiz/i)).toBeInTheDocument();
 	});
 });
 
@@ -250,8 +243,7 @@ describe('Expense list + detail (/giderler)', () => {
 		stubFetch(async (url) => {
 			if (url.includes('/api/expenses')) return jsonResponse(paged([expenseEntry]));
 			if (url.includes('/api/financial-accounts')) return jsonResponse(paged([accountOption]));
-			if (url.includes('/api/financial-categories/options'))
-				return jsonResponse([expenseCategory]);
+			if (url.includes('/api/financial-categories/options')) return jsonResponse([expenseCategory]);
 			return jsonResponse({});
 		});
 		render(ExpenseListPage);
@@ -310,7 +302,10 @@ describe('Category management (/kategoriler)', () => {
 		await screen.findByRole('heading', { name: 'Gelir/Gider Kategorileri' });
 		await screen.findByText('Diğer Gelir');
 
-		await userEvent.selectOptions(screen.getByLabelText('Tip', { selector: '#new-type' }), 'income');
+		await userEvent.selectOptions(
+			screen.getByLabelText('Tip', { selector: '#new-type' }),
+			'income'
+		);
 		await userEvent.type(screen.getByLabelText('Kategori Adı'), 'Bağış Geliri');
 		const createButtons = screen.getAllByRole('button', { name: 'Yeni Kategori' });
 		await userEvent.click(createButtons[createButtons.length - 1]);

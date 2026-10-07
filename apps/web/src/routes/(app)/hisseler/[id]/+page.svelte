@@ -26,6 +26,7 @@
 	import { formatTry, parseTryInput } from '$lib/money';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import {
+		SHARE_RETURNS_PATH,
 		SHAREHOLDERS_PATH,
 		sharePath,
 		shareSalePath,
@@ -34,6 +35,7 @@
 		type Paginated,
 		type ShareDetail,
 		type ShareEventType,
+		type ShareReturnListItem,
 		type ShareholderListItem,
 		type ShareStatus
 	} from '@kooperatif/contracts';
@@ -43,6 +45,7 @@
 	let { data } = $props<{ data: { id: string } }>();
 
 	let detail = $state<ShareDetail | null>(null);
+	let pendingReturnId = $state<string | null>(null);
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
@@ -67,6 +70,14 @@
 		loadError = null;
 		try {
 			detail = await apiFetch<ShareDetail>(sharePath(data.id));
+			if (detail.status === 'return_pending' && can('share_returns.read')) {
+				const returns = await apiFetch<Paginated<ShareReturnListItem>>(
+					`${SHARE_RETURNS_PATH}?shareId=${data.id}&status=pending&pageSize=1`
+				);
+				pendingReturnId = returns.items[0]?.id ?? null;
+			} else {
+				pendingReturnId = null;
+			}
 		} catch (error) {
 			loadError = apiErrorKey(error);
 		}
@@ -159,6 +170,9 @@
 	} {
 		if (status === 'active') return { label: 'shares.statusActive', variant: 'default' };
 		if (status === 'suspended') return { label: 'shares.statusSuspended', variant: 'secondary' };
+		if (status === 'return_pending')
+			return { label: 'shares.statusReturnPending', variant: 'secondary' };
+		if (status === 'closed') return { label: 'shares.statusClosed', variant: 'outline' };
 		return { label: 'shares.statusVoided', variant: 'outline' };
 	}
 
@@ -172,6 +186,12 @@
 				return 'shares.eventSale';
 			case 'status_change':
 				return 'shares.eventStatusChange';
+			case 'return_requested':
+				return 'shares.eventReturnRequested';
+			case 'return_cancelled':
+				return 'shares.eventReturnCancelled';
+			case 'return_finalized':
+				return 'shares.eventReturnFinalized';
 			default:
 				return 'shares.eventVoided';
 		}
@@ -203,7 +223,7 @@
 				{t('shares.number')}
 				{detail.shareNumber}
 			</h1>
-			{#if can('shares.manage') && detail.status !== 'voided'}
+			{#if can('shares.manage') && detail.status !== 'voided' && detail.status !== 'closed' && detail.status !== 'return_pending'}
 				<div class="flex flex-wrap gap-2">
 					{#if detail.status === 'active'}
 						<Button
@@ -230,6 +250,16 @@
 						>
 							{t('shares.suspend')}
 						</Button>
+						{#if can('share_returns.manage')}
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={busy || !detail.owner}
+								href={resolve(`/hisse-iadeleri/yeni?share=${detail.id}`)}
+							>
+								{t('shares.startReturn')}
+							</Button>
+						{/if}
 					{:else if detail.status === 'suspended'}
 						<Button
 							variant="outline"
@@ -254,6 +284,20 @@
 
 		{#if actionError}
 			<p class="text-sm text-destructive">{t(actionError)}</p>
+		{/if}
+
+		{#if detail.status === 'return_pending'}
+			<p class="rounded-md border border-secondary bg-muted px-3 py-2 text-sm">
+				{t('shares.returnPendingBanner')}
+				{#if pendingReturnId}
+					<a
+						class="font-medium underline-offset-2 hover:underline"
+						href={resolve(`/hisse-iadeleri/${pendingReturnId}`)}
+					>
+						{t('shareReturns.detail')}
+					</a>
+				{/if}
+			</p>
 		{/if}
 
 		<Card class="w-full max-w-2xl">

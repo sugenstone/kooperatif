@@ -22,7 +22,12 @@ export interface ShareholderIdentity {
 	displayLabel: string;
 }
 
-export type ShareStatus = 'active' | 'suspended' | 'voided';
+export type ShareStatus =
+	| 'active'
+	| 'suspended'
+	| 'voided'
+	| 'return_pending'
+	| 'closed';
 
 /** How an ownership interval began. */
 export type OwnershipAcquisitionType =
@@ -39,7 +44,10 @@ export type ShareEventType =
 	| 'transfer'
 	| 'sale'
 	| 'status_change'
-	| 'voided';
+	| 'voided'
+	| 'return_requested'
+	| 'return_cancelled'
+	| 'return_finalized';
 
 export interface ShareListItem {
 	id: string;
@@ -93,8 +101,12 @@ export interface ShareSaleRequest {
 	expectedUpdatedAt: string;
 }
 
+/** Manual status-change targets — return_pending/closed are reachable
+ *  only through the Share Return workflow (STEP-011). */
+export type ManualShareStatus = 'active' | 'suspended' | 'voided';
+
 export interface ShareStatusChangeRequest {
-	to: ShareStatus;
+	to: ManualShareStatus;
 	reason?: string;
 }
 

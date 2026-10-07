@@ -609,7 +609,139 @@ export const trTR = {
 	'categories.activate': 'Aktifleştir',
 	'categories.deactivate': 'Pasifleştir',
 	'categories.empty': 'Kategori bulunamadı.',
-	'categories.errors.duplicate': 'Bu isimde bir kategori zaten var.'
+	'categories.errors.duplicate': 'Bu isimde bir kategori zaten var.',
+
+	// STEP-011 — Share Return / Hak Ediş / Ödeme
+	'nav.shareReturns': 'Hisse İadeleri',
+	'shares.statusReturnPending': 'İade Bekliyor',
+	'shares.statusClosed': 'Kapatıldı',
+	'shares.eventReturnRequested': 'İade Talebi',
+	'shares.eventReturnCancelled': 'İade İptali',
+	'shares.eventReturnFinalized': 'İade Kesinleşti',
+	'shares.returnSection': 'İade Süreci',
+	'shares.startReturn': 'İade Başlat',
+	'shares.returnPendingBanner': 'Bu hisse için bekleyen bir iade süreci var.',
+
+	'shareReturns.title': 'Hisse İadeleri',
+	'shareReturns.description':
+		'Hisse iade süreçleri: hisse durumu, kooperatifin hak ediş yükümlülüğü ve nakit ödeme ayrı kavramlardır. Hak ediş tanımak para hareketi oluşturmaz; yalnızca ödeme hesaptan çıkış yaratır.',
+	'shareReturns.create': 'Yeni İade Talebi',
+	'shareReturns.empty': 'İade kaydı bulunamadı.',
+	'shareReturns.number': 'İade No',
+	'shareReturns.share': 'Hisse',
+	'shareReturns.owner': 'Hissedar',
+	'shareReturns.requestedAt': 'Talep Tarihi',
+	'shareReturns.effectiveDate': 'İade Tarihi',
+	'shareReturns.status': 'Durum',
+	'shareReturns.statusPending': 'Beklemede',
+	'shareReturns.statusFinalized': 'Kesinleşti',
+	'shareReturns.statusCancelled': 'İptal Edildi',
+	'shareReturns.entitlementCount': 'Hak Ediş',
+	'shareReturns.outstanding': 'Açık Yükümlülük',
+	'shareReturns.detail': 'İade Detayı',
+	'shareReturns.search': 'Ara (iade no, hisse no, hissedar)',
+
+	'shareReturns.new.title': 'Yeni Hisse İadesi',
+	'shareReturns.new.description':
+		'İade talebi hisseyi hemen kapatmaz; hisse "İade Bekliyor" durumuna geçer ve kesinleşinceye kadar sahiplik devam eder. Bu işlem para hareketi oluşturmaz.',
+	'shareReturns.new.share': 'İade edilecek hisse',
+	'shareReturns.new.shareHelp': 'Yalnızca aktif hisseler iade sürecine girebilir.',
+	'shareReturns.new.effectiveDate': 'İade Tarihi',
+	'shareReturns.new.effectiveDateHelp':
+		'Sahiplik ve ekonomik katılımın sona ereceği gün. Bu tarihten önceki dönemlere ait tahakkuklar korunur; bu tarihten itibaren hisse yeni tahakkuka katılmaz.',
+	'shareReturns.new.reason': 'Gerekçe (isteğe bağlı)',
+	'shareReturns.new.submit': 'İade Talebini Oluştur',
+	'shareReturns.new.submitting': 'Kaydediliyor…',
+	'shareReturns.new.preview': 'Önizleme',
+	'shareReturns.new.ownerPreview': 'Mevcut Sahip',
+	'shareReturns.new.noShares': 'İade edilebilecek aktif hisse bulunamadı.',
+
+	'shareReturns.finalize.title': 'İadeyi Kesinleştir',
+	'shareReturns.finalize.description':
+		'Kesinleşme hisseyi kapatır ve sahiplik aralığını iade tarihi itibarıyla sonlandırır. Tanımlanan hak edişler kooperatifin yükümlülüğü olur — para hareketi oluşmaz.',
+	'shareReturns.finalize.submit': 'Kesinleştir',
+	'shareReturns.finalize.confirm':
+		'İade kesinleşecek; hisse kapatılacak ve sahiplik sonlandırılacak. Onaylıyor musunuz?',
+	'shareReturns.finalize.entitlements': 'Hak Edişler',
+	'shareReturns.finalize.addPrincipal': 'Ana Para Hakkı Tanımla',
+	'shareReturns.finalize.addProfit': 'Kâr Payı Hakkı Tanımla',
+
+	'shareReturns.cancel': 'Talebi İptal Et',
+	'shareReturns.cancelConfirm':
+		'Bekleyen iade talebi iptal edilecek; hisse tekrar aktif olacak. Onaylıyor musunuz?',
+	'shareReturns.cancelReason': 'İptal gerekçesi',
+
+	'entitlements.section': 'Hak Edişler',
+	'entitlements.type': 'Hak Türü',
+	'entitlements.typePrincipal': 'Ana Para Hakkı',
+	'entitlements.typeProfit': 'Kâr Payı Hakkı',
+	'entitlements.amount': 'Tutar',
+	'entitlements.undetermined': 'Henüz belirlenmedi',
+	'entitlements.dueDate': 'Vade Tarihi',
+	'entitlements.recognizedAt': 'Tanıma Tarihi',
+	'entitlements.determinedAt': 'Belirleme Tarihi',
+	'entitlements.policyReference': 'Politika / Karar Referansı',
+	'entitlements.settled': 'Ödenen',
+	'entitlements.remaining': 'Kalan',
+	'entitlements.status': 'Durum',
+	'entitlements.statusOpen': 'Açık',
+	'entitlements.statusPartiallySettled': 'Kısmen Ödendi',
+	'entitlements.statusSettled': 'Ödendi',
+	'entitlements.statusCancelled': 'İptal Edildi',
+	'entitlements.dueUndetermined': 'Vade belirsiz',
+	'entitlements.dueNotDue': 'Vadesi gelmedi',
+	'entitlements.dueToday': 'Vadesi bugün',
+	'entitlements.dueOverdue': 'Vadesi geçti',
+	'entitlements.empty': 'Hak ediş tanımlanmadı.',
+	'entitlements.determine': 'Tutarı Belirle',
+	'entitlements.determineTitle': 'Hak Ediş Tutarını Belirle',
+	'entitlements.determineSubmit': 'Belirle',
+	'entitlements.determineNote':
+		'Formül sistemde tanımlı değildir; kooperatifin onayladığı tutarı girin. Tutar bu kayıtta sabitlenir.',
+	'entitlements.recognize': 'Hak Ediş Tanı',
+	'entitlements.cancel': 'Hak Edişi İptal Et',
+	'entitlements.cancelConfirm':
+		'Hak ediş iptal edilecek; hiçbir ödeme yapılmamış olmalıdır. Onaylıyor musunuz?',
+	'entitlements.settle': 'Ödeme Yap',
+
+	'settlements.section': 'Ödemeler',
+	'settlements.empty': 'Henüz ödeme yapılmadı.',
+	'settlements.number': 'Ödeme No',
+	'settlements.account': 'Hesap',
+	'settlements.amount': 'Tutar',
+	'settlements.settledAt': 'Ödeme Tarihi',
+	'settlements.status': 'Durum',
+	'settlements.statusPosted': 'Kayıtlı',
+	'settlements.statusReversed': 'Ters Kayıt',
+	'settlements.movement': 'Hareket',
+	'settlements.reverse': 'Ödemeyi Ters Kaydet',
+	'settlements.reverseReason': 'Ters kayıt gerekçesi',
+	'settlements.reverseConfirm':
+		'Ödeme ters kaydedilecek; ilgili hesap hareketi tersine çevrilecek. Onaylıyor musunuz?',
+	'settlements.new.title': 'Hak Ediş Ödemesi',
+	'settlements.new.description':
+		'Seçilen finansal hesaptan tam olarak bir çıkış hareketi oluşur. Bu bir gider kaydı değildir; operasyonel gider toplamını etkilemez.',
+	'settlements.new.account': 'Finansal Hesap',
+	'settlements.new.amount': 'Ödeme Tutarı',
+	'settlements.new.amountHelp': 'Kalan hak ediş tutarını aşamaz.',
+	'settlements.new.accountBalance': 'Hesap bakiyesi',
+	'settlements.new.remaining': 'Kalan hak ediş',
+	'settlements.new.submit': 'Ödemeyi Kaydet',
+	'settlements.new.submitting': 'Kaydediliyor…',
+
+	'shareReturns.errors.activeReturnExists': 'Bu hisse için zaten bekleyen bir iade süreci var.',
+	'shareReturns.errors.notEligible': 'Yalnızca aktif ve sahipli hisseler iade edilebilir.',
+	'shareReturns.errors.invalidDate':
+		'İade tarihi geçersiz: gelecekte olamaz ve sahiplik başlangıcından önce olamaz.',
+	'shareReturns.errors.entitlementExists': 'Bu iade için aynı türde hak ediş zaten tanımlı.',
+	'shareReturns.errors.notSettleable':
+		'Bu hak ediş ödemeye uygun değil (tutar belirlenmemiş veya kapalı).',
+	'shareReturns.errors.overSettlement': 'Ödeme tutarı kalan hak edişi aşamaz.',
+	'shareReturns.errors.hasSettlements':
+		'Kayıtlı ödemesi olan hak ediş iptal edilemez; önce ödemeleri ters kaydedin.',
+	'shareReturns.errors.insufficientFunds': 'Seçilen hesabın bakiyesi bu ödeme için yetersiz.',
+	'shareReturns.errors.conflict':
+		'İşlem çakışması: kayıt değişti veya aynı anahtar farklı içerikle kullanıldı.'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

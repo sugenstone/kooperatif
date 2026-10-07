@@ -52,7 +52,7 @@ presentation-only and built in from the start.
 
 ## Repository layout
 
-``` text
+```text
 apps/
   web/        SvelteKit + TypeScript + shadcn-svelte frontend
   server/     Rust + Axum backend (library + `serve`/`migrate` binaries)
@@ -68,13 +68,13 @@ implementation/  Executed STEP instruction files (audit trail)
 
 ## Toolchain
 
-| Tool            | Version used                |
-| --------------- | --------------------------- |
-| Node.js         | 24 (≥22 required)           |
-| pnpm            | 10.x (`packageManager` pinned) |
-| Rust            | stable (1.92 verified)      |
-| Docker Engine + Compose | any recent        |
-| Git             | any recent                  |
+| Tool                    | Version used                   |
+| ----------------------- | ------------------------------ |
+| Node.js                 | 24 (≥22 required)              |
+| pnpm                    | 10.x (`packageManager` pinned) |
+| Rust                    | stable (1.92 verified)         |
+| Docker Engine + Compose | any recent                     |
+| Git                     | any recent                     |
 
 On Windows, run scripts through **Git Bash** (the repo uses LF line
 endings via `.gitattributes`).
@@ -246,8 +246,8 @@ Shareholder ≠ Guardian ≠ Family.**
   **never unique**: several distinct `Mehmet Yılmaz` records are valid.
   Only minimal identity fields are stored (data minimization); a
   computed `search_name` column carries a Turkish-aware fold (`İ/I/ı`→`i`
-  + Unicode lowercase) so search is case-insensitive without mutating
-  stored display values.
+  - Unicode lowercase) so search is case-insensitive without mutating
+    stored display values.
 - **`shareholders`** — a cooperative business record linked 1:1 to a
   Person (`person_id` UNIQUE). `guardian_person_id` is an optional
   Person reference: a Guardian may or may not be a Shareholder and is
@@ -283,7 +283,7 @@ Shareholder ≠ Guardian ≠ Family.**
   `GET /api/families/{id}` (with members). Mutations carry an
   `expectedUpdatedAt` optimistic-concurrency precondition
   (`409 stale_state`); family transfers also serialize on the row lock
-  + exclusion constraint.
+  - exclusion constraint.
 - **Permissions**: `shareholders.read`, `shareholders.manage`,
   `families.read`, `families.manage` — granted explicitly to the seeded
   `Sistem Yöneticisi` role by migration 0004 (no wildcard inheritance;
@@ -515,7 +515,7 @@ number: it is the sum of valid account movements (`inflow` adds,
   `transfer`, `income` or `expense` (the last two landed in STEP-010)
   and `source_id` points at the originating row — there is
   deliberately no arbitrary movement endpoint. `UNIQUE
-  (account_id, source_type, source_id)` structurally prevents a source
+(account_id, source_type, source_id)` structurally prevents a source
   posting the same leg twice.
 - **`account_transfers`** — one logical move between two cooperative
   accounts (never income or expense): a single transfer row plus two
@@ -617,15 +617,15 @@ income/expense balance and no second ledger.**
   `GET /api/incomes/{id}`, `POST /api/incomes/{id}/reverse` (same for
   `/api/expenses`), `GET|POST /api/financial-categories`,
   `GET /api/financial-categories/options`, `PATCH
-  /api/financial-categories/{id}`, `POST
-  /api/financial-categories/{id}/status-change`, `GET
-  /api/income-expense/summary` (`dateFrom`/`dateTo`). Lists are
+/api/financial-categories/{id}`, `POST
+/api/financial-categories/{id}/status-change`, `GET
+/api/income-expense/summary` (`dateFrom`/`dateTo`). Lists are
   server-paginated with date/account/category/status/search filters.
 - **Idempotent commands** (ADR-006): posting carries a durable
   `idempotency_key` + payload fingerprint — same key + same payload
   replays the created entry, different payload answers `409`.
 - **Status-based reversal** (docs/19): entries flip `posted →
-  reversed` with actor/time/reason and the bound movement reverses in
+reversed` with actor/time/reason and the bound movement reverses in
   the same transaction — no DELETE endpoint exists anywhere.
 - **Permissions**: `income_expense.read`, `income_expense.manage` —
   granted to `Sistem Yöneticisi` by migration 0010.
@@ -648,6 +648,103 @@ income/expense balance and no second ledger.**
   Investment, Social Aid, tax/VAT engine, budgeting, purchase orders
   or approval workflows — deferred (docs/07, STEP-010 §53).
 
+## Share Return, Exit & Deferred Entitlements (STEP-011, docs/10 + docs/16 + docs/19)
+
+The cooperative-exit domain. **Three layers stay strictly separate:
+(1) the Share lifecycle (`active → return_pending → closed`), (2) the
+Entitlement — what the cooperative owes, which moves NO money — and
+(3) the Settlement — real money leaving a Financial Account through
+exactly ONE outflow Account Movement. Closing a share is not
+recognizing a debt, and recognizing a debt is not paying it.**
+
+- **`share_returns`** — the controlled workflow case: stable
+  `return_number`, the share, the owner-at-initiation FK plus immutable
+  `owner_display_name`/`share_number`/`ownership_started_at` snapshots,
+  `requested_at`, and the authoritative `effective_return_date` — the
+  business DATE on which economic participation ends; the ownership
+  interval closes at that date's 00:00 Europe/Istanbul. Lifecycle
+  `pending → finalized | cancelled`, both with DB-enforced consistency
+  CHECKs; at most one `pending` return per share (partial unique
+  index). Initiation moves the share to `return_pending`, cancellation
+  restores `active`, finalization stamps `finalized_at/by` and closes
+  the share — `closed` and `voided` are terminal, no resurrection path.
+- **`share_return_entitlements`** — one row per right per return:
+  `entitlement_type ∈ {principal, profit}` ("Refundable Invested
+  Amount Right" / "Profit Right"), explicit beneficiary, `due_date`,
+  `policy_reference` (the free-text decision under which the amount was
+  set), `recognized_at`, `determined_at`. **`amount NULL` is a
+  first-class state: "the right exists, quantification pending" — never
+  rendered as `0.00`.** A CHECK enforces amount ↔ determined_at
+  pairing; a partial unique index permits at most one non-cancelled
+  entitlement per (return, type). Status `open → partially_settled →
+settled | cancelled`; remaining is always derived
+  (`amount − posted settlements`), never stored.
+- **No invented formulas**: the refundable amount and the profit right
+  are `UNRESOLVED / POLICY_DRIVEN` in docs/10+docs/17 — the operator
+  enters the cooperative-approved amount; the system never computes
+  it. Profit rights may stay undetermined at finalize and be fixed
+  later via `POST …/determine` (optimistic `expectedUpdatedAt`).
+- **`share_return_settlements`** — real cash leaving an account:
+  `settlement_number`, `entitlement_id`, `financial_account_id`, exact
+  positive `NUMERIC(19,2)` amount, `settled_at`, and a hard 1:1
+  `account_movement_id` binding. Each settlement posts exactly ONE
+  `outflow` movement with `source_type = 'share_return_settlement'` —
+  it is **not** Expense, Payment, Transfer or Shareholder Credit and
+  never touches those tables. Over-settlement, undetermined-amount
+  settlement and insufficient funds are all rejected `409`; the
+  entitlement row lock serializes concurrent postings.
+- **Status-based reversal** (docs/19): settlement `posted → reversed`
+  flips the bound movement `active → reversed` in the same
+  transaction; the entitlement's derived remaining amount is restored
+  automatically. No DELETE endpoint exists anywhere in the domain.
+- **Effective-date eligibility fix**: period/assessment share
+  eligibility now consults temporal ownership intervals plus statuses
+  `active | return_pending | closed` instead of "currently active" —
+  a share closed today still rightly owes yesterday's periods.
+- **Idempotent commands** (ADR-006): initiation, finalize, determine,
+  settle and reversal all carry durable `idempotency_key` + payload
+  fingerprints; replay returns the stored result, a reused key with a
+  different payload answers `409 conflict`.
+- **Derived surfaces**: `GET|POST /api/share-returns`,
+  `GET /api/share-returns/{id}`, `POST …/finalize`, `POST …/cancel`,
+  `POST /api/share-returns/{id}/entitlements`,
+  `GET /api/share-return-entitlements` (beneficiary/due-state
+  filtered), `POST /api/share-return-entitlements/{id}/determine` +
+  `/cancel` + `/settlements`,
+  `POST /api/share-return-settlements/{id}/reverse`. Lists are
+  server-paginated; a derived `dueState`
+  (`undetermined|not_due|due|overdue|settled|cancelled`) is computed at
+  the API boundary — no rules engine yet.
+- **Permissions**: `share_returns.read`, `share_returns.manage` —
+  granted to `Sistem Yöneticisi` by migration 0011; every route is
+  backend-authorized and every mutation is CSRF-protected.
+- **Audit**: `share_return_requested`, `share_return_finalized`,
+  `share_return_cancelled`, `share_return_entitlement_recognized`,
+  `share_return_entitlement_determined`,
+  `share_return_entitlement_cancelled`,
+  `share_return_settlement_posted`,
+  `share_return_settlement_reversed` land in `security_events`; share
+  lifecycle milestones record `return_requested` /
+  `return_finalized` / `return_cancelled` share events.
+- **Frontend**: `/hisse-iadeleri` (filtered, paginated list with
+  outstanding totals), `/hisse-iadeleri/yeni` (active-share picker +
+  effective-date + preview), `/hisse-iadeleri/{id}` (finalize with
+  explicit principal/profit specs, determine an undetermined right,
+  cancel, settle against a financial account with remaining-aware
+  client guard, reverse). Share detail gains a return-request banner
+  and `return_pending`/`closed` badges; shareholder detail shows the
+  return cases. Turkish-first i18n; tr-TR money inputs go through
+  `parseTryInput`; NULL amounts render as "Henüz belirlenmedi".
+- **E2E**: `node scripts/e2e-step011.mjs` drives the real stack —
+  UI-initiated return (zero money moves), UI finalize with a
+  determined principal + undetermined profit right, share closure,
+  partial UI settlement (exactly one `share_return_settlement`
+  outflow; income/expense/payment/transfer totals untouched), UI
+  reversal with history preserved.
+- **Boundary**: no formula engine, no exit valuation, no indexation,
+  no profit distribution, no approval workflow, no automatic payment
+  plan — deferred (docs/10 open decisions, docs/17).
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a
@@ -661,7 +758,7 @@ SUM(active applications)`, always derived.**
   exactly one beneficiary `shareholder_id` + `credit_number` (identity,
   also the FIFO order). The beneficiary is always chosen explicitly —
   never inferred from payer, guardian or Family. `SUM(credits) <=
-  payment remainder` is enforced under the Payment row lock.
+payment remainder` is enforced under the Payment row lock.
 - **`credit_applications`** — settlement history: which credit consumed
   which Assessment, `mode` `automatic | manual`. Applications are not
   Payments and create no movements; the Assessment's settled amount is
@@ -682,7 +779,7 @@ SUM(active applications)`, always derived.**
   reversal (`409`) — money ownership is never silently rewritten.
 - **Derived surfaces**: `GET /api/shareholders/{id}/credits` (ledger:
   summary + origins + applications), `GET|POST
-  /api/payments/{id}/credits`, `POST /api/credits/{id}/reverse`,
+/api/payments/{id}/credits`, `POST /api/credits/{id}/reverse`,
   `GET|POST /api/assessments/{id}/credit-applications`,
   `POST /api/credit-applications/{id}/reverse`. Payment detail exposes
   its sourced credits; unallocated amount subtracts assigned credit.
@@ -721,7 +818,7 @@ procedure: [docs/30-BACKUP-OPERATIONS-RUNBOOK.md](docs/30-BACKUP-OPERATIONS-RUNB
   logs or manifests.
 - **Commands**: `pnpm backup:create` · `pnpm backup:verify -- <name>`
   (checksum + manifest + archive TOC) · `pnpm backup:restore --
-  --artifact <n> --target-db <db> --confirm <db>` (Level-1 gate first;
+--artifact <n> --target-db <db> --confirm <db>` (Level-1 gate first;
   refuses the source DB, unsafe names, mismatched confirm, non-empty
   targets without explicit flags; single-transaction restore) ·
   `pnpm backup:retention` (ADR-013 daily 30d / monthly 12mo / yearly
@@ -735,7 +832,7 @@ procedure: [docs/30-BACKUP-OPERATIONS-RUNBOOK.md](docs/30-BACKUP-OPERATIONS-RUNB
 - **Status**: `backups/status.json` records attempts/success/verify/
   restore/drill/retention — it lives outside PostgreSQL so it survives
   database loss. `backups/` is gitignored; never commit dumps.
-- **Boundary**: this is the *technical* recoverability layer.
+- **Boundary**: this is the _technical_ recoverability layer.
   Production policy requires environment provisioning beyond it: WAL
   archiving + PITR (RPO ≤ 15 min), an encrypted off-site copy (3-2-1),
   object-storage protection for uploaded files, scheduled execution and

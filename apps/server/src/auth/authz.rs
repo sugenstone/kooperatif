@@ -59,6 +59,10 @@ pub mod catalog {
     pub const INCOME_EXPENSE_READ: &str = "income_expense.read";
     pub const INCOME_EXPENSE_MANAGE: &str = "income_expense.manage";
 
+    /// STEP-011 — Share Return / Entitlement / Settlement surfaces.
+    pub const SHARE_RETURNS_READ: &str = "share_returns.read";
+    pub const SHARE_RETURNS_MANAGE: &str = "share_returns.manage";
+
     /// Every permission key the application owns. Adding a permission
     /// is a controlled catalog change: migration seed + this list +
     /// contracts (see README "adding a new permission").
@@ -85,6 +89,8 @@ pub mod catalog {
         CREDITS_MANAGE,
         INCOME_EXPENSE_READ,
         INCOME_EXPENSE_MANAGE,
+        SHARE_RETURNS_READ,
+        SHARE_RETURNS_MANAGE,
     ];
 
     pub fn is_known(key: &str) -> bool {
@@ -218,7 +224,7 @@ mod tests {
 
     #[test]
     fn catalog_is_minimal_and_has_no_wildcards() {
-        assert_eq!(catalog::ALL.len(), 22, "STEP-003..STEP-010 catalog");
+        assert_eq!(catalog::ALL.len(), 24, "STEP-003..STEP-011 catalog");
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
         }));

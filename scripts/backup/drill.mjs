@@ -172,14 +172,14 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 22],
+			['permissions', 24],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
 			['shareholder_family_memberships', 3],
-			['shares', 2],
-			['share_ownerships', 3],
-			['share_events', 3],
+			['shares', 3],
+			['share_ownerships', 4],
+			['share_events', 6],
 			['periods', 3],
 			['assessment_rules', 3],
 			['assessments', 4],
@@ -187,13 +187,16 @@ async function main() {
 			['payments', 3],
 			['payment_allocations', 3],
 			['financial_accounts', 2],
-			['account_movements', 8],
+			['account_movements', 10],
 			['account_transfers', 1],
 			['shareholder_credits', 1],
 			['credit_applications', 2],
 			['financial_categories', 12],
 			['income_entries', 1],
-			['expense_entries', 2]
+			['expense_entries', 2],
+			['share_returns', 1],
+			['share_return_entitlements', 2],
+			['share_return_settlements', 2]
 		];
 		let allCounts = true;
 		for (const [table, want] of counts) {
@@ -280,6 +283,33 @@ async function main() {
 			[
 				"SELECT e.status||'|'||m.status||'|'||e.reversal_reason FROM expense_entries e JOIN account_movements m ON m.id=e.account_movement_id WHERE e.expense_number=9002",
 				'reversed|reversed|drill: hatalı gider'
+			],
+			// STEP-011: return 9001 → closed share + identity snapshot.
+			[
+				"SELECT sh.status||'|'||r.owner_display_name FROM share_returns r JOIN shares sh ON sh.id=r.share_id WHERE r.return_number=9001",
+				'closed|Yedek Hissedarı · Vasi: Vasi Test · Aile No 900002'
+			],
+			// Entitlement 9001 → beneficiary + determined amount; 9002 stays
+			// undetermined (NULL amount must survive as NULL, never 0).
+			[
+				"SELECT p.first_name||' '||p.last_name||'|'||e.amount::text||'|'||e.entitlement_type FROM share_return_entitlements e JOIN shareholders s ON s.id=e.beneficiary_shareholder_id JOIN persons p ON p.id=s.person_id WHERE e.entitlement_number=9001",
+				'Yedek Hissedarı|1000.00|principal'
+			],
+			[
+				"SELECT (e.amount IS NULL)::text||'|'||(e.determined_at IS NULL)::text||'|'||e.status FROM share_return_entitlements e WHERE e.entitlement_number=9002",
+				'true|true|open'
+			],
+			// Settlement 9001 → its ONE movement, provenance
+			// 'share_return_settlement' — never income/expense/payment.
+			[
+				"SELECT m.direction||'|'||m.source_type||'|'||a.name FROM share_return_settlements st JOIN account_movements m ON m.id=st.account_movement_id JOIN financial_accounts a ON a.id=st.financial_account_id WHERE st.settlement_number=9001",
+				'outflow|share_return_settlement|Yedek Kasa'
+			],
+			// Reversed settlement 9002 keeps entry AND movement reversal
+			// bookkeeping after restore.
+			[
+				"SELECT st.status||'|'||m.status||'|'||st.reversal_reason FROM share_return_settlements st JOIN account_movements m ON m.id=st.account_movement_id WHERE st.settlement_number=9002",
+				'reversed|reversed|drill: hatalı ödeme'
 			]
 		];
 		let allRel = true;
@@ -328,13 +358,14 @@ async function main() {
 			'100.00'
 		);
 		// Derived balances on the RESTORED copy — cash: +150 -40 +80
-		// +500 (income) −60 (expense) = 630; the reversed 25.00 expense is
+		// +500 (income) −60 (expense) −300 (settlement) = 330; the
+		// reversed 25.00 expense and reversed 100.00 settlement are
 		// excluded. Bank: +30 reversed (excluded) +40 = 40. Balances are
 		// never stored; the restored movement history must derive them.
 		expect(
-			'Derived cash balance (150-40+80+500-60=630.00)',
+			'Derived cash balance (150-40+80+500-60-300=330.00)',
 			"SELECT coalesce(sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END),0)::text FROM account_movements WHERE account_id='f1f1f1f1-0000-4000-8000-000000000001' AND status='active'",
-			'630.00'
+			'330.00'
 		);
 		expect(
 			'Derived bank balance (reversed leg excluded → 40.00)',
@@ -344,7 +375,15 @@ async function main() {
 		expect(
 			'Reversed movement history preserved',
 			"SELECT count(*) FROM account_movements WHERE status='reversed' AND reversed_by IS NOT NULL AND reversal_reason IS NOT NULL",
-			'2'
+			'3'
+		);
+		// STEP-011 derived truth: remaining principal = determined amount
+		// − POSTED settlements (1000 − 300 = 700; the reversed 100 is
+		// excluded). Never stored — always derived on the copy.
+		expect(
+			'Derived entitlement remaining (1000-300=700.00)',
+			"SELECT (e.amount - coalesce((SELECT sum(s.amount) FROM share_return_settlements s WHERE s.entitlement_id=e.id AND s.status='posted'),0))::text FROM share_return_entitlements e WHERE e.entitlement_number=9001",
+			'700.00'
 		);
 		// STEP-010: entry exactness + operational totals on the restored
 		// copy — posted income 500.00, posted expense 60.00 (the reversed
@@ -514,6 +553,56 @@ async function main() {
 				'income movement leg uniqueness',
 				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
 				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','inflow',1,'income','e1e1e1e1-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
+			],
+			// STEP-011 invariants must still BEHAVE after restore.
+			[
+				'share status enum',
+				`UPDATE shares SET status='archived' WHERE share_number=9001`
+			],
+			[
+				'return idempotency key unique',
+				`INSERT INTO share_returns (share_id, shareholder_id, owner_display_name, share_number, ownership_started_at, requested_at, effective_return_date, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('66666666-0000-4000-8000-000000000002','44444444-0000-4000-8000-000000000002','x',9002,now(),now(),'2026-02-10','drill-ridem-0001','drill-rx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'return finalized consistency check',
+				`INSERT INTO share_returns (share_id, shareholder_id, owner_display_name, share_number, ownership_started_at, requested_at, effective_return_date, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('66666666-0000-4000-8000-000000000002','44444444-0000-4000-8000-000000000002','x',9002,now(),now(),'2026-02-10','finalized','drill-ry','drill-ry','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'one open right per (return,type)',
+				`INSERT INTO share_return_entitlements (share_return_id, entitlement_type, beneficiary_shareholder_id, amount, recognized_at, determined_at, created_by)
+				 VALUES ('d5d5d5d5-0000-4000-8000-000000000001','principal','44444444-0000-4000-8000-000000000001',1,now(),now(),'11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'entitlement determined consistency check',
+				`INSERT INTO share_return_entitlements (share_return_id, entitlement_type, beneficiary_shareholder_id, amount, recognized_at, status, cancelled_at, cancelled_by, cancellation_reason, created_by)
+				 VALUES ('d5d5d5d5-0000-4000-8000-000000000001','profit','44444444-0000-4000-8000-000000000001',1,now(),'cancelled',now(),'11111111-0000-4000-8000-0000000000aa','x','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'settlement positive amount check',
+				`INSERT INTO share_return_settlements (entitlement_id, financial_account_id, amount, settled_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('e7e7e7e7-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',0,now(),'f2f2f2f2-0000-4000-8000-0000000099ee','drill-sx','drill-sx','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'settlement idempotency key unique',
+				`INSERT INTO share_return_settlements (entitlement_id, financial_account_id, amount, settled_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('e7e7e7e7-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-0000000099ff','drill-sidem-0001','drill-sy','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'settlement reversal consistency check',
+				`INSERT INTO share_return_settlements (entitlement_id, financial_account_id, amount, settled_at, account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('e7e7e7e7-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-00000000a0a0','reversed','drill-sz','drill-sz','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'settlement→movement 1:1 unique',
+				`INSERT INTO share_return_settlements (entitlement_id, financial_account_id, amount, settled_at, account_movement_id, idempotency_key, idempotency_fingerprint, created_by)
+				 VALUES ('e7e7e7e7-0000-4000-8000-000000000001','f1f1f1f1-0000-4000-8000-000000000001',1,now(),'f2f2f2f2-0000-4000-8000-000000000009','drill-sw','drill-sw','11111111-0000-4000-8000-0000000000aa')`
+			],
+			[
+				'settlement movement leg uniqueness',
+				`INSERT INTO account_movements (account_id, direction, amount, source_type, source_id, occurred_at, created_by)
+				 VALUES ('f1f1f1f1-0000-4000-8000-000000000001','outflow',1,'share_return_settlement','f4f4f4f4-0000-4000-8000-000000000001',now(),'11111111-0000-4000-8000-0000000000aa')`
 			]
 		];
 		let allConstraints = true;

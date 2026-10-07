@@ -155,8 +155,8 @@ pub async fn list_movements(
 ) -> Result<Vec<AccountMovementRow>, sqlx::Error> {
     sqlx::query_as(
         "SELECT m.id, m.account_id, m.direction, m.amount, m.source_type, m.source_id, \
-            COALESCE(p.payment_number, t.transfer_number, i.income_number, e.expense_number) \
-                AS source_number, \
+            COALESCE(p.payment_number, t.transfer_number, i.income_number, e.expense_number, \
+                s.settlement_number) AS source_number, \
             m.occurred_at, m.status, m.reversed_at, m.reversal_reason, m.created_at, \
             count(*) OVER() AS total_count \
         FROM account_movements m \
@@ -164,6 +164,8 @@ pub async fn list_movements(
         LEFT JOIN account_transfers t ON m.source_type = 'transfer' AND m.source_id = t.id \
         LEFT JOIN income_entries i ON m.source_type = 'income' AND m.source_id = i.id \
         LEFT JOIN expense_entries e ON m.source_type = 'expense' AND m.source_id = e.id \
+        LEFT JOIN share_return_settlements s \
+            ON m.source_type = 'share_return_settlement' AND m.source_id = s.id \
         WHERE m.account_id = $1 \
         ORDER BY m.occurred_at DESC, m.id LIMIT $2 OFFSET $3",
     )

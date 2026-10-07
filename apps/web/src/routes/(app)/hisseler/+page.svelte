@@ -76,6 +76,9 @@
 	} {
 		if (status === 'active') return { label: 'shares.statusActive', variant: 'default' };
 		if (status === 'suspended') return { label: 'shares.statusSuspended', variant: 'secondary' };
+		if (status === 'return_pending')
+			return { label: 'shares.statusReturnPending', variant: 'secondary' };
+		if (status === 'closed') return { label: 'shares.statusClosed', variant: 'outline' };
 		return { label: 'shares.statusVoided', variant: 'outline' };
 	}
 

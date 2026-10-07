@@ -185,5 +185,14 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'incomeExpense.summary.title': 'Income-Expense Summary',
 	'incomeExpense.statusPosted': 'Posted',
 	'incomeExpense.statusReversed': 'Reversed',
-	'categories.title': 'Income/Expense Categories'
+	'categories.title': 'Income/Expense Categories',
+	'nav.shareReturns': 'Share Returns',
+	'shares.statusReturnPending': 'Return Pending',
+	'shares.statusClosed': 'Closed',
+	'shareReturns.title': 'Share Returns',
+	'shareReturns.create': 'New Return Request',
+	'entitlements.typePrincipal': 'Principal Right',
+	'entitlements.typeProfit': 'Profit Right',
+	'entitlements.undetermined': 'Not yet determined',
+	'settlements.section': 'Settlements'
 };
