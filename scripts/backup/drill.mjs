@@ -686,6 +686,27 @@ async function main() {
 			'1'
 		);
 
+		// STEP-016 real-time scaffolding is pure schema (transactional
+		// pg_notify triggers); sockets are ephemeral and never backed up.
+		// A correct restore must carry the function + all triggers, and
+		// the channel must still be callable — the server then rebuilds
+		// live visibility from restored canonical state.
+		expect(
+			'Realtime: notify function restored',
+			"SELECT count(*) FROM pg_proc WHERE proname='kooperatif_notify_domain'",
+			'1'
+		);
+		expect(
+			'Realtime: all 37 domain triggers restored',
+			"SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'rt_%' AND NOT tgisinternal",
+			'37'
+		);
+		expect(
+			'Realtime: notify channel callable post-restore',
+			"SELECT 1 FROM (SELECT pg_notify('kooperatif_domain_changed','probe')) n",
+			'1'
+		);
+
 		// Constraints must still BEHAVE after restore — not just exist.
 		const constraintFails = [
 			[

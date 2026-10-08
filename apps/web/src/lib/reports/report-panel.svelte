@@ -17,6 +17,7 @@
 	import { apiFetch } from '$lib/api-client';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { formatTry } from '$lib/money';
+	import { live } from '$lib/realtime/realtime.svelte';
 	import type { Paginated } from '@kooperatif/contracts';
 	import type { ReportColumn, ReportDef, SummaryField } from './catalog';
 
@@ -48,7 +49,13 @@
 		return p;
 	}
 
+	// Request-generation guard (STEP-016 §16): overlapping fetches from
+	// live invalidations must resolve in order — a stale response never
+	// overwrites newer state.
+	let refreshSeq = 0;
+
 	async function refresh(): Promise<void> {
+		const seq = ++refreshSeq;
 		loadError = null;
 		try {
 			const query = params();
@@ -58,12 +65,13 @@
 					? apiFetch<Record<string, unknown>>(`${def.summaryPath}?${query}`)
 					: Promise.resolve(null)
 			]);
+			if (seq !== refreshSeq) return;
 			data = list;
 			// The summary may live on the list response or on a dedicated
 			// endpoint called with the SAME filters.
 			summaryData = (def.summaryPath ? summary : (list.summary ?? null)) ?? null;
 		} catch (error) {
-			loadError = apiErrorKey(error);
+			if (seq === refreshSeq) loadError = apiErrorKey(error);
 		}
 	}
 
@@ -126,9 +134,13 @@
 	}
 
 	$effect(() => {
-		// Reload whenever a different report definition is mounted.
+		// Reload whenever a different report definition is mounted, and
+		// whenever a committed domain change invalidates the projection
+		// (signals coalesced client-side; values always re-fetched).
 		void def.id;
+		const off = live.onInvalidate(() => void refresh());
 		void refresh();
+		return off;
 	});
 </script>
 

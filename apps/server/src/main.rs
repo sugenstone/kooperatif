@@ -86,6 +86,14 @@ async fn run_server(config: Config) -> ExitCode {
         }
     };
 
+    // Post-commit change signals (STEP-016, ADR-005): the listener holds
+    // its own dedicated PG connection (not a pool checkout) and LISTENs
+    // for transactional trigger notifications; reconnects are
+    // self-healing and bounded (see realtime::listen_loop).
+    if let Some(url) = config.database_url.clone() {
+        tokio::spawn(kooperatif_server::realtime::listen_loop(url));
+    }
+
     let auth = Arc::new(AuthRuntime::new(config.auth.clone(), Arc::new(SystemClock)));
 
     let app = http::router(

@@ -55,6 +55,7 @@
 		{/if}
 		{#if can('reports.read')}
 			<Button variant="ghost" size="sm" href="/raporlar">{t('nav.reports')}</Button>
+			<Button variant="ghost" size="sm" href="/canli-ekran">{t('nav.liveDisplay')}</Button>
 		{/if}
 		{#if can('income_expense.read')}
 			<Button variant="ghost" size="sm" href="/gelirler">{t('nav.incomes')}</Button>

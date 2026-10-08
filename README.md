@@ -1038,6 +1038,72 @@ The read-only projection layer over authoritative domain history.
   statements/documents (separate transactional-document class), no
   drill-through pages beyond canonical detail links — deferred.
 
+## Live Operations & Real-Time Foundation (STEP-016, ADR-005 + ADR-009 + docs/13)
+
+The authenticated change-signal layer and the dedicated read-only
+TV/projector display. **The WebSocket is transport, never truth: an
+event means "re-read the canonical API" — it carries no amounts, no row
+data, no person identifiers, and delivery itself writes ZERO financial
+rows. PostgreSQL triggers emit `pg_notify` inside the mutating
+transaction, so a signal can only ever exist for a committed change.**
+
+- **Commit boundary** — `kooperatif_notify_domain()` AFTER-trigger on
+  every domain table calls `pg_notify('kooperatif_domain_changed',
+  <domain>)`. PostgreSQL discards notifications on ROLLBACK and
+  coalesces identical notifications inside a transaction — one signal
+  per touched domain per commit, provably never for a rolled-back write.
+- **Endpoint** — `GET /api/realtime` upgrade: same HttpOnly session
+  cookie pipeline (`CurrentAuth`) + unconditional Origin allowlist
+  (WS upgrades are GET and exempt from CSRF origin checks). No token in
+  the URL, ever.
+- **Subscription authorization** — client asks for permission scopes
+  (`payments.read`, `reports.read`, …); server grants `requested ∩
+  known ∩ effective`. Per-domain signals require the domain's read
+  permission; `reports.read` receives all domains (matching the
+  report surface). **Session and permissions are re-read from
+  PostgreSQL for every delivered signal and on each heartbeat** —
+  revocation/expiration/disablement terminates delivery with close
+  1008, never rides a stale socket.
+- **Durability model** — LISTEN/NOTIFY is a transient signal; durable
+  truth is the domain schema. No replay is claimed: any listener gap
+  publishes a `resync` marker, and every reconnect forces a canonical
+  snapshot re-fetch. Delivery is at-least-once best-effort; clients
+  deduplicate by coalescing, never by accumulating.
+- **Backpressure** — bounded process-wide broadcast channel (256);
+  a lagging socket receives a `resync{reason:"lagged"}` signal and
+  resynchronizes rather than growing memory. Sends carry a 10 s
+  timeout; the listener holds a dedicated PG connection, not a pool
+  checkout.
+- **Client** — `lib/realtime/realtime.svelte.ts`: one shared socket per
+  app session, subscribe→ack, 150 ms invalidation coalescing, bounded
+  exponential backoff with jitter and a hard attempt cap (then
+  `disconnected` until `resume()`), wildcard resync on every reconnect.
+  Report surfaces re-fetch through the canonical API with
+  request-generation guards (a slower stale response cannot overwrite
+  newer state).
+- **TV/projector** — `/canli-ekran` in a chrome-free `(tv)` route
+  group: `reports.read`-gated, read-only, aggregate metrics only
+  (collection/financial/operational/social-aid cards — never person
+  names, never restricted money added to cash, never invented
+  profit/NAV), distance-readable typography, connection chip
+  (Bağlı/Bağlanıyor/Yeniden bağlanıyor/Bağlantı yok), last-sync time,
+  explicit stale banner, user-initiated fullscreen, bounded view modes.
+- **Verification** — `tests/realtime.rs` (10 tests: anonymous/wrong-
+  Origin rejection, commit-vs-rollback signal semantics, cross-writer
+  delivery, scope filtering, reports.read breadth, session revocation,
+  permission revocation mid-connection, reconnect+canonical re-read,
+  minimal envelope shape); `src/specs/realtime.spec.ts` (9 tests:
+  subscribe, coalescing, resync, bounded reconnect cap, drop/reconnect,
+  TV read-only + stale indicator); `scripts/e2e-step016.mjs` (real
+  stack: commit→TV update, reversal→TV update, socket-drop gap commit→
+  reconnect resync, anonymous rejection, viewer 403 on mutation, zero
+  phantom account movements); backup drill verifies trigger/function
+  restore + channel usability.
+- **Boundary**: no durable event history/replay (not required —
+  canonical resync is the recovery), no per-user event targeting, no
+  push/SMS/email, no public kiosk access, no dashboard designer —
+  deferred.
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a

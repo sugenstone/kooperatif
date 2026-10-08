@@ -1324,7 +1324,24 @@ export const trTR = {
 	'reports.gov.open': 'Oylamada',
 	'reports.gov.approved': 'Onaylanan',
 	'reports.gov.rejected': 'Reddedilen',
-	'reports.gov.cancelled': 'İptal'
+	'reports.gov.cancelled': 'İptal',
+
+	'tv.title': 'Canlı Ekran',
+	'tv.mode': 'Görünüm',
+	'tv.mode.overview': 'Genel Bakış',
+	'tv.mode.collection': 'Tahsilat',
+	'tv.mode.accounts': 'Finansal Hesaplar',
+	'tv.mode.aid': 'Sosyal Yardım',
+	'tv.status.connected': 'Bağlı',
+	'tv.status.connecting': 'Bağlanıyor…',
+	'tv.status.reconnecting': 'Yeniden bağlanıyor…',
+	'tv.status.disconnected': 'Bağlantı yok',
+	'tv.stale': 'Veri güncel değil — son başarılı senkronizasyon:',
+	'tv.lastSync': 'Son senkronizasyon',
+	'tv.fullscreen': 'Tam ekran',
+	'tv.exitFullscreen': 'Tam ekrandan çık',
+	'tv.readonly': 'Salt okunur canlı izleme — işlem yetkisi yoktur.',
+	'nav.liveDisplay': 'Canlı Ekran'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

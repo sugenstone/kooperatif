@@ -435,3 +435,15 @@ export {
 	REPORTS_SHARE_RETURNS_PATH,
 	REPORTS_SOCIAL_AID_PATH
 } from './reports';
+
+export {
+	REALTIME_PATH
+} from './realtime';
+export type {
+	RealtimeDataChanged,
+	RealtimeDomain,
+	RealtimeResync,
+	RealtimeServerEvent,
+	RealtimeSubscribeRequest,
+	RealtimeSubscribed
+} from './realtime';

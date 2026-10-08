@@ -103,6 +103,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(social_aid_router())
         .merge(governance_router())
         .merge(crate::reports::routes::reports_router())
+        .merge(crate::realtime::routes::realtime_router())
         .fallback(fallback)
         .layer(trace)
         .layer(cors)

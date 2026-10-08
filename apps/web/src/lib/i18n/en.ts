@@ -311,5 +311,22 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'governance.errors.invalidState': 'This action is not allowed in the current state.',
 	'governance.errors.conflict':
 		'Conflict: record changed, duplicate vote/membership, or key reuse.',
-	'governance.errors.forbidden': 'You lack permission or voting eligibility for this action.'
+	'governance.errors.forbidden': 'You lack permission or voting eligibility for this action.',
+
+	'tv.title': 'Live Display',
+	'tv.mode': 'View',
+	'tv.mode.overview': 'Overview',
+	'tv.mode.collection': 'Collection',
+	'tv.mode.accounts': 'Financial Accounts',
+	'tv.mode.aid': 'Social Aid',
+	'tv.status.connected': 'Connected',
+	'tv.status.connecting': 'Connecting…',
+	'tv.status.reconnecting': 'Reconnecting…',
+	'tv.status.disconnected': 'Disconnected',
+	'tv.stale': 'Data is stale — last successful sync:',
+	'tv.lastSync': 'Last sync',
+	'tv.fullscreen': 'Fullscreen',
+	'tv.exitFullscreen': 'Exit fullscreen',
+	'tv.readonly': 'Read-only live display — no transaction authority.',
+	'nav.liveDisplay': 'Live Display'
 };

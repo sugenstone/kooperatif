@@ -16,6 +16,7 @@
 	import ReportGovernance from '$lib/reports/report-governance.svelte';
 	import ReportTrend from '$lib/reports/report-trend.svelte';
 	import { findReport, REPORT_DEFS } from '$lib/reports/catalog';
+	import { live } from '$lib/realtime/realtime.svelte';
 	import { REPORTS_OVERVIEW_PATH, type ReportsOverview } from '@kooperatif/contracts';
 
 	let overview = $state<ReportsOverview | null>(null);
@@ -161,17 +162,27 @@
 		return card.money ? formatTry(String(card.value)) : String(card.value);
 	}
 
+	// Request-generation guard (STEP-016 §16): a slower response started
+	// before a newer invalidation must never overwrite fresher data.
+	let refreshSeq = 0;
+
 	async function refresh(): Promise<void> {
+		const seq = ++refreshSeq;
 		loadError = null;
 		try {
-			overview = await apiFetch<ReportsOverview>(REPORTS_OVERVIEW_PATH);
+			const result = await apiFetch<ReportsOverview>(REPORTS_OVERVIEW_PATH);
+			if (seq === refreshSeq) overview = result;
 		} catch (error) {
-			loadError = apiErrorKey(error);
+			if (seq === refreshSeq) loadError = apiErrorKey(error);
 		}
 	}
 
 	$effect(() => {
+		// Live invalidation: any committed domain change refetches the
+		// canonical overview — the socket never carries totals.
+		const off = live.onInvalidate(() => void refresh());
 		void refresh();
+		return off;
 	});
 </script>
 
