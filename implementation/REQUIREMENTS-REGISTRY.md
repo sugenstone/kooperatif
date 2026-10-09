@@ -53,7 +53,7 @@ requirement is `VERIFIED` only when every sub-requirement is `VERIFIED`.
 | REQ-003 | Structured account location                   | docs/07:5, docs/07:22, docs/06:117                                     | P2   | REQ-024                    | MISSING         | M5            |
 | REQ-004 | Opening balances                              | docs/07:176 ("opening-balance migration rules")                        | P2   | REQ-003, (REQ-001 for FX)  | MISSING         | M5 (+M6)      |
 | REQ-005 | Account reconciliation                        | docs/07:150-156, docs/13:161-165, docs/29 Phase 4                      | P2   | REQ-004                    | MISSING         | M5            |
-| REQ-006 | Strict API write validation                   | AUD §F (silent coercion defect), docs/21                               | P1   | —                          | DEFECT          | M0            |
+| REQ-006 | Strict API write validation                   | AUD §F (silent coercion defect), docs/21                               | P1   | —                          | VERIFIED        | M0            |
 | REQ-007 | User creation/administration (UI/API)         | S-002 §U (deferred "admin user management"), AUD §P                    | P1   | REQ-024 (coop membership)  | PARTIAL         | M2            |
 | REQ-008 | Password change and reset                     | S-002 §U (deferred "password recovery"), docs/22:12                    | P1   | REQ-007                    | MISSING         | M2            |
 | REQ-009 | Audit history viewer                          | docs/19:80-84, docs/13 §16 (:190), AUD §P                              | P2   | —                          | PARTIAL         | M2            |
@@ -74,9 +74,9 @@ requirement is `VERIFIED` only when every sub-requirement is `VERIFIED`.
 | REQ-024 | Multi-cooperative organization model          | docs/00:88-90, docs/15:13-15, docs/22:23-27, docs/29 Phase 1           | P1   | —                          | MISSING         | M1            |
 | REQ-025 | Notifications and tasks                       | docs/24, ADR-009, docs/29 Phase 12                                     | P2   | REQ-024                    | MISSING         | M13           |
 | REQ-026 | File and attachment management                | docs/25, ADR-007, docs/29 Phase 12                                     | P2   | REQ-024                    | MISSING         | M7            |
-| REQ-027 | Social Aid confirmation dialog consistency    | AUD §E, docs/12                                                        | P3   | —                          | DEFECT          | M0            |
-| REQ-028 | README accuracy                               | AUD §Q                                                                 | P3   | —                          | DEFECT          | M0 (+each)    |
-| REQ-029 | Legacy worktree cleanup (`.kilo/`)            | AUD §A                                                                 | P3   | owner authorization        | NOT STARTED     | M0            |
+| REQ-027 | Application confirmation dialogs (20 ops, 6 pages) | AUD §E, docs/12                                                        | P3   | —                          | VERIFIED        | M0            |
+| REQ-028 | README accuracy                               | AUD §Q                                                                 | P3   | —                          | VERIFIED        | M0 (+each)    |
+| REQ-029 | Legacy worktree cleanup (`.kilo/`)            | AUD §A                                                                 | P3   | owner authorization        | VERIFIED        | M0            |
 | REQ-030 | Production provisioning and recovery          | ADR-013, docs/23, docs/26:127, docs/30                                 | P1   | owner authorization (VDS)  | PARTIAL (local) | M14 (plan M0) |
 
 Totals: VERIFIED 1 · PARTIAL 6 · MISSING 19 · DEFECT 3 · NOT STARTED 1.
@@ -179,20 +179,18 @@ Field legend: **BE** backend · **FE** frontend · **DB** database ·
 | 005.3 | Explicit audited adjustment                 | BLOCKED-PD (PD-13) | adjustment movement, separate permission      |
 | 005.4 | Reconciliation history + report             | MISSING            | history on account detail; report card        |
 
-### REQ-006 — Strict API Write Validation — DEFECT — M0
+### REQ-006 — Strict API Write Validation — VERIFIED — M0
 
 - Current: no `deny_unknown_fields` on any write DTO (repo-wide grep: 0); `currency:'USD'` accepted, stored `TRY` (AUD §F).
-- BE: reject unknown fields on every mutating request DTO (`#[serde(deny_unknown_fields)]` or equivalent); stable `validation_failed` error.
-- FE: none (contracts already exact); verify no client sends extra fields.
-- AUTO: one negative test per mutating endpoint family (unknown field → 422 `validation_failed`, nothing persisted).
-- AC: the AUD §F probe (`currency:'USD'`) returns 422 `validation_failed` and creates nothing.
-- M0 discovery (2026-10-09): 57 request DTO type names in 13 routers; no `#[serde(flatten)]` on request types (no serde conflict). Status 422 aligns with the existing axum body-data rejection + F6 sanitizer (syntax errors stay 400). Our own test clients send ignored fields (F-M0-04) — fixed in M0 WP-3/WP-4. Plan: `implementation/M0-FOUNDATION-CLEANUP-PLAN.md` §2.1.
+- M0 discovery (2026-10-09): 57 request DTO type names in 13 routers; no `#[serde(flatten)]` on request types (no serde conflict). Status 422 aligns with the existing axum body-data rejection + F6 sanitizer (syntax errors stay 400). Our own test clients sent ignored fields (F-M0-04) — fixed in M0 WP-3/WP-4.
+- M0 implementation (2026-10-09): `#[serde(deny_unknown_fields)]` applied to all ~57 HTTP request DTOs across 13 route modules including nested types (`PersonRefRequest`, `FamilyRefRequest`, allocation lines, funding legs, entitlement specs). **Intentional exception**: `SubscribeRequest` (`realtime/routes.rs`) is a WebSocket envelope — the client sends a `type` discriminator outside the inner DTO; documented in code. Extractor body-shape rejection → 422 `validation_failed`; `login` keeps the pre-existing explicit 400 `validation_failed` contract (audit-mapped `JsonRejection`); malformed JSON stays 400.
+- Evidence: `apps/server/tests/strict_body_validation.rs` — 15 negative tests (one per router family + nested + the AUD §F `currency:'USD'` probe with zero-row assertion) — **15/15 pass**. No mutation on rejection verified via table counts. Maintained E2E fixtures repaired (`idempotencyKey` removed only from endpoints whose DTOs never accepted it; `generate-assessments` now sends no body). Vitest 181/181, `e2e:ff002` 35/35, `e2e:dialogs` 18/18 — valid requests unharmed.
 
-| Sub   | Item                                      | Status  | AC                                                           |
-| ----- | ----------------------------------------- | ------- | ------------------------------------------------------------ |
-| 006.1 | Unknown-field rejection on all write DTOs | DEFECT  | 422 `validation_failed` for unknown field, zero rows written |
-| 006.2 | Client compatibility check                | MISSING | full Vitest + E2E green after change                         |
-| 006.3 | Regression tests per module               | MISSING | negative test per router                                     |
+| Sub   | Item                                      | Status   | AC                                                           |
+| ----- | ----------------------------------------- | -------- | ------------------------------------------------------------ |
+| 006.1 | Unknown-field rejection on all write DTOs | VERIFIED | 422 `validation_failed` for unknown field, zero rows written |
+| 006.2 | Client compatibility check                | VERIFIED | full Vitest + E2E green after change                         |
+| 006.3 | Regression tests per module               | VERIFIED | negative test per router                                     |
 
 ### REQ-007 — User Creation and Administration — PARTIAL — M2
 
@@ -481,28 +479,32 @@ Residual hygiene (not a re-implementation): the E2E harness lives in a temp dire
 | 026.7 | Limits/content validation                  | MISSING            | size/type enforced server-side               |
 | 026.8 | Backup coverage of file store              | MISSING            | ADR-013 restore drill includes files         |
 
-### REQ-027 — Social Aid Confirmation Dialog Consistency — DEFECT — M0
+### REQ-027 — Application Confirmation Dialogs — VERIFIED — M0
 
 - Current: `apps/web/src/routes/(app)/sosyal-yardim/[id]/+page.svelte` uses `window.confirm` for close/cancel/reverse.
-- M0 discovery (F-M0-01): FUNC-AUDIT-001 under-reported the scope — **20 native confirms in 6 routes** (`sosyal-yardim/[id]` 4, `yatirimlar/[id]` 5, `hisse-iadeleri/[id]` 4, `donemler/[id]` 3, `hisseler/[id]` 2, `hissedarlar/[id]` 2). Scope pending owner decision M0-D1 (recommended: all 20, per docs/12:16). If only Social Aid is approved, the other 16 become tracked sub-items 027.2–027.6 with a target milestone.
-- AC: AlertDialog pattern (as on `kullanicilar`) for every destructive action; Vitest updated; no `window.confirm` left in that route.
+- M0 discovery (F-M0-01): FUNC-AUDIT-001 under-reported the scope — **20 native confirms in 6 routes** (`sosyal-yardim/[id]` 4, `yatirimlar/[id]` 5, `hisse-iadeleri/[id]` 4, `donemler/[id]` 3, `hisseler/[id]` 2, `hissedarlar/[id]` 2). Owner decision **M0-D1: all 20 replaced**.
+- M0 implementation (2026-10-09): shared `apps/web/src/lib/components/confirm-action-dialog.svelte` (shadcn-svelte `AlertDialog`, tr-TR copy, busy-lock prevents double-submit, Escape/overlay/Cancel all route to `onDismiss`). All 20 operations converted on the six pages; final grep — **0 `window.confirm`/`confirm(` in `apps/web/src`**.
+- Evidence: Vitest 181/181 (dialog open, cancel no-POST, confirm POST on periods/shares/social-aid/investments/share-returns specs). Real-browser `pnpm e2e:dialogs` — **18/18 PASS**: one op per page, cancel leaves DB unchanged, confirm persists the mutation (SQL assertions).
 
-### REQ-028 — README Accuracy — DEFECT — M0 (+ every milestone)
+### REQ-028 — README Accuracy — VERIFIED — M0 (+ every milestone)
 
 - Current: README still states an early stage ("No Payments, Ledger … exist yet").
 - AC: README lists implemented modules, known limitations (links this registry), configuration, test/verify commands, backup procedure; updated at every milestone closure.
+- M0 implementation (2026-10-09): fixed the "investment surfaces do not exist" claim (STEP-012 landed), corrected the DB-gated test behavior (`KOOPERATIF_TEST_DATABASE_URL` absent → intentional fail-fast, not skip — PILOT-FIX-001/F5), documented the maintained browser-E2E suite (`e2e:ff002`, `e2e:dialogs`, step017-*) with a pointer to `implementation/TEST-INVENTORY.md`, and clarified which CI jobs run what. Recheck required at each milestone.
 
-### REQ-029 — Legacy Worktree Cleanup — NOT STARTED — M0 (authorization required)
+### REQ-029 — Legacy Worktree Cleanup — VERIFIED — M0
 
 - Evidence (read-only, PROJECT-CONTROL-001): `.kilo/worktrees/versed-stallion` is a **registered git worktree** (`git worktree list`) at detached `c86a197` ("docs: adopt backup and disaster recovery ADR"), which **is an ancestor of `main`**; `git status --short` in the worktree is empty. `.kilo/.gitignore` ignores `node_modules`, lockfiles and `agent-manager.json`, so ignored files may exist and have not been inventoried.
 - Plan: (1) inventory ignored files (`git status --ignored`) and report; (2) on owner authorization run `git worktree remove` (then `git worktree prune`), and remove `.kilo/` only after the inventory is approved.
-- M0 inventory (2026-10-09, read-only): 158 tracked files = exact `c86a197` checkout; **0 untracked, 0 ignored** files; reflog has one entry; every reflog commit is in `main`; no per-worktree refs; 988 KB. Main repo ignores it via local `.git/info/exclude:9`. Conclusion: no unique work. Removal awaits owner decision M0-D2.
-- AC: no unique commits or files lost; `git worktree list` shows only the main tree.
+- M0 inventory (2026-10-09, read-only): 158 tracked files = exact `c86a197` checkout; **0 untracked, 0 ignored** files; reflog has one entry; every reflog commit is in `main`; no per-worktree refs; 988 KB. Main repo ignores it via local `.git/info/exclude:9`. Conclusion: no unique work. Owner decision **M0-D2 approved**.
+- M0 implementation (2026-10-09): all safety checks re-verified, then `git worktree remove` **without force** — `.kilo/` gone, `git worktree list` shows only the main repository. Git reported three pre-existing dangling commits (`d28255f`, `3bfbc5e`, `ec4ff4`) unrelated to branch history; no history was rewritten or deleted.
+- AC: no unique commits or files lost; `git worktree list` shows only the main tree. **Met.**
 
 ### REQ-030 — Production Provisioning and Recovery — PARTIAL (local only) — M14
 
 - Current: local backup/restore/drill/retention/failure tooling (`scripts/backup/*`), runbook docs/30, restore-verified locally (PILOT-FIX-001). Nothing provisioned on the VDS. **Production changes require separate explicit owner authorization.**
-- M0 discovery (F-M0-02): local drill re-run 2026-10-09 → PASSED (55 checks). **Remote CI has failed 21 consecutive runs (6–26)**: the "Backup/restore → Recovery drill" job has never passed in CI (cause unknown; logs need authentication), and the "Backend → Tests" job fails since run 17 because it runs DB-gated tests without a database (confirmed locally). 030.4 therefore has local evidence only. Fix planned in M0 WP-9/WP-10; remote verification needs a separately authorized push.
+- M0 discovery (F-M0-02): local drill re-run 2026-10-09 → PASSED (55 checks). **Remote CI has failed 21 consecutive runs (6–26)**: the "Backup/restore → Recovery drill" job has never passed in CI (cause unknown; logs need authentication), and the "Backend → Tests" job fails since run 17 because it runs DB-gated tests without a database (confirmed locally). 030.4 therefore has local evidence only.
+- M0 implementation (2026-10-09): `.github/workflows/ci.yml` — the `backend` job now runs only dependency-free tests (`--lib`, `--test http`, `--doc`); all DB-gated suites remain in the `database` job with its PostgreSQL service (no test disabled or weakened). The `backup` job gained a Docker-diagnostics step and a `docker compose logs` dump on failure so the next remote run is self-describing — **its remote root cause is still unverified** (read-only CI access; logs need auth). Local reproduction: `cargo test --lib --test http` 91+7 pass, drill 55/55, failure-test 10/10. Remote green can only be claimed after an owner-authorized push. M14 plan: `implementation/M14-PRODUCTION-PROVISIONING-PLAN.md` (documentation only).
 
 | Sub    | Item                                 | Status      | AC                                              |
 | ------ | ------------------------------------ | ----------- | ----------------------------------------------- |
@@ -545,4 +547,6 @@ existing requirement or milestone.
 | F-M0-01 | M0 discovery | FUNC-AUDIT-001 §E under-reported native confirms: 20 in 6 routes, not only Social Aid                                                 | REQ-027                                      | owner decision M0-D1                         |
 | F-M0-02 | M0 discovery | Remote CI red for 21 consecutive runs: backup drill job never passed in CI; backend job runs DB-gated tests without a DB since run 17 | REQ-030 (030.4), docs/26 gates               | M0 WP-9/WP-10; owner decision M0-D3          |
 | F-M0-03 | M0 discovery | Shareholder, financial-account and period creation are not idempotent server-side (test scripts sent ignored `idempotencyKey`)        | REQ-010/011 area (M3), REQ-003/004 area (M5) | evaluate in M3/M5 discovery; no change in M0 |
-| F-M0-04 | M0 discovery | Maintained and FF2 E2E clients send fields the DTOs do not accept (silently dropped today)                                            | REQ-006, REQ-013 evidence                    | M0 WP-3/WP-4                                 |
+| F-M0-04 | M0 discovery | Maintained and FF2 E2E clients send fields the DTOs do not accept (silently dropped today)                                            | REQ-006, REQ-013 evidence                    | M0 WP-3/WP-4 — resolved (fixtures repaired)  |
+| F-M0-05 | M0 implementation | Parallel DB-gated test binaries exhaust the dev PostgreSQL under load: `PoolTimedOut`, once a crash-recovery fsync cycle (~7 min). Environmental, not a domain regression — suites pass individually | CI reliability, docs/26 gates | note for M-series CI tuning; no code change |
+| F-M0-06 | M0 implementation | `auth login` maps `JsonRejection` to HTTP 400 `validation_failed` while all other extractors return 422 — an existing contract asymmetry, kept unchanged in M0 | REQ-006 error contract | documented in strict_body_validation tests |
