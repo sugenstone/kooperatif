@@ -19,6 +19,7 @@
 	} from '$lib/components/ui/table';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
@@ -27,6 +28,7 @@
 	import { compareDecimals, formatTry } from '$lib/money';
 	import {
 		FAMILIES_PATH,
+		FINANCIAL_ACCOUNT_OPTIONS_PATH,
 		PERSONS_PATH,
 		SHARE_RETURNS_PATH,
 		shareholderFamilyChangePath,
@@ -35,6 +37,7 @@
 		shareholderAssessmentsPath,
 		shareholderSharesPath,
 		type FamilyListItem,
+		type FinancialAccountOption,
 		type Paginated,
 		type PersonLookupItem,
 		type ShareListItem,
@@ -87,6 +90,13 @@
 	let guardianExistingId = $state('');
 	let guardianSearchTerm = $state('');
 	let guardianResults = $state<PersonLookupItem[]>([]);
+	// FUNC-FIX-002: default collection account editing — '' means
+	// "no preference" (clears on save when it differs from the stored
+	// value). An inactive saved account is offered as its own option
+	// labelled "(Pasif)" so the operator can keep it without it being
+	// silently dropped.
+	let accountOptions = $state<FinancialAccountOption[]>([]);
+	let editDefaultAccount = $state('');
 
 	const dateFormatter = new Intl.DateTimeFormat(activeIntlLocale(), {
 		dateStyle: 'medium',
@@ -149,10 +159,20 @@
 		}
 	}
 
+	async function loadAccountOptions(): Promise<void> {
+		try {
+			accountOptions = await apiFetch<FinancialAccountOption[]>(FINANCIAL_ACCOUNT_OPTIONS_PATH);
+		} catch {
+			accountOptions = [];
+		}
+	}
+
 	function openEdit(): void {
 		if (!detail) return;
 		editFirstName = detail.firstName;
 		editLastName = detail.lastName;
+		editDefaultAccount = detail.defaultAccount?.id ?? '';
+		void loadAccountOptions();
 		guardianChoice = 'keep';
 		guardianFirstName = '';
 		guardianLastName = '';
@@ -181,6 +201,12 @@
 					firstName: guardianFirstName.trim(),
 					lastName: guardianLastName.trim()
 				};
+			// FUNC-FIX-002: send the field ONLY when it changed —
+			// '' (no preference) serializes as null = clear.
+			const currentDefault = detail.defaultAccount?.id ?? '';
+			if (editDefaultAccount !== currentDefault) {
+				body.defaultCollectionAccountId = editDefaultAccount || null;
+			}
 			await apiFetch(shareholderPath(detail.id), {
 				method: 'PATCH',
 				csrfToken: auth.csrfToken,
@@ -381,6 +407,20 @@
 							</a>
 						{:else}—{/if}
 					</dd>
+					<dt class="font-medium">{t('shareholders.defaultAccount')}</dt>
+					<dd>
+						{#if detail.defaultAccount}
+							{detail.defaultAccount.name}
+							{#if detail.defaultAccount.status !== 'active'}
+								<Badge variant="secondary" class="ml-2"
+									>{t('shareholders.defaultAccountInactive')}</Badge
+								>
+							{/if}
+						{:else}
+							<span class="text-muted-foreground">{t('shareholders.defaultAccountUnassigned')}</span
+							>
+						{/if}
+					</dd>
 					<dt class="font-medium">{t('shareholders.status')}</dt>
 					<dd>
 						{#if detail.status === 'active'}
@@ -481,6 +521,35 @@
 							</div>
 						</div>
 					{/if}
+					<div class="flex flex-col gap-2">
+						<Label id="edit-default-account-label">{t('shareholders.defaultAccount')}</Label>
+						<Select.Root type="single" bind:value={editDefaultAccount}>
+							<Select.Trigger class="w-full" aria-labelledby="edit-default-account-label">
+								{#if editDefaultAccount === ''}
+									{t('shareholders.defaultAccountUnassigned')}
+								{:else if detail?.defaultAccount?.id === editDefaultAccount}
+									{detail.defaultAccount.name}
+									{#if detail.defaultAccount.status !== 'active'}
+										({t('shareholders.defaultAccountInactive')})
+									{/if}
+								{:else}
+									{accountOptions.find((a) => a.id === editDefaultAccount)?.name ?? ''}
+								{/if}
+							</Select.Trigger>
+							<Select.Content>
+								<Select.Item value="">{t('shareholders.defaultAccountUnassigned')}</Select.Item>
+								{#each accountOptions as account (account.id)}
+									<Select.Item value={account.id}>{account.name}</Select.Item>
+								{/each}
+								{#if detail?.defaultAccount && detail.defaultAccount.status !== 'active' && !accountOptions.some((a) => a.id === detail?.defaultAccount?.id)}
+									<Select.Item value={detail.defaultAccount.id}>
+										{detail.defaultAccount.name} ({t('shareholders.defaultAccountInactive')})
+									</Select.Item>
+								{/if}
+							</Select.Content>
+						</Select.Root>
+						<p class="text-xs text-muted-foreground">{t('shareholders.defaultAccountHint')}</p>
+					</div>
 					<div class="flex gap-2">
 						<Button size="sm" disabled={busy} onclick={() => void saveEdit()}>
 							{t('shareholders.saveChanges')}

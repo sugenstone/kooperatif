@@ -257,6 +257,7 @@ pub async fn list_accounts(
         search: query.search.clone(),
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     };
     let (page, page_size) = page_of(&list)?;
     let account_type = match query.account_type.as_deref() {

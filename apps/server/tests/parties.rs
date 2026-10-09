@@ -1315,3 +1315,318 @@ async fn unknown_ids_answer_404_forbidden_semantics() {
         Some(json!({ "family": { "mode": "new", "sequenceNumber": 1 }, "expectedUpdatedAt": "2026-01-01T00:00:00Z" })))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// FUNC-FIX-002: shareholder-level default collection account —
+// a payment-screen preference, never a posting restriction.
+// Owner rules: assign at create / change / clear; only an ACTIVE
+// account may be assigned; an account that later becomes inactive
+// stays stored and visible (never silently cleared); changes are
+// authorized + optimistic-concurrency guarded + audited.
+#[tokio::test]
+async fn shareholder_default_collection_account() {
+    let Some(test) = setup().await else {
+        eprintln!("SKIPPED");
+        return;
+    };
+    let name = format!("da.{}", Uuid::new_v4().simple());
+    create_admin(&test.pool, &name).await;
+    let (cookie, csrf) = login(&test.app, test.peer(), &name).await;
+
+    async fn create_account(test: &TestApp, cookie: &str, csrf: &str, name: &str) -> Uuid {
+        let (status, detail) = send(
+            &test.app,
+            req(
+                "POST",
+                "/api/financial-accounts",
+                cookie,
+                Some(csrf),
+                Some(json!({ "name": name, "accountType": "cash" })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "account: {detail}");
+        detail["id"].as_str().unwrap().parse().unwrap()
+    }
+
+    let koy = create_account(&test, &cookie, &csrf, "Köy TL").await;
+    let istanbul = create_account(&test, &cookie, &csrf, "İstanbul TL").await;
+
+    // 1. Assign at creation — detail returns {id, name, status}.
+    let (status, detail) = send(
+        &test.app,
+        req(
+            "POST",
+            "/api/shareholders",
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "person": { "mode": "new", "firstName": "Kasa", "lastName": "Sahibi" },
+                "family": { "mode": "new", "sequenceNumber": 910 },
+                "defaultCollectionAccountId": koy
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{detail}");
+    let sh: Uuid = detail["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(detail["defaultAccount"]["id"], koy.to_string());
+    assert_eq!(detail["defaultAccount"]["status"], "active");
+
+    // 2. Unknown account id -> 400.
+    let (status, _) = send(
+        &test.app,
+        req(
+            "POST",
+            "/api/shareholders",
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "person": { "mode": "new", "firstName": "Bilinmeyen", "lastName": "Kasa" },
+                "family": { "mode": "new", "sequenceNumber": 911 },
+                "defaultCollectionAccountId": Uuid::new_v4()
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 3. Change via PATCH (fresh expectedUpdatedAt) — audited.
+    let (_, detail) = send(
+        &test.app,
+        req(
+            "GET",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    let updated_at = detail["updatedAt"].as_str().unwrap().to_string();
+    let (status, detail) = send(
+        &test.app,
+        req(
+            "PATCH",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "defaultCollectionAccountId": istanbul,
+                "expectedUpdatedAt": updated_at
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["defaultAccount"]["id"], istanbul.to_string());
+
+    let event: Option<String> = sqlx::query_scalar(
+        "SELECT event_type FROM security_events \
+         WHERE event_type = 'shareholder_default_account_changed' \
+         AND metadata->>'shareholder_id' = $1::text",
+    )
+    .bind(sh.to_string())
+    .fetch_optional(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        event.as_deref(),
+        Some("shareholder_default_account_changed")
+    );
+
+    // 4. Stale expectedUpdatedAt -> 409.
+    let (status, _) = send(
+        &test.app,
+        req(
+            "PATCH",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "defaultCollectionAccountId": koy,
+                "expectedUpdatedAt": updated_at // stale now
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // 5. List filter ?defaultAccountId= scopes to that account.
+    let (status, list) = send(
+        &test.app,
+        req(
+            "GET",
+            &format!("/api/shareholders?defaultAccountId={istanbul}"),
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], sh.to_string());
+    assert_eq!(items[0]["defaultAccount"]["name"], "İstanbul TL");
+    let (status, list) = send(
+        &test.app,
+        req(
+            "GET",
+            &format!("/api/shareholders?defaultAccountId={koy}"),
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["items"].as_array().unwrap().len(), 0);
+
+    // 6. Payer-candidate search carries the default account so the
+    //    payment screen can propose the DEBTOR's preference.
+    let (status, candidates) = send(
+        &test.app,
+        req(
+            "GET",
+            "/api/payments/payer-persons?search=Kasa",
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let candidate = candidates
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["shareholderId"].as_str() == Some(sh.to_string().as_str()))
+        .expect("shareholder candidate");
+    assert_eq!(candidate["defaultAccount"]["id"], istanbul.to_string());
+    assert_eq!(candidate["defaultAccount"]["status"], "active");
+
+    // 7. Family collection context carries member-level default info
+    //    (informational — the family payment never infers from it).
+    let family_id: Uuid = detail["familyId"].as_str().unwrap().parse().unwrap();
+    let (status, ctx) = send(
+        &test.app,
+        req(
+            "GET",
+            &format!("/api/families/{family_id}/collection-context"),
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ctx}");
+    let member = ctx["members"].as_array().unwrap().iter().next().unwrap();
+    assert_eq!(
+        member["defaultAccount"]["id"].as_str().unwrap(),
+        istanbul.to_string()
+    );
+
+    // 8. Deactivating the account does NOT silently clear the saved
+    //    preference — it stays visible with its inactive status.
+    let (status, _) = send(
+        &test.app,
+        req(
+            "POST",
+            &format!("/api/financial-accounts/{istanbul}/status-change"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "status": "inactive" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, detail) = send(
+        &test.app,
+        req(
+            "GET",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["defaultAccount"]["id"], istanbul.to_string());
+    assert_eq!(detail["defaultAccount"]["status"], "inactive");
+
+    // 9. An inactive account can never be (re-)assigned.
+    let updated_at = detail["updatedAt"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &test.app,
+        req(
+            "PATCH",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "defaultCollectionAccountId": istanbul,
+                "expectedUpdatedAt": updated_at
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 10. Clear with null.
+    let (status, detail) = send(
+        &test.app,
+        req(
+            "PATCH",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "defaultCollectionAccountId": null,
+                "expectedUpdatedAt": updated_at
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["defaultAccount"].is_null());
+
+    // 11. A user without shareholders.manage cannot touch the field.
+    let argon2 = argon2::Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
+    );
+    let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
+    let plain_name = format!("da-plain.{}", Uuid::new_v4().simple());
+    users::create_user(&test.pool, &plain_name, "Plain", &hash)
+        .await
+        .unwrap();
+    let (plain_cookie, plain_csrf) = login(&test.app, test.peer(), &plain_name).await;
+    let (_, detail) = send(
+        &test.app,
+        req(
+            "GET",
+            &format!("/api/shareholders/{sh}"),
+            &cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    let (status, _) = send(
+        &test.app,
+        req(
+            "PATCH",
+            &format!("/api/shareholders/{sh}"),
+            &plain_cookie,
+            Some(&plain_csrf),
+            Some(json!({
+                "defaultCollectionAccountId": koy,
+                "expectedUpdatedAt": detail["updatedAt"].as_str().unwrap()
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

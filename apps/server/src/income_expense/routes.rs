@@ -260,6 +260,7 @@ pub async fn list_categories(
         search: query.search.clone(),
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     })?;
     let category_type = match query.category_type.as_deref() {
         None | Some("") => None,
@@ -516,6 +517,7 @@ async fn list_entries_of(
         search: query.search.clone(),
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     })?;
     let filter = entry_filter(&query)?;
     let rows = entry_repo::list_entries(pool, kind, &filter, page, page_size)

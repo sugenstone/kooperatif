@@ -401,6 +401,7 @@ pub async fn list_returns(
         search: None,
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     })?;
     let rows = return_repo::list_returns(
         pool,
@@ -742,6 +743,7 @@ pub async fn list_entitlements(
         search: None,
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     })?;
     let rows = return_repo::list_entitlements(
         pool,

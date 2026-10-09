@@ -141,6 +141,17 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'transfers.errors.insufficientFunds':
 		'The source balance is insufficient; negative balances are not allowed.',
 	'payments.destinationAccount': 'Account Receiving the Money',
+	'payments.new.defaultAccountProposed':
+		"The debtor's default account was proposed — you may change it.",
+	'payments.new.defaultAccountInactiveWarning':
+		"The debtor's default account is inactive — select an active account.",
+	'payments.new.multiDebtorAccountHint':
+		'For a payment covering multiple shareholders no account is auto-selected; pick the actual receiving account.',
+	'shareholders.defaultAccount': 'Default Account',
+	'shareholders.defaultAccountHint':
+		'This account is proposed on the collection screen; the payment always posts to the confirmed account.',
+	'shareholders.defaultAccountUnassigned': 'Unassigned',
+	'shareholders.defaultAccountInactive': 'Inactive',
 	'payments.credited': 'Set Aside as Advance',
 	'credits.title': 'Excess Payment / Advance',
 	'credits.section': 'Excess Payments',

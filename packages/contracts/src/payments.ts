@@ -191,6 +191,11 @@ export interface FamilyMemberContext {
 	remainingAmount: DecimalString;
 	/** This member's OWN derived credit — attribution only, never pooled. */
 	creditAvailable: DecimalString;
+	/**
+	 * FUNC-FIX-002: member-level informational preference only — a
+	 * family payment NEVER infers a receiving account from it.
+	 */
+	defaultAccount?: import('./parties').DefaultCollectionAccount | null;
 }
 
 /** Member-wise obligations — the Family itself is NEVER the debtor. */
@@ -207,6 +212,13 @@ export interface PayerCandidate {
 	fullName: string;
 	shareholderId: string | null;
 	shareholderStatus: string | null;
+	/**
+	 * FUNC-FIX-002: when the candidate is a shareholder, its default
+	 * collection account with live status. The payment form uses the
+	 * DEBTOR's preference — never the payer's — and only for a
+	 * single-debtor payment.
+	 */
+	defaultAccount?: import('./parties').DefaultCollectionAccount | null;
 }
 
 export const PAYMENTS_PATH = '/api/payments';

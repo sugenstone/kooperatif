@@ -403,6 +403,7 @@ pub async fn list_funds(
         search: query.search.clone(),
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     };
     let (page, page_size) = page_of(&list)?;
     let status = query
@@ -545,6 +546,7 @@ pub async fn list_donations(
         search: None,
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     })?;
     let (rows, total) = aid_repo::list_donations(
         pool,
@@ -590,6 +592,7 @@ pub async fn list_disbursements(
         search: None,
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     })?;
     let (rows, total) = aid_repo::list_disbursements(
         pool,

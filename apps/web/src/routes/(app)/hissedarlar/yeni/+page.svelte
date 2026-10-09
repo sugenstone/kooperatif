@@ -13,6 +13,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
@@ -20,9 +21,11 @@
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		FAMILIES_PATH,
+		FINANCIAL_ACCOUNT_OPTIONS_PATH,
 		PERSONS_PATH,
 		SHAREHOLDER_DUPLICATES_PATH,
 		SHAREHOLDERS_PATH,
+		type FinancialAccountOption,
 		type PersonLookupItem,
 		type ShareholderListItem
 	} from '@kooperatif/contracts';
@@ -54,6 +57,19 @@
 	let duplicates = $state<ShareholderListItem[]>([]);
 	let submitError = $state<MessageKey | null>(null);
 	let submitting = $state(false);
+
+	// FUNC-FIX-002: optional default collection account — active
+	// accounts only; '' means "no preference".
+	let accountOptions = $state<FinancialAccountOption[]>([]);
+	let defaultAccountId = $state('');
+
+	async function loadAccountOptions(): Promise<void> {
+		try {
+			accountOptions = await apiFetch<FinancialAccountOption[]>(FINANCIAL_ACCOUNT_OPTIONS_PATH);
+		} catch {
+			accountOptions = [];
+		}
+	}
 
 	async function searchPersons(term: string, target: 'person' | 'guardian'): Promise<void> {
 		if (term.trim().length < 2) return;
@@ -125,7 +141,8 @@
 					family:
 						familyMode === 'existing'
 							? { mode: 'existing', familyId: familyExistingId }
-							: { mode: 'new', sequenceNumber: Number(familySequence) }
+							: { mode: 'new', sequenceNumber: Number(familySequence) },
+					defaultCollectionAccountId: defaultAccountId || null
 				}
 			});
 			goto(resolve('/hissedarlar'));
@@ -138,6 +155,7 @@
 
 	$effect(() => {
 		void checkDuplicates();
+		void loadAccountOptions();
 	});
 </script>
 
@@ -350,6 +368,34 @@
 				{/if}
 			</CardContent>
 		</Card>
+
+		{#if accountOptions.length > 0}
+			<Card>
+				<CardHeader>
+					<CardTitle>{t('shareholders.defaultAccount')}</CardTitle>
+					<CardDescription>{t('shareholders.defaultAccountHint')}</CardDescription>
+				</CardHeader>
+				<CardContent>
+					<div class="flex flex-col gap-2">
+						<Label id="default-account-label">{t('shareholders.defaultAccount')}</Label>
+						<Select.Root type="single" bind:value={defaultAccountId}>
+							<Select.Trigger class="w-full" aria-labelledby="default-account-label">
+								{defaultAccountId
+									? (accountOptions.find((a) => a.id === defaultAccountId)?.name ??
+										t('shareholders.defaultAccount'))
+									: t('shareholders.defaultAccountUnassigned')}
+							</Select.Trigger>
+							<Select.Content>
+								<Select.Item value="">{t('shareholders.defaultAccountUnassigned')}</Select.Item>
+								{#each accountOptions as account (account.id)}
+									<Select.Item value={account.id}>{account.name}</Select.Item>
+								{/each}
+							</Select.Content>
+						</Select.Root>
+					</div>
+				</CardContent>
+			</Card>
+		{/if}
 
 		<div>
 			<Button type="submit" disabled={submitting}>{t('shareholders.submit')}</Button>

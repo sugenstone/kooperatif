@@ -108,6 +108,11 @@ export const trTR = {
 	'shareholders.personAlreadyShareholder': 'Bu kişi zaten hissedar.',
 	'shareholders.saveChanges': 'Bilgileri Kaydet',
 	'shareholders.guardianKeep': 'Vasi değişmesin',
+	'shareholders.defaultAccount': 'Varsayılan Kasa',
+	'shareholders.defaultAccountHint':
+		'Tahsilat ekranında bu kasa önerilir; ödeme her zaman onaylanan kasaya işlenir.',
+	'shareholders.defaultAccountUnassigned': 'Atanmamış',
+	'shareholders.defaultAccountInactive': 'Pasif',
 	'shareholders.guardianRemove': 'Vasiyi kaldır',
 	'families.title': 'Aileler',
 	'families.description': 'Aile sıra numarasına göre düzenlenen hissedar grupları.',
@@ -408,6 +413,12 @@ export const trTR = {
 	'payments.destinationAccount': 'Paranın Yazıldığı Hesap',
 	'payments.destinationAccountHelp':
 		'Para nasıl geldi (yöntem) ile nerede tutulduğu (hesap) farklıdır; alınan tutar bu hesaba yazılır.',
+	'payments.new.defaultAccountProposed':
+		'Borçlunun varsayılan kasası önerildi — gerekirse değiştirebilirsiniz.',
+	'payments.new.defaultAccountInactiveWarning':
+		'Borçlunun varsayılan kasası pasif durumda — aktif bir kasa seçin.',
+	'payments.new.multiDebtorAccountHint':
+		'Birden çok hissedarın borcunu kapsayan tahsilatta kasa otomatik seçilmez; gerçek tahsilat kasasını seçin.',
 	'payments.credited': 'Avans Olarak Ayrılan',
 	'credits.title': 'Fazla Ödeme / Avans',
 	'credits.section': 'Fazla Ödemeler',

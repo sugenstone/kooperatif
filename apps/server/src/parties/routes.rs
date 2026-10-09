@@ -41,6 +41,18 @@ const MAX_PAGE_SIZE: i64 = 100;
 // DTOs (mirror @kooperatif/contracts/src/parties.ts)
 // ------------------------------------------------------------------
 
+/// FUNC-FIX-002: the shareholder's default collection account as
+/// exposed to list/detail surfaces. `status` travels with the id so a
+/// later-inactivated preference renders as a warning instead of
+/// disappearing or being silently used.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultAccountDto {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareholderListItemDto {
@@ -52,6 +64,8 @@ pub struct ShareholderListItemDto {
     pub family_id: Option<Uuid>,
     pub family_sequence: Option<i64>,
     pub status: String,
+    /// None = no preference → surfaces render "Atanmamış".
+    pub default_account: Option<DefaultAccountDto>,
     /// Canonical display identity (STEP-004 §20/§21):
     /// `Ad Soyad · Vasi: Ad Soyad · Aile No 47` — composed server-side
     /// so every surface shows the same disambiguating context.
@@ -136,6 +150,9 @@ pub struct CreateShareholderRequest {
     pub person: PersonRefRequest,
     pub guardian: Option<PersonRefRequest>,
     pub family: FamilyRefRequest,
+    /// FUNC-FIX-002: optional default collection account — must be an
+    /// existing 'active' account (validated under a row lock).
+    pub default_collection_account_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +161,13 @@ pub struct UpdateShareholderRequest {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub guardian: Option<Option<PersonRefRequest>>,
+    /// FUNC-FIX-002 triple-state: absent = untouched, null = cleared,
+    /// id = reassign (must be an existing 'active' account). The custom
+    /// deserializer is REQUIRED — a plain `Option<Option<T>>` collapses
+    /// an explicit JSON null into `None` and could never express
+    /// "clear".
+    #[serde(default, deserialize_with = "explicit_nullable_uuid")]
+    pub default_collection_account_id: Option<Option<Uuid>>,
     /// Lost-update guard: PATCH succeeds only when this equals the
     /// stored updated_at (docs/21 stale-state contract).
     #[serde(with = "time::serde::rfc3339")]
@@ -197,10 +221,38 @@ where
     }
 }
 
+/// Triple-state helper: wraps the deserialized `Option<Uuid>` in an
+/// outer `Some` so a present-but-null body field stays distinguishable
+/// from an absent one (`#[serde(default)]` supplies the outer `None`).
+fn explicit_nullable_uuid<'de, D>(deserializer: D) -> Result<Option<Option<Uuid>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<Uuid>::deserialize(deserializer)?))
+}
+
+/// Same stringify-tolerance as `query_i64`, for the FUNC-FIX-002
+/// `?defaultAccountId=` shareholder-list filter.
+fn query_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(raw) => raw
+            .trim()
+            .parse()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ListQuery {
     pub search: Option<String>,
+    #[serde(default, deserialize_with = "query_uuid")]
+    pub default_account_id: Option<Uuid>,
     #[serde(default, deserialize_with = "query_i64")]
     pub page: Option<i64>,
     #[serde(default, deserialize_with = "query_i64")]
@@ -279,6 +331,11 @@ fn list_item_dto(row: &party_repo::ShareholderListRow) -> ShareholderListItemDto
         family_id: row.family_id,
         family_sequence: row.family_sequence,
         status: row.status.clone(),
+        default_account: row.default_account_id.map(|id| DefaultAccountDto {
+            id,
+            name: row.default_account_name.clone().unwrap_or_default(),
+            status: row.default_account_status.clone().unwrap_or_default(),
+        }),
         display_label: compose_display_label(row),
     }
 }
@@ -295,12 +352,18 @@ pub async fn list_shareholders(
     authz::require(&state, &auth, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
-    let rows = party_repo::list_shareholders(pool, query.search.as_deref(), page, page_size)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "shareholder listing failed");
-            ApiError::Internal
-        })?;
+    let rows = party_repo::list_shareholders(
+        pool,
+        query.search.as_deref(),
+        query.default_account_id,
+        page,
+        page_size,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "shareholder listing failed");
+        ApiError::Internal
+    })?;
     let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
     Ok(Json(PaginatedDto {
         items: rows.iter().map(list_item_dto).collect(),
@@ -432,6 +495,7 @@ pub async fn create_shareholder(
             guardian_first_name: guardian_first,
             guardian_last_name: guardian_last,
             family,
+            default_collection_account_id: body.default_collection_account_id,
         },
         now,
     )
@@ -447,7 +511,8 @@ pub async fn create_shareholder(
         }
         party_repo::CreateShareholderError::PersonNotFound
         | party_repo::CreateShareholderError::GuardianNotFound
-        | party_repo::CreateShareholderError::FamilyNotFound => ApiError::ValidationFailed,
+        | party_repo::CreateShareholderError::FamilyNotFound
+        | party_repo::CreateShareholderError::DefaultAccountInvalid => ApiError::ValidationFailed,
         party_repo::CreateShareholderError::Database(error) => {
             tracing::error!(error = %error, "shareholder creation failed");
             ApiError::Internal
@@ -495,7 +560,8 @@ pub async fn create_shareholder(
             "shareholder_id": created.shareholder_id,
             "person_id": created.person_id,
             "guardian_person_id": created.guardian_person_id,
-            "family_id": created.family_id
+            "family_id": created.family_id,
+            "default_collection_account_id": body.default_collection_account_id
         }),
     )
     .await;
@@ -579,8 +645,17 @@ pub async fn update_shareholder(
         ApiError::Internal
     })?;
 
-    let current: Option<(Uuid, String, String, Option<Uuid>, OffsetDateTime)> = sqlx::query_as(
-        "SELECT s.id, p.first_name, p.last_name, s.guardian_person_id, s.updated_at \
+    type LockRow = (
+        Uuid,
+        String,
+        String,
+        Option<Uuid>,
+        Option<Uuid>,
+        OffsetDateTime,
+    );
+    let current: Option<LockRow> = sqlx::query_as(
+        "SELECT s.id, p.first_name, p.last_name, s.guardian_person_id, \
+             s.default_collection_account_id, s.updated_at \
          FROM shareholders s JOIN persons p ON p.id = s.person_id \
          WHERE s.id = $1 FOR UPDATE OF s",
     )
@@ -591,7 +666,9 @@ pub async fn update_shareholder(
         tracing::error!(error = %error, "shareholder load failed");
         ApiError::Internal
     })?;
-    let Some((person_id, old_first, old_last, old_guardian, updated_at)) = current else {
+    let Some((person_id, old_first, old_last, old_guardian, old_default_account, updated_at)) =
+        current
+    else {
         return Err(ApiError::NotFound);
     };
     if updated_at != body.expected_updated_at {
@@ -714,6 +791,55 @@ pub async fn update_shareholder(
             }),
         )
         .await;
+    }
+
+    // FUNC-FIX-002: default collection account change/clear. Absent
+    // field = untouched; null = cleared; id = reassign to an existing
+    // 'active' account — locked so a concurrent status change cannot
+    // race the assignment. Only future payment proposals observe the
+    // change; posted payments keep their destination account.
+    if let Some(new_default) = &body.default_collection_account_id {
+        if let Some(account_id) = new_default {
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT status FROM financial_accounts WHERE id = $1 FOR UPDATE",
+            )
+            .bind(account_id)
+            .fetch_optional(tx.as_mut())
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "default account check failed");
+                ApiError::Internal
+            })?;
+            if status.as_deref() != Some("active") {
+                return Err(ApiError::ValidationFailed);
+            }
+        }
+        if *new_default != old_default_account {
+            sqlx::query(
+                "UPDATE shareholders SET default_collection_account_id = $2, \
+                 updated_at = now() WHERE id = $1",
+            )
+            .bind(id)
+            .bind(*new_default)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "default account update failed");
+                ApiError::Internal
+            })?;
+            audit::record(
+                pool,
+                SecurityEventType::ShareholderDefaultAccountChanged,
+                Some(auth.user_id),
+                None,
+                serde_json::json!({
+                    "shareholder_id": id,
+                    "before": old_default_account,
+                    "after": *new_default
+                }),
+            )
+            .await;
+        }
     }
 
     tx.commit().await.map_err(|error| {

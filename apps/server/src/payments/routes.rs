@@ -315,6 +315,9 @@ pub struct FamilyMemberContextDto {
     /// This member's OWN derived credit — attribution surface only;
     /// never an interchangeable family pool.
     pub credit_available: String,
+    /// FUNC-FIX-002: member-level informational preference only — the
+    /// family payment NEVER infers a receiving account from it.
+    pub default_account: Option<crate::parties::routes::DefaultAccountDto>,
 }
 
 /// Family collection context (docs/06 §26): member-wise obligations —
@@ -339,6 +342,11 @@ pub struct PayerCandidateDto {
     pub full_name: String,
     pub shareholder_id: Option<Uuid>,
     pub shareholder_status: Option<String>,
+    /// FUNC-FIX-002: when the candidate is itself a shareholder, its
+    /// default collection account (with live status) travels along —
+    /// the payment form uses the DEBTOR's preference, never the
+    /// payer's, and only for a single-debtor payment.
+    pub default_account: Option<crate::parties::routes::DefaultAccountDto>,
 }
 
 mod date_iso {
@@ -596,6 +604,13 @@ pub async fn payer_persons(
                 full_name: format!("{} {}", r.first_name, r.last_name),
                 shareholder_id: r.shareholder_id,
                 shareholder_status: r.shareholder_status.clone(),
+                default_account: r.default_account_id.map(|id| {
+                    crate::parties::routes::DefaultAccountDto {
+                        id,
+                        name: r.default_account_name.clone().unwrap_or_default(),
+                        status: r.default_account_status.clone().unwrap_or_default(),
+                    }
+                }),
             })
             .collect(),
     ))
@@ -1047,6 +1062,13 @@ pub async fn family_collection_context(
                 open_assessment_count: m.open_assessment_count,
                 remaining_amount: payment_model::canonical_amount(m.remaining_amount),
                 credit_available: payment_model::canonical_amount(m.credit_available),
+                default_account: m.default_account_id.map(|id| {
+                    crate::parties::routes::DefaultAccountDto {
+                        id,
+                        name: m.default_account_name.clone().unwrap_or_default(),
+                        status: m.default_account_status.clone().unwrap_or_default(),
+                    }
+                }),
             })
             .collect(),
         total_remaining: payment_model::canonical_amount(total_remaining),

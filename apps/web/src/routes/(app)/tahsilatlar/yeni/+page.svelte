@@ -37,6 +37,7 @@
 		shareholderOpenAssessmentsPath,
 		type CreatePaymentRequest,
 		type CreatePaymentResponse,
+		type DefaultCollectionAccount,
 		type FamilyCollectionContext,
 		type FamilyListItem,
 		type FinancialAccountOption,
@@ -98,6 +99,19 @@
 	let rows = $state<SelectionRow[]>([]);
 	let debtError = $state<MessageKey | null>(null);
 
+	// FUNC-FIX-002: each debtor shareholder's default collection account
+	// as delivered by the search/family-context endpoints — informational
+	// only; the posted payment always uses the explicitly selected
+	// `destinationAccountId`.
+	let debtorDefaults = $state<Record<string, DefaultCollectionAccount | null>>({});
+
+	function recordDebtorDefault(
+		shareholderId: string,
+		account: DefaultCollectionAccount | null | undefined
+	): void {
+		debtorDefaults = { ...debtorDefaults, [shareholderId]: account ?? null };
+	}
+
 	async function searchDebtor(): Promise<void> {
 		debtorSearching = true;
 		try {
@@ -138,6 +152,7 @@
 			);
 			const open = assessments.filter((a) => compareDecimals(a.remainingAmount, '0.00') > 0);
 			if (open.length === 0) debtError = 'payments.new.noOpenAssessments';
+			recordDebtorDefault(candidate.shareholderId, candidate.defaultAccount);
 			upsertAssessments(candidate.shareholderId, candidate.fullName, open);
 			debtorResults = [];
 			debtorQuery = '';
@@ -175,6 +190,7 @@
 	/** Load one member's open obligations into the shared selection. */
 	async function loadMemberAssessments(member: {
 		member: { shareholderId: string; displayLabel: string };
+		defaultAccount?: DefaultCollectionAccount | null;
 	}): Promise<void> {
 		debtError = null;
 		try {
@@ -183,6 +199,7 @@
 			);
 			const open = assessments.filter((a) => compareDecimals(a.remainingAmount, '0.00') > 0);
 			if (open.length === 0) debtError = 'payments.new.noOpenAssessments';
+			recordDebtorDefault(member.member.shareholderId, member.defaultAccount);
 			upsertAssessments(member.member.shareholderId, member.member.displayLabel, open);
 		} catch (error) {
 			debtError = apiErrorKey(error);
@@ -207,12 +224,19 @@
 	let accountOptions = $state<FinancialAccountOption[]>([]);
 	let destinationAccountId = $state('');
 	let accountsLoadError = $state<MessageKey | null>(null);
+	// FUNC-FIX-002 selection bookkeeping: `accountAutoSet` marks a value
+	// placed by automation (single-account convenience or debtor-default
+	// proposal); `accountManuallySet` is raised by the operator's own
+	// Select interaction and is never overridden afterwards.
+	let accountAutoSet = $state(false);
+	let accountManuallySet = $state(false);
 
 	async function loadAccountOptions(): Promise<void> {
 		try {
 			accountOptions = await apiFetch<FinancialAccountOption[]>(FINANCIAL_ACCOUNT_OPTIONS_PATH);
 			if (accountOptions.length === 1 && !destinationAccountId) {
 				destinationAccountId = accountOptions[0].id;
+				accountAutoSet = true;
 			}
 		} catch (error) {
 			accountsLoadError = apiErrorKey(error);
@@ -221,6 +245,25 @@
 
 	const selectedAccount = $derived(
 		accountOptions.find((a) => a.id === destinationAccountId) ?? null
+	);
+
+	// FUNC-FIX-002: the debtor set is derived from the selected rows —
+	// a payment covering MORE THAN ONE shareholder NEVER receives an
+	// automatic account proposal (approved family/multi-shareholder
+	// rule); a single debtor MAY propose its own ACTIVE default.
+	const debtorIds = $derived(new Set(rows.map((r) => r.debtorShareholderId)));
+	const singleDebtorDefault = $derived.by(() => {
+		if (debtorIds.size !== 1) return null;
+		return debtorDefaults[[...debtorIds][0]] ?? null;
+	});
+	const inactiveDefaultWarning = $derived(
+		singleDebtorDefault && singleDebtorDefault.status !== 'active' ? singleDebtorDefault : null
+	);
+	const defaultProposalActive = $derived(
+		destinationAccountId !== '' &&
+			accountAutoSet &&
+			singleDebtorDefault?.status === 'active' &&
+			destinationAccountId === singleDebtorDefault.id
 	);
 
 	const parsedAmount = $derived(parseTryInput(paymentAmount));
@@ -330,6 +373,32 @@
 			void loadFamilyContext(data.family);
 		}
 		void loadAccountOptions();
+	});
+
+	// FUNC-FIX-002 proposal effects (run after mount effects):
+	// 1) A multi-shareholder payment never keeps an auto-applied account —
+	//    the operator must pick the receiving account explicitly.
+	$effect(() => {
+		if (debtorIds.size > 1 && accountAutoSet && !accountManuallySet) {
+			destinationAccountId = '';
+			accountAutoSet = false;
+		}
+	});
+	// 2) A single debtor's ACTIVE default is proposed — but never over a
+	//    manual operator choice, and only when the account is eligible
+	//    (present among the active options).
+	$effect(() => {
+		if (accountManuallySet || debtorIds.size !== 1) return;
+		const proposal = singleDebtorDefault;
+		if (
+			proposal &&
+			proposal.status === 'active' &&
+			accountOptions.some((a) => a.id === proposal.id) &&
+			destinationAccountId !== proposal.id
+		) {
+			destinationAccountId = proposal.id;
+			accountAutoSet = true;
+		}
 	});
 </script>
 
@@ -646,7 +715,15 @@
 			</div>
 			<div>
 				<Label id="pay-account-label" for="">{t('payments.destinationAccount')}</Label>
-				<Select.Root type="single" bind:value={destinationAccountId}>
+				<Select.Root
+					type="single"
+					value={destinationAccountId}
+					onValueChange={(v) => {
+						destinationAccountId = v;
+						accountAutoSet = false;
+						accountManuallySet = true;
+					}}
+				>
 					<Select.Trigger
 						class="w-full"
 						aria-labelledby="pay-account-label"
@@ -669,6 +746,19 @@
 				<p class="mt-1 text-xs text-muted-foreground">
 					{t('payments.destinationAccountHelp')}
 				</p>
+				{#if defaultProposalActive}
+					<p class="mt-1 text-xs text-muted-foreground">
+						{t('payments.new.defaultAccountProposed')}
+					</p>
+				{:else if inactiveDefaultWarning}
+					<p class="mt-1 text-xs text-destructive">
+						{t('payments.new.defaultAccountInactiveWarning')}
+					</p>
+				{:else if debtorIds.size > 1}
+					<p class="mt-1 text-xs text-muted-foreground">
+						{t('payments.new.multiDebtorAccountHint')}
+					</p>
+				{/if}
 				{#if accountsLoadError}
 					<p class="mt-1 text-xs text-destructive">{t(accountsLoadError)}</p>
 				{/if}

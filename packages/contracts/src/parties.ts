@@ -8,6 +8,18 @@
  * an ambiguous name-only identity.
  */
 
+/**
+ * FUNC-FIX-002: the shareholder's default COLLECTION account — a
+ * payment-screen preference only, never a posting restriction.
+ * `status` travels with the id so a later-inactivated preference is
+ * surfaced as a warning instead of silently disappearing.
+ */
+export interface DefaultCollectionAccount {
+	id: string;
+	name: string;
+	status: string;
+}
+
 export interface ShareholderListItem {
 	id: string;
 	firstName: string;
@@ -17,6 +29,8 @@ export interface ShareholderListItem {
 	familyId: string | null;
 	familySequence: number | null;
 	status: ShareholderStatus;
+	/** null = no preference → surfaces render "Atanmamış". */
+	defaultAccount: DefaultCollectionAccount | null;
 	displayLabel: string;
 }
 
@@ -82,12 +96,19 @@ export interface CreateShareholderRequest {
 	person: PersonRefInput;
 	guardian?: PersonRefInput | null;
 	family: FamilyRefInput;
+	/** Optional default collection account — must be an existing active account. */
+	defaultCollectionAccountId?: string | null;
 }
 
 export interface UpdateShareholderRequest {
 	firstName?: string;
 	lastName?: string;
 	guardian?: PersonRefInput | null;
+	/**
+	 * FUNC-FIX-002 triple-state: absent = untouched, null = cleared,
+	 * id = reassign (must be an existing active account).
+	 */
+	defaultCollectionAccountId?: string | null;
 	expectedUpdatedAt: string;
 }
 

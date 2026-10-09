@@ -386,6 +386,13 @@ pub struct FamilyMemberCollectionRow {
     /// STEP-009: this member's OWN derived available credit —
     /// attribution only; the Family NEVER owns a pooled balance.
     pub credit_available: Decimal,
+    /// FUNC-FIX-002: member-level default collection account —
+    /// informational only; the family payment NEVER infers a
+    /// receiving account from it (explicit operator selection is
+    /// mandatory for multi-shareholder payments).
+    pub default_account_id: Option<Uuid>,
+    pub default_account_name: Option<String>,
+    pub default_account_status: Option<String>,
 }
 
 pub async fn family_collection_context(
@@ -398,12 +405,16 @@ pub async fn family_collection_context(
             f.sequence_number AS family_sequence, s.status AS shareholder_status, \
             COALESCE(o.cnt, 0)::bigint AS open_assessment_count, \
             COALESCE(o.remaining, 0) AS remaining_amount, \
-            COALESCE(cv.available, 0) AS credit_available \
+            COALESCE(cv.available, 0) AS credit_available, \
+            s.default_collection_account_id AS default_account_id, \
+            da.name AS default_account_name, \
+            da.status AS default_account_status \
          FROM shareholder_family_memberships m \
          JOIN families f ON f.id = m.family_id \
          JOIN shareholders s ON s.id = m.shareholder_id AND s.status <> 'voided' \
          JOIN persons sp ON sp.id = s.person_id \
          LEFT JOIN persons gp ON gp.id = s.guardian_person_id \
+         LEFT JOIN financial_accounts da ON da.id = s.default_collection_account_id \
          LEFT JOIN ( \
              SELECT a.shareholder_id, \
                  count(*) FILTER (WHERE a.amount - COALESCE(al.paid, 0) > 0) AS cnt, \

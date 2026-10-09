@@ -60,6 +60,7 @@ export {
 export type {
 	CreateFamilyRequest,
 	CreateShareholderRequest,
+	DefaultCollectionAccount,
 	FamilyChangeRequest,
 	FamilyDetail,
 	FamilyListItem,

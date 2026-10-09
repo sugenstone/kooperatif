@@ -486,6 +486,7 @@ pub async fn list_investments(
         search: query.search.clone(),
         page: query.page,
         page_size: query.page_size,
+        default_account_id: None,
     };
     let (page, page_size) = page_of(&list)?;
     let status = query

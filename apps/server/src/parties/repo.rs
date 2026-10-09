@@ -22,6 +22,13 @@ pub struct ShareholderListRow {
     pub family_sequence: Option<i64>,
     pub membership_started_at: Option<OffsetDateTime>,
     pub status: String,
+    /// FUNC-FIX-002: shareholder-level default collection account —
+    /// a payment-screen preference, never a posting restriction.
+    pub default_account_id: Option<Uuid>,
+    pub default_account_name: Option<String>,
+    /// May be 'inactive': a saved preference survives deactivation and
+    /// is surfaced with a warning, never silently used or cleared.
+    pub default_account_status: Option<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub total_count: i64,
@@ -32,13 +39,17 @@ const SHAREHOLDER_LIST_SELECT: &str = "SELECT s.id, s.person_id, \
     gp.first_name AS guardian_first_name, gp.last_name AS guardian_last_name, \
     m.family_id, f.sequence_number AS family_sequence, \
     m.started_at AS membership_started_at, s.status, s.created_at, s.updated_at, \
+    s.default_collection_account_id AS default_account_id, \
+    da.name AS default_account_name, \
+    da.status AS default_account_status, \
     count(*) OVER () AS total_count \
 FROM shareholders s \
 JOIN persons p ON p.id = s.person_id \
 LEFT JOIN persons gp ON gp.id = s.guardian_person_id \
 LEFT JOIN shareholder_family_memberships m \
     ON m.shareholder_id = s.id AND m.ended_at IS NULL \
-LEFT JOIN families f ON f.id = m.family_id ";
+LEFT JOIN families f ON f.id = m.family_id \
+LEFT JOIN financial_accounts da ON da.id = s.default_collection_account_id ";
 
 const SHAREHOLDER_LIST_ORDER: &str =
     " ORDER BY f.sequence_number NULLS LAST, p.search_name, p.last_name, p.first_name, s.id ";
@@ -49,6 +60,7 @@ const SHAREHOLDER_LIST_ORDER: &str =
 pub async fn list_shareholders(
     pool: &PgPool,
     search: Option<&str>,
+    default_account_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<ShareholderListRow>, sqlx::Error> {
@@ -67,6 +79,10 @@ pub async fn list_shareholders(
             conditions.truncate(last + 1);
         }
     }
+    // FUNC-FIX-002: optional filter by the shareholder's default
+    // collection account — $5 is always bound; NULL makes the OR-true
+    // inert, matching the fixed-parameter design below.
+    conditions.push("($5::uuid IS NULL OR s.default_collection_account_id = $5)".to_string());
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -87,6 +103,7 @@ pub async fn list_shareholders(
         .bind(sequence)
         .bind((page - 1) * page_size)
         .bind(page_size)
+        .bind(default_account_id)
         .fetch_all(pool)
         .await?;
     Ok(rows)
@@ -151,6 +168,13 @@ pub struct PersonSearchRow {
     pub last_name: String,
     pub shareholder_id: Option<Uuid>,
     pub shareholder_status: Option<String>,
+    /// FUNC-FIX-002: the shareholder's default collection account
+    /// (NULL when the person is not a shareholder or has none). The
+    /// status travels with it so the payment screen can detect an
+    /// inactive preference instead of silently using it.
+    pub default_account_id: Option<Uuid>,
+    pub default_account_name: Option<String>,
+    pub default_account_status: Option<String>,
 }
 
 /// Person lookup for guardian/person selection: same-name persons are
@@ -163,9 +187,13 @@ pub async fn search_persons(
 ) -> Result<Vec<PersonSearchRow>, sqlx::Error> {
     let folded = format!("%{}%", model::fold_search(search.trim()));
     sqlx::query_as::<_, PersonSearchRow>(
-        "SELECT p.id, p.first_name, p.last_name, s.id AS shareholder_id, s.status AS shareholder_status \
+        "SELECT p.id, p.first_name, p.last_name, s.id AS shareholder_id, s.status AS shareholder_status, \
+         s.default_collection_account_id AS default_account_id, \
+         da.name AS default_account_name, \
+         da.status AS default_account_status \
          FROM persons p \
          LEFT JOIN shareholders s ON s.person_id = p.id \
+         LEFT JOIN financial_accounts da ON da.id = s.default_collection_account_id \
          WHERE p.search_name LIKE $1 \
          ORDER BY p.search_name, p.last_name, p.first_name, p.id \
          LIMIT $2",
@@ -260,6 +288,9 @@ pub struct CreateShareholder {
     pub guardian_first_name: Option<String>,
     pub guardian_last_name: Option<String>,
     pub family: FamilyRef,
+    /// FUNC-FIX-002: optional default collection account — must exist
+    /// and be 'active' at assignment time.
+    pub default_collection_account_id: Option<Uuid>,
 }
 
 pub struct CreatedShareholder {
@@ -279,6 +310,9 @@ pub enum CreateShareholderError {
     PersonNotFound,
     GuardianNotFound,
     FamilyNotFound,
+    /// Default collection account must reference an existing,
+    /// 'active' financial account (FUNC-FIX-002).
+    DefaultAccountInvalid,
     Database(sqlx::Error),
 }
 
@@ -397,13 +431,29 @@ pub async fn create_shareholder(
         }
     };
 
-    // 4. Shareholder + initial membership.
+    // 4. Optional default collection account (FUNC-FIX-002): must be
+    //    an existing 'active' account — locked so a concurrent
+    //    status-change cannot race the assignment.
+    if let Some(account_id) = command.default_collection_account_id {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM financial_accounts WHERE id = $1 FOR UPDATE")
+                .bind(account_id)
+                .fetch_optional(tx.as_mut())
+                .await
+                .map_err(CreateShareholderError::Database)?;
+        if status.as_deref() != Some("active") {
+            return Err(CreateShareholderError::DefaultAccountInvalid);
+        }
+    }
+
+    // 5. Shareholder + initial membership.
     let shareholder_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO shareholders (person_id, guardian_person_id) \
-         VALUES ($1, $2) RETURNING id",
+        "INSERT INTO shareholders (person_id, guardian_person_id, default_collection_account_id) \
+         VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(person_id)
     .bind(guardian_person_id)
+    .bind(command.default_collection_account_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(CreateShareholderError::Database)?;

@@ -14,6 +14,7 @@
 		CardHeader,
 		CardTitle
 	} from '$lib/components/ui/card';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -29,7 +30,9 @@
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
+		FINANCIAL_ACCOUNT_OPTIONS_PATH,
 		SHAREHOLDERS_PATH,
+		type FinancialAccountOption,
 		type Paginated,
 		type ShareholderListItem
 	} from '@kooperatif/contracts';
@@ -38,6 +41,8 @@
 
 	let search = $state('');
 	let appliedSearch = $state('');
+	let accountFilter = $state('');
+	let accountOptions = $state<FinancialAccountOption[]>([]);
 	let page = $state(1);
 	let data = $state<Paginated<ShareholderListItem> | null>(null);
 	let loadError = $state<MessageKey | null>(null);
@@ -51,11 +56,20 @@
 				pageSize: String(pageSize)
 			});
 			if (appliedSearch.trim()) params.set('search', appliedSearch.trim());
+			if (accountFilter) params.set('defaultAccountId', accountFilter);
 			data = await apiFetch<Paginated<ShareholderListItem>>(`${SHAREHOLDERS_PATH}?${params}`);
 		} catch (error) {
 			loadError = apiErrorKey(error);
 		} finally {
 			searching = false;
+		}
+	}
+
+	async function loadAccountOptions(): Promise<void> {
+		try {
+			accountOptions = await apiFetch<FinancialAccountOption[]>(FINANCIAL_ACCOUNT_OPTIONS_PATH);
+		} catch {
+			accountOptions = [];
 		}
 	}
 
@@ -80,6 +94,7 @@
 	function resetFilters(): void {
 		search = '';
 		appliedSearch = '';
+		accountFilter = '';
 		page = 1;
 		void refresh();
 	}
@@ -97,6 +112,7 @@
 
 	$effect(() => {
 		void refresh();
+		void loadAccountOptions();
 	});
 </script>
 
@@ -119,7 +135,34 @@
 		{searching}
 		onsubmit={submitSearch}
 		onreset={resetFilters}
-	/>
+	>
+		{#snippet filters()}
+			{#if accountOptions.length > 0}
+				<Select.Root
+					type="single"
+					value={accountFilter}
+					onValueChange={(v) => {
+						accountFilter = v;
+						page = 1;
+						void refresh();
+					}}
+				>
+					<Select.Trigger class="w-44" aria-label={t('shareholders.defaultAccount')}>
+						{accountFilter
+							? (accountOptions.find((a) => a.id === accountFilter)?.name ??
+								t('shareholders.defaultAccount'))
+							: `${t('shareholders.defaultAccount')}: ${t('common.all')}`}
+					</Select.Trigger>
+					<Select.Content>
+						<Select.Item value="">{t('common.all')}</Select.Item>
+						{#each accountOptions as account (account.id)}
+							<Select.Item value={account.id}>{account.name}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
+			{/if}
+		{/snippet}
+	</ListToolbar>
 
 	{#if loadError}
 		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
@@ -140,6 +183,7 @@
 							<TableHead>{t('shareholders.firstName')} / {t('shareholders.lastName')}</TableHead>
 							<TableHead>{t('shareholders.guardian')}</TableHead>
 							<TableHead>{t('shareholders.familyNo')}</TableHead>
+							<TableHead>{t('shareholders.defaultAccount')}</TableHead>
 							<TableHead>{t('shareholders.status')}</TableHead>
 						</TableRow>
 					</TableHeader>
@@ -170,6 +214,20 @@
 										>
 									{:else}
 										—
+									{/if}
+								</TableCell>
+								<TableCell>
+									{#if item.defaultAccount}
+										{item.defaultAccount.name}
+										{#if item.defaultAccount.status !== 'active'}
+											<span class="text-muted-foreground"
+												>({t('shareholders.defaultAccountInactive')})</span
+											>
+										{/if}
+									{:else}
+										<span class="text-muted-foreground"
+											>{t('shareholders.defaultAccountUnassigned')}</span
+										>
 									{/if}
 								</TableCell>
 								<TableCell>

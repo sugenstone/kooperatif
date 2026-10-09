@@ -13,6 +13,21 @@ import CreateShareholder from '../routes/(app)/hissedarlar/yeni/+page.svelte';
 import ShareholderDetail from '../routes/(app)/hissedarlar/[id]/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
 import { shareholderLabel } from '$lib/parties/label';
+import { pickSelectOptionByLabel } from './select-helper';
+
+const KOY_ACCOUNT = {
+	id: 'a0a0a0a0-0000-4000-8000-0000000000a1',
+	name: 'Köy TL',
+	accountType: 'cash',
+	currency: 'TRY'
+};
+const ISTANBUL_ACCOUNT = {
+	id: 'a0a0a0a0-0000-4000-8000-0000000000b2',
+	name: 'İstanbul TL',
+	accountType: 'bank',
+	currency: 'TRY'
+};
+const ACCOUNT_OPTIONS = [KOY_ACCOUNT, ISTANBUL_ACCOUNT];
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
 	const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) =>
@@ -37,6 +52,11 @@ const shareholdersPayload = {
 			familyId: '33333333-3333-4333-8333-333333333333',
 			familySequence: 47,
 			status: 'active',
+			defaultAccount: {
+				id: 'a0a0a0a0-0000-4000-8000-0000000000a1',
+				name: 'Köy TL',
+				status: 'active'
+			},
 			displayLabel: 'Mehmet Yılmaz · Vasi: Hasan Yılmaz · Aile No 47'
 		},
 		{
@@ -48,6 +68,7 @@ const shareholdersPayload = {
 			familyId: '44444444-4444-4444-8444-444444444444',
 			familySequence: 81,
 			status: 'inactive',
+			defaultAccount: null,
 			displayLabel: 'Mehmet Yılmaz · Vasi: Ahmet Yılmaz · Aile No 81'
 		}
 	],
@@ -119,6 +140,18 @@ describe('Hissedarlar list page', () => {
 		expect(screen.getByText('Pasif')).toBeInTheDocument();
 	});
 
+	// FUNC-FIX-002 — Varsayılan Kasa column: assigned account renders by
+	// name; null renders "Atanmamış".
+	it('shows the default collection account column', async () => {
+		stubFetch(async () => jsonResponse(shareholdersPayload));
+		render(ShareholdersList);
+
+		await screen.findAllByText('Mehmet Yılmaz');
+		expect(screen.getByText('Köy TL')).toBeInTheDocument();
+		expect(screen.getByText('Atanmamış')).toBeInTheDocument();
+		expect(screen.getByText('Varsayılan Kasa')).toBeInTheDocument();
+	});
+
 	it('sends the search term to the server', async () => {
 		const fetchMock = stubFetch(async () => jsonResponse(shareholdersPayload));
 		render(ShareholdersList);
@@ -131,8 +164,10 @@ describe('Hissedarlar list page', () => {
 		await userEvent.click(screen.getByRole('button', { name: 'Ara' }));
 		await tick();
 
-		const lastUrl = fetchMock.mock.calls.at(-1)?.[0] as string;
-		expect(lastUrl).toContain('search=mehmet');
+		// The list page also loads account options on mount — assert on
+		// the shareholders call carrying the search param specifically.
+		const listCall = fetchMock.mock.calls.find(([url]) => String(url).includes('search=mehmet'));
+		expect(listCall).toBeDefined();
 	});
 
 	it('hides the create action without shareholders.manage', async () => {
@@ -184,6 +219,35 @@ describe('Create shareholder page', () => {
 		expect(body.guardian).toBeNull();
 		expect(body.family).toEqual({ mode: 'new', sequenceNumber: 55 });
 		expect(gotoMock).toHaveBeenCalledWith('/hissedarlar');
+	});
+
+	// FUNC-FIX-002 — optional default collection account at creation.
+	it('submits the chosen default collection account', async () => {
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.includes('/api/financial-accounts/options')) {
+				return jsonResponse(ACCOUNT_OPTIONS);
+			}
+			if (url.endsWith('/api/shareholders') && init?.method === 'POST') {
+				return jsonResponse({}, 201);
+			}
+			if (url.includes('duplicates')) return jsonResponse([]);
+			return jsonResponse([]);
+		});
+		render(CreateShareholder);
+
+		await userEvent.type(await screen.findByLabelText('Ad'), 'Ayşe');
+		await userEvent.type(screen.getByLabelText('Soyad'), 'Demir');
+		const seqInput = document.getElementById('family-seq') as HTMLInputElement;
+		await userEvent.type(seqInput, '55');
+		await pickSelectOptionByLabel('Varsayılan Kasa', 'Köy TL');
+		await userEvent.click(screen.getByRole('button', { name: 'Hissedarı Oluştur' }));
+		await tick();
+
+		const createCall = fetchMock.mock.calls.find(
+			([input, init]) => String(input).endsWith('/api/shareholders') && init?.method === 'POST'
+		);
+		const body = JSON.parse(String((createCall?.[1] as RequestInit).body));
+		expect(body.defaultCollectionAccountId).toBe(KOY_ACCOUNT.id);
 	});
 });
 
@@ -265,5 +329,76 @@ describe('Shareholder detail page', () => {
 		expect(body.lastName).toBe('Üye');
 		expect(body.expectedUpdatedAt).toBe(detailPayload.updatedAt);
 		expect(body.guardian).toBeUndefined();
+		// FUNC-FIX-002: untouched account preference is not sent back.
+		expect(body.defaultCollectionAccountId).toBeUndefined();
+	});
+
+	// FUNC-FIX-002 — default account display, change and clear.
+	it('renders an inactive default account with a warning badge', async () => {
+		const payload = {
+			...detailPayload,
+			defaultAccount: { id: KOY_ACCOUNT.id, name: 'Köy TL', status: 'inactive' }
+		};
+		stubFetch(async (url) =>
+			url.includes('/api/financial-accounts/options')
+				? jsonResponse(ACCOUNT_OPTIONS)
+				: jsonResponse(payload)
+		);
+		render(ShareholderDetail, { data: { id: detailPayload.id } });
+
+		await screen.findByText('Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126');
+		expect(screen.getByText('Köy TL')).toBeInTheDocument();
+		expect(screen.getByText('Pasif')).toBeInTheDocument();
+	});
+
+	it('patches the default account change with optimistic concurrency', async () => {
+		const payload = {
+			...detailPayload,
+			defaultAccount: { id: KOY_ACCOUNT.id, name: 'Köy TL', status: 'active' }
+		};
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.includes('/api/financial-accounts/options')) {
+				return jsonResponse(ACCOUNT_OPTIONS);
+			}
+			if (init?.method === 'PATCH') return jsonResponse(payload);
+			return jsonResponse(payload);
+		});
+		render(ShareholderDetail, { data: { id: detailPayload.id } });
+		await screen.findByText('Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126');
+
+		await userEvent.click(screen.getByRole('button', { name: 'Bilgileri Düzenle' }));
+		await pickSelectOptionByLabel('Varsayılan Kasa', 'İstanbul TL');
+		await userEvent.click(screen.getByRole('button', { name: 'Bilgileri Kaydet' }));
+		await tick();
+
+		const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+		const body = JSON.parse(String((patchCall?.[1] as RequestInit).body));
+		expect(body.defaultCollectionAccountId).toBe(ISTANBUL_ACCOUNT.id);
+		expect(body.expectedUpdatedAt).toBe(detailPayload.updatedAt);
+	});
+
+	it('sends null to clear the default account', async () => {
+		const payload = {
+			...detailPayload,
+			defaultAccount: { id: KOY_ACCOUNT.id, name: 'Köy TL', status: 'active' }
+		};
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.includes('/api/financial-accounts/options')) {
+				return jsonResponse(ACCOUNT_OPTIONS);
+			}
+			if (init?.method === 'PATCH') return jsonResponse(payload);
+			return jsonResponse(payload);
+		});
+		render(ShareholderDetail, { data: { id: detailPayload.id } });
+		await screen.findByText('Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126');
+
+		await userEvent.click(screen.getByRole('button', { name: 'Bilgileri Düzenle' }));
+		await pickSelectOptionByLabel('Varsayılan Kasa', 'Atanmamış');
+		await userEvent.click(screen.getByRole('button', { name: 'Bilgileri Kaydet' }));
+		await tick();
+
+		const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+		const body = JSON.parse(String((patchCall?.[1] as RequestInit).body));
+		expect(body.defaultCollectionAccountId).toBeNull();
 	});
 });
