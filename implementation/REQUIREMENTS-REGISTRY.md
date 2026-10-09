@@ -184,14 +184,15 @@ Field legend: **BE** backend · **FE** frontend · **DB** database ·
 - Current: no `deny_unknown_fields` on any write DTO (repo-wide grep: 0); `currency:'USD'` accepted, stored `TRY` (AUD §F).
 - BE: reject unknown fields on every mutating request DTO (`#[serde(deny_unknown_fields)]` or equivalent); stable `validation_failed` error.
 - FE: none (contracts already exact); verify no client sends extra fields.
-- AUTO: one negative test per mutating endpoint family (unknown field → 400, nothing persisted).
-- AC: the AUD §F probe (`currency:'USD'`) returns 400 and creates nothing.
+- AUTO: one negative test per mutating endpoint family (unknown field → 422 `validation_failed`, nothing persisted).
+- AC: the AUD §F probe (`currency:'USD'`) returns 422 `validation_failed` and creates nothing.
+- M0 discovery (2026-10-09): 57 request DTO type names in 13 routers; no `#[serde(flatten)]` on request types (no serde conflict). Status 422 aligns with the existing axum body-data rejection + F6 sanitizer (syntax errors stay 400). Our own test clients send ignored fields (F-M0-04) — fixed in M0 WP-3/WP-4. Plan: `implementation/M0-FOUNDATION-CLEANUP-PLAN.md` §2.1.
 
-| Sub   | Item                                      | Status  | AC                                       |
-| ----- | ----------------------------------------- | ------- | ---------------------------------------- |
-| 006.1 | Unknown-field rejection on all write DTOs | DEFECT  | 400 for unknown field, zero rows written |
-| 006.2 | Client compatibility check                | MISSING | full Vitest + E2E green after change     |
-| 006.3 | Regression tests per module               | MISSING | negative test per router                 |
+| Sub   | Item                                      | Status  | AC                                                           |
+| ----- | ----------------------------------------- | ------- | ------------------------------------------------------------ |
+| 006.1 | Unknown-field rejection on all write DTOs | DEFECT  | 422 `validation_failed` for unknown field, zero rows written |
+| 006.2 | Client compatibility check                | MISSING | full Vitest + E2E green after change                         |
+| 006.3 | Regression tests per module               | MISSING | negative test per router                                     |
 
 ### REQ-007 — User Creation and Administration — PARTIAL — M2
 
@@ -440,18 +441,19 @@ Residual hygiene (not a re-implementation): the E2E harness lives in a temp dire
 
 - Current: **no tenant/cooperative column in any of the 17 migrations**; single cooperative by construction. Charter: "Design for multiple cooperatives even if the first deployment uses one" (docs/00:88-90); invariant: every tenant-owned record belongs to exactly one tenant, backend-enforced (docs/15:13-15). Roadmap Phase 1 listed "Cooperatives/Organizations; tenant context" — no STEP implemented it and no recorded decision deferring it was found.
 - Strategy: see roadmap §M1 and PD-01/PD-02.
+- **Owner decisions (PROJECT-CONTROL-002): PD-01 APPROVED** — one PostgreSQL database, strict per-cooperative isolation enforced in database access, services, API, authorization, financial transactions, reports/exports, audit, background jobs and attachments; RLS evaluated as defense in depth, never as a substitute for application authorization; client-supplied cooperative ids never trusted. **PD-02 APPROVED** — one user may belong to several cooperatives with independent roles per membership; switching changes the active authorization context; no privilege leakage; audit records user, active cooperative and effective permissions. Not to be reopened without a concrete architectural conflict.
 
-| Sub   | Item                                           | Status             | AC                                             |
-| ----- | ---------------------------------------------- | ------------------ | ---------------------------------------------- |
-| 024.1 | Cooperative entity                             | MISSING            | CRUD by system admin, audited                  |
-| 024.2 | `cooperative_id` on every owned record         | MISSING            | NOT NULL + FK; backfilled to default coop      |
-| 024.3 | User ↔ cooperative membership + roles per coop | BLOCKED-PD (PD-02) | per decision                                   |
-| 024.4 | Server-side isolation on every read/write      | MISSING            | cross-coop id → 404 semantics (docs/21:86)     |
-| 024.5 | Tenant-isolation test suite                    | MISSING            | per module IDOR tests (docs/26:36,103)         |
-| 024.6 | Per-coop uniqueness/numbering                  | MISSING            | family seq, payment no, receipt no scoped      |
-| 024.7 | Cooperative context UI (switcher)              | MISSING            | E2E two coops, no leakage                      |
-| 024.8 | Realtime/TV scoped per coop                    | MISSING            | events never cross coop                        |
-| 024.9 | Existing-data migration                        | MISSING            | all current rows in default coop; suites green |
+| Sub   | Item                                           | Status                   | AC                                                                                                     |
+| ----- | ---------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| 024.1 | Cooperative entity                             | MISSING                  | CRUD by system admin, audited                                                                          |
+| 024.2 | `cooperative_id` on every owned record         | MISSING                  | NOT NULL + FK; backfilled to default coop                                                              |
+| 024.3 | User ↔ cooperative membership + roles per coop | MISSING (PD-02 APPROVED) | one user, many cooperatives, independent roles per membership; switching changes authorization context |
+| 024.4 | Server-side isolation on every read/write      | MISSING                  | cross-coop id → 404 semantics (docs/21:86)                                                             |
+| 024.5 | Tenant-isolation test suite                    | MISSING                  | per module IDOR tests (docs/26:36,103)                                                                 |
+| 024.6 | Per-coop uniqueness/numbering                  | MISSING                  | family seq, payment no, receipt no scoped                                                              |
+| 024.7 | Cooperative context UI (switcher)              | MISSING                  | E2E two coops, no leakage                                                                              |
+| 024.8 | Realtime/TV scoped per coop                    | MISSING                  | events never cross coop                                                                                |
+| 024.9 | Existing-data migration                        | MISSING                  | all current rows in default coop; suites green                                                         |
 
 ### REQ-025 — Notifications and Tasks — MISSING — M13
 
@@ -482,6 +484,7 @@ Residual hygiene (not a re-implementation): the E2E harness lives in a temp dire
 ### REQ-027 — Social Aid Confirmation Dialog Consistency — DEFECT — M0
 
 - Current: `apps/web/src/routes/(app)/sosyal-yardim/[id]/+page.svelte` uses `window.confirm` for close/cancel/reverse.
+- M0 discovery (F-M0-01): FUNC-AUDIT-001 under-reported the scope — **20 native confirms in 6 routes** (`sosyal-yardim/[id]` 4, `yatirimlar/[id]` 5, `hisse-iadeleri/[id]` 4, `donemler/[id]` 3, `hisseler/[id]` 2, `hissedarlar/[id]` 2). Scope pending owner decision M0-D1 (recommended: all 20, per docs/12:16). If only Social Aid is approved, the other 16 become tracked sub-items 027.2–027.6 with a target milestone.
 - AC: AlertDialog pattern (as on `kullanicilar`) for every destructive action; Vitest updated; no `window.confirm` left in that route.
 
 ### REQ-028 — README Accuracy — DEFECT — M0 (+ every milestone)
@@ -493,11 +496,13 @@ Residual hygiene (not a re-implementation): the E2E harness lives in a temp dire
 
 - Evidence (read-only, PROJECT-CONTROL-001): `.kilo/worktrees/versed-stallion` is a **registered git worktree** (`git worktree list`) at detached `c86a197` ("docs: adopt backup and disaster recovery ADR"), which **is an ancestor of `main`**; `git status --short` in the worktree is empty. `.kilo/.gitignore` ignores `node_modules`, lockfiles and `agent-manager.json`, so ignored files may exist and have not been inventoried.
 - Plan: (1) inventory ignored files (`git status --ignored`) and report; (2) on owner authorization run `git worktree remove` (then `git worktree prune`), and remove `.kilo/` only after the inventory is approved.
+- M0 inventory (2026-10-09, read-only): 158 tracked files = exact `c86a197` checkout; **0 untracked, 0 ignored** files; reflog has one entry; every reflog commit is in `main`; no per-worktree refs; 988 KB. Main repo ignores it via local `.git/info/exclude:9`. Conclusion: no unique work. Removal awaits owner decision M0-D2.
 - AC: no unique commits or files lost; `git worktree list` shows only the main tree.
 
 ### REQ-030 — Production Provisioning and Recovery — PARTIAL (local only) — M14
 
 - Current: local backup/restore/drill/retention/failure tooling (`scripts/backup/*`), runbook docs/30, restore-verified locally (PILOT-FIX-001). Nothing provisioned on the VDS. **Production changes require separate explicit owner authorization.**
+- M0 discovery (F-M0-02): local drill re-run 2026-10-09 → PASSED (55 checks). **Remote CI has failed 21 consecutive runs (6–26)**: the "Backup/restore → Recovery drill" job has never passed in CI (cause unknown; logs need authentication), and the "Backend → Tests" job fails since run 17 because it runs DB-gated tests without a database (confirmed locally). 030.4 therefore has local evidence only. Fix planned in M0 WP-9/WP-10; remote verification needs a separately authorized push.
 
 | Sub    | Item                                 | Status      | AC                                              |
 | ------ | ------------------------------------ | ----------- | ----------------------------------------------- |
@@ -526,3 +531,18 @@ Residual hygiene (not a re-implementation): the E2E harness lives in a temp dire
 - Sub-items VERIFIED: **12** (001.1, 007.1–007.3, 009.1, 013.1–013.7).
   Every `BLOCKED-PD` row names its policy decision id.
 - Every item has a target milestone. No item is marked deferred.
+
+---
+
+## 4. Discovered findings log
+
+Findings found during milestone discovery that are not new owner
+requirements but change evidence, scope or risk. Each is attached to an
+existing requirement or milestone.
+
+| ID      | Found        | Finding                                                                                                                               | Attached to                                  | Handling                                     |
+| ------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------- |
+| F-M0-01 | M0 discovery | FUNC-AUDIT-001 §E under-reported native confirms: 20 in 6 routes, not only Social Aid                                                 | REQ-027                                      | owner decision M0-D1                         |
+| F-M0-02 | M0 discovery | Remote CI red for 21 consecutive runs: backup drill job never passed in CI; backend job runs DB-gated tests without a DB since run 17 | REQ-030 (030.4), docs/26 gates               | M0 WP-9/WP-10; owner decision M0-D3          |
+| F-M0-03 | M0 discovery | Shareholder, financial-account and period creation are not idempotent server-side (test scripts sent ignored `idempotencyKey`)        | REQ-010/011 area (M3), REQ-003/004 area (M5) | evaluate in M3/M5 discovery; no change in M0 |
+| F-M0-04 | M0 discovery | Maintained and FF2 E2E clients send fields the DTOs do not accept (silently dropped today)                                            | REQ-006, REQ-013 evidence                    | M0 WP-3/WP-4                                 |

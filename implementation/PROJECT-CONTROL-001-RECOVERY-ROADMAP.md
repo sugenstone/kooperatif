@@ -143,9 +143,10 @@ updated. Each milestone is one or more STEPs, each ending with STOP.
 - Migrations: none.
 - Security/audit: stricter input validation.
 - Tests: negative unknown-field test per router; Vitest dialog tests.
-- Acceptance: AUD §F probe `currency:'USD'` → 400, nothing created; social-aid reverse requires AlertDialog confirm.
+- Acceptance: AUD §F probe `currency:'USD'` → 422 `validation_failed`, nothing created; social-aid reverse requires AlertDialog confirm.
 - Risks: a client sending an extra field breaks — mitigated by full Vitest + E2E run.
 - Decisions: owner authorization for REQ-029 deletion.
+- **PROJECT-CONTROL-002 refinement (M0 discovery):** detailed plan in `implementation/M0-FOUNDATION-CLEANUP-PLAN.md`. Added: CI repair (F-M0-02 — remote CI red since run 6; WP-9/WP-10), REQ-027 scope question (F-M0-01 — 20 native confirms in 6 routes; M0-D1), test-client field cleanup (F-M0-04). Owner decisions M0-D1…M0-D4. Status: awaiting approval.
 
 ### M1 — Multi-cooperative foundation — XL
 
@@ -296,8 +297,8 @@ no-inference.
 
 | PD     | Exact question                                                                                                                                              | Recommended                                                                                                                                                                                                                  | Alternatives                                                              | Consequences                                                                                                                                             | REQ           |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| PD-01  | How are multiple cooperatives stored?                                                                                                                       | One database, `cooperative_id` on every owned row, enforced in the repository layer (+ optional RLS)                                                                                                                         | Database per cooperative; schema per cooperative                          | Recommended keeps one migration path and one backup; DB-per-coop gives hard isolation but multiplies migrations, backups and connection pools on one VDS | 024           |
-| PD-02  | May one user work in several cooperatives, with different roles each?                                                                                       | Yes: membership table `(user, cooperative, roles)`                                                                                                                                                                           | One user = one cooperative                                                | Recommended avoids duplicate accounts for shared staff; requires a context switcher                                                                      | 024, 007      |
+| PD-01  | **APPROVED (owner, PROJECT-CONTROL-002)** — How are multiple cooperatives stored?                                                                           | One database, `cooperative_id` on every owned row, enforced in the repository layer (+ optional RLS)                                                                                                                         | Database per cooperative; schema per cooperative                          | Recommended keeps one migration path and one backup; DB-per-coop gives hard isolation but multiplies migrations, backups and connection pools on one VDS | 024           |
+| PD-02  | **APPROVED (owner, PROJECT-CONTROL-002)** — May one user work in several cooperatives, with different roles each?                                           | Yes: membership table `(user, cooperative, roles)`                                                                                                                                                                           | One user = one cooperative                                                | Recommended avoids duplicate accounts for shared staff; requires a context switcher                                                                      | 024, 007      |
 | PD-03  | Is the currency list fixed (TRY, USD, EUR) or configurable?                                                                                                 | Configurable catalog seeded with TRY, USD, EUR + gold code                                                                                                                                                                   | Fixed enum                                                                | Catalog allows later GBP etc. without migration                                                                                                          | 001           |
 | PD-04  | Can a TRY assessment be paid in USD/EUR/gold?                                                                                                               | No — payments must match assessment currency; foreign cash enters via a separate conversion                                                                                                                                  | Allow with rate at payment time                                           | Allowing it requires a rate on every allocation and FX gain/loss handling                                                                                | 001, 015, 016 |
 | PD-05  | Is in-system currency/gold conversion allowed, and where do rates come from?                                                                                | Allowed as an explicit conversion transaction with a manually entered, audited rate                                                                                                                                          | External rate feed; no conversion (outside system only)                   | Manual rate keeps the system offline-safe; feed adds dependency and trust questions                                                                      | 001, 002      |
@@ -330,6 +331,32 @@ no-inference.
 | PD-28  | As-of reports: does a reversal recorded later change a past date's figure?                                                                                  | Two views: "as recorded at date" (ignores later reversals) and "as corrected" (applies them), both labelled                                                                                                                  | Single view                                                               | Defines REQ-019 semantics (STEP-015 §5 gap)                                                                                                              | 019           |
 
 ---
+
+### E.1 Decision status and earliest milestone needing the answer
+
+Maintained per PROJECT-CONTROL-002 §10. An open decision blocks only
+the sub-items that name it, never unrelated milestones.
+
+| PD    | Status       | Earliest milestone | PD       | Status | Earliest milestone |
+| ----- | ------------ | ------------------ | -------- | ------ | ------------------ |
+| PD-01 | **APPROVED** | M1                 | PD-15    | open   | M2                 |
+| PD-02 | **APPROVED** | M1                 | PD-16    | open   | M3                 |
+| PD-03 | open         | M6                 | PD-17    | open   | M3                 |
+| PD-04 | open         | M6                 | PD-18    | open   | M3                 |
+| PD-05 | open         | M6                 | PD-19    | open   | M4                 |
+| PD-06 | open         | M6                 | PD-20    | open   | M9                 |
+| PD-07 | open         | M6                 | PD-21    | open   | M8                 |
+| PD-08 | open         | M6                 | PD-22    | open   | M11                |
+| PD-09 | open         | M6                 | PD-23a–e | open   | M12                |
+| PD-10 | open         | M6                 | PD-24    | open   | M10                |
+| PD-11 | open         | M5                 | PD-25    | open   | M13                |
+| PD-12 | open         | M5                 | PD-26    | open   | M7                 |
+| PD-13 | open         | M5                 | PD-27    | open   | M14                |
+| PD-14 | open         | M2                 | PD-28    | open   | M8                 |
+
+Milestone-local decisions (M0): M0-D1 REQ-027 scope, M0-D2 `.kilo/`
+removal, M0-D3 CI fix + drill log, M0-D4 historical E2E scripts — see
+`implementation/M0-FOUNDATION-CLEANUP-PLAN.md` §4.
 
 ## F. Migration and financial-integrity risk assessment
 
