@@ -7,17 +7,13 @@
 		CardTitle
 	} from '$lib/components/ui/card';
 	import { apiFetch } from '$lib/api-client';
+	import BackendHealth from '$lib/components/backend-health.svelte';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { formatTry } from '$lib/money';
 	import { live } from '$lib/realtime/realtime.svelte';
 	import { t } from '$lib/i18n/i18n.svelte';
 	import type { ReportsOverview } from '@kooperatif/contracts';
 
-	interface Health {
-		status: string;
-	}
-
-	let healthError = $state(false);
 	let overview = $state<ReportsOverview | null>(null);
 	let overviewFailed = $state(false);
 	let overviewLoading = $state(false);
@@ -41,7 +37,6 @@
 	}
 
 	$effect(() => {
-		apiFetch<Health>('/api/health').catch(() => (healthError = true));
 		void loadOverview();
 		const unsubscribe = live.onInvalidate(() => void loadOverview());
 		return unsubscribe;
@@ -55,10 +50,6 @@
 			{auth.user?.displayName} · {t('app.subtitle')}
 		</p>
 	</div>
-
-	{#if healthError}
-		<p class="text-sm text-destructive">{t('health.api.unreachable')}</p>
-	{/if}
 
 	{#if can('reports.read')}
 		{#if overviewFailed}
@@ -115,4 +106,6 @@
 			<p class="text-xs text-muted-foreground">{t('reports.ov.noteRestricted')}</p>
 		{/if}
 	{/if}
+
+	<BackendHealth />
 </section>

@@ -154,7 +154,7 @@
 			</div>
 			<div>
 				<Label for="inc-amount">{t('incomeExpense.amount')}</Label>
-				<Input id="inc-amount" bind:value={amount} placeholder="500,00" />
+				<Input id="inc-amount" inputmode="decimal" bind:value={amount} placeholder="500,00" />
 				{#if amount.trim() && parsedAmount === null}
 					<p class="mt-1 text-xs text-destructive">{t('incomeExpense.errors.invalidAmount')}</p>
 				{/if}
