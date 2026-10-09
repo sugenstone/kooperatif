@@ -1004,6 +1004,16 @@ pub async fn reverse_payment(
         if balance - amount < Decimal::ZERO {
             return Err(PaymentCommandError::AccountEffectBlocked);
         }
+        // PILOT-FIX-001 hard reservation: removing the Payment inflow
+        // must not leave the account's Social Aid reservation
+        // physically unbacked — restricted money is not freed by a
+        // reversal label.
+        let reserved = account_repo::locked_reserved_social_aid(&mut tx, account_id)
+            .await
+            .map_err(account_err)?;
+        if balance - amount < reserved {
+            return Err(PaymentCommandError::AccountEffectBlocked);
+        }
         account_repo::reverse_movements_of_source(
             &mut tx,
             MovementSource::Payment,

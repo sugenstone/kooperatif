@@ -39,11 +39,23 @@ use kooperatif_server::http::{cors_layer, router, AppState};
 const ORIGIN: &str = "http://localhost:5173";
 const TEST_PASSWORD: &str = "domain-test-parola-1";
 
+/// Required DB-gated test gate (PILOT-FIX-001 / F5): a missing
+/// KOOPERATIF_TEST_DATABASE_URL is an explicit FAILURE, never a
+/// silent skip — CI and release gates must prove these tests ran.
+/// Unit-only execution stays unaffected: this function is only
+/// reached by database-gated setup paths.
 fn test_database_url() -> Option<String> {
-    std::env::var("KOOPERATIF_TEST_DATABASE_URL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    let value = std::env::var("KOOPERATIF_TEST_DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "KOOPERATIF_TEST_DATABASE_URL is not set — required DB-gated              integration tests cannot silently pass; point it at a              disposable PostgreSQL database"
+        )
+    });
+    let trimmed = value.trim().to_string();
+    assert!(
+        !trimmed.is_empty(),
+        "KOOPERATIF_TEST_DATABASE_URL is empty — required DB-gated tests need a database"
+    );
+    Some(trimmed)
 }
 
 struct TestApp {
@@ -72,6 +84,8 @@ async fn setup() -> Option<TestApp> {
         .unwrap();
     let base_url = url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap();
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
+    // F11: bound per-test database accumulation (24 h cutoff, no connections).
+    let _ = app_db::drop_stale_test_databases(&admin).await;
     sqlx::query(&format!("CREATE DATABASE {database_name}"))
         .execute(&admin)
         .await
@@ -757,13 +771,11 @@ async fn disbursement_can_never_exceed_physical_account_balance() {
     let account = api_create_account(&test, &cookie, &csrf, "Dar Kasa").await;
     let fund = api_create_fund(&test, &cookie, &csrf, "Fon", "f-1").await;
     let fund_id = fund["id"].as_str().unwrap();
-    // Restricted availability 20,000 in the account; then ordinary
-    // cooperative outflow leaves only 5,000 physically.
+    // Restricted availability 20,000 in the account plus 5,000 of
+    // unrestricted cooperative cash.
     let (status, _) = api_donate(&test, &cookie, &csrf, fund_id, account, "20000.00", "d-1").await;
     assert_eq!(status, StatusCode::CREATED);
     api_fund_account(&test, &cookie, &csrf, account, "5000.00", "income-1").await;
-    // Spend 20,000 of cooperative cash via an operational Expense so
-    // physical balance drops to 5,000 while restricted stays 20,000.
     let (status, categories) = send(
         &test.app,
         req(
@@ -785,6 +797,9 @@ async fn disbursement_can_never_exceed_physical_account_balance() {
         .as_str()
         .unwrap()
         .to_string();
+    // PILOT-FIX-001 hard reservation: an operational expense may only
+    // consume the UNRESTRICTED 5,000 — the restricted 20,000 can never
+    // be drained by an ordinary outflow.
     let (status, detail) = send(
         &test.app,
         req(
@@ -802,13 +817,37 @@ async fn disbursement_can_never_exceed_physical_account_balance() {
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{detail}");
+    let (status, detail) = send(
+        &test.app,
+        req(
+            "POST",
+            "/api/expenses",
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "financialAccountId": account.to_string(),
+                "categoryId": category,
+                "amount": "5000.00",
+                "description": "ordinary expense",
+                "idempotencyKey": "exp-2",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{detail}");
+    assert_eq!(api_balance(&test, &cookie, account).await, "20000.00");
+
+    // The account now holds ONLY restricted cash (physical 20,000 =
+    // reserved 20,000). An authorized disbursement consumes both
+    // dimensions atomically; a disbursement beyond the physically
+    // backed restricted remainder is still rejected.
+    let (status, detail) =
+        api_disburse(&test, &cookie, &csrf, fund_id, account, "15000.00", "b-1").await;
     assert_eq!(status, StatusCode::CREATED, "{detail}");
     assert_eq!(api_balance(&test, &cookie, account).await, "5000.00");
-
-    // Fund restricted 20,000 but account only holds 5,000 -> aid of
-    // 10,000 is REJECTED on the physical dimension.
     let (status, detail) =
-        api_disburse(&test, &cookie, &csrf, fund_id, account, "10000.00", "b-1").await;
+        api_disburse(&test, &cookie, &csrf, fund_id, account, "10000.00", "b-2").await;
     assert_eq!(status, StatusCode::CONFLICT, "{detail}");
     assert_eq!(api_balance(&test, &cookie, account).await, "5000.00");
 }

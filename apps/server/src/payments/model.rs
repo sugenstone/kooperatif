@@ -171,7 +171,10 @@ pub struct PaymentFingerprint<'a> {
     pub payer_last_name: Option<&'a str>,
     pub amount: Decimal,
     pub method: PaymentMethod,
-    pub received_at: OffsetDateTime,
+    /// CLIENT-EXPRESSED timestamp only — `None` when the request omitted
+    /// `receivedAt` (PILOT-FIX-001 / F4: server defaults must not enter
+    /// the fingerprint or retries collide as false 409s).
+    pub received_at: Option<OffsetDateTime>,
     pub note: Option<&'a str>,
     /// STEP-008: the destination Financial Account is part of the
     /// fingerprint — replaying the same key with a different account
@@ -295,7 +298,7 @@ mod tests {
             payer_last_name: Some("Yılmaz"),
             amount: Decimal::new(1000, 2),
             method: PaymentMethod::Cash,
-            received_at: now,
+            received_at: Some(now),
             note: None,
             destination_account_id: Uuid::from_u128(9),
             allocations: &[(a, Decimal::new(500, 2)), (b, Decimal::new(500, 2))],

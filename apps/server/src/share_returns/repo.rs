@@ -324,6 +324,10 @@ pub enum ShareReturnCommandError {
     /// The settlement account is not `active` or cannot fund it.
     InactiveAccount,
     InsufficientFunds,
+    /// Settlement would consume cash reserved for Social Aid funds
+    /// (PILOT-FIX-001 hard reservation): within the physical balance
+    /// but beyond its unrestricted portion.
+    InsufficientUnrestrictedFunds,
     IdempotencyConflict,
     AccountInvariant(account_repo::AccountCommandError),
     Database(sqlx::Error),
@@ -337,6 +341,9 @@ fn account_to_return_error(error: account_repo::AccountCommandError) -> ShareRet
         }
         account_repo::AccountCommandError::InsufficientFunds => {
             ShareReturnCommandError::InsufficientFunds
+        }
+        account_repo::AccountCommandError::InsufficientUnrestrictedFunds => {
+            ShareReturnCommandError::InsufficientUnrestrictedFunds
         }
         account_repo::AccountCommandError::IdempotencyConflict => {
             ShareReturnCommandError::IdempotencyConflict
@@ -1080,11 +1087,20 @@ pub async fn post_settlement(
     }
 
     // 5. Funds check under the account lock (no negative balances).
+    //    PILOT-FIX-001 hard reservation: a settlement is an ordinary
+    //    outflow — it may only consume the UNRESTRICTED portion of
+    //    the physical balance, never Social Aid reservations.
     let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
         .await
         .map_err(account_to_return_error)?;
     if command.amount > balance {
         return Err(ShareReturnCommandError::InsufficientFunds);
+    }
+    let reserved = account_repo::locked_reserved_social_aid(&mut tx, command.financial_account_id)
+        .await
+        .map_err(account_to_return_error)?;
+    if command.amount > balance - reserved {
+        return Err(ShareReturnCommandError::InsufficientUnrestrictedFunds);
     }
 
     // 6. The authoritative movement first — settlement id pre-generated

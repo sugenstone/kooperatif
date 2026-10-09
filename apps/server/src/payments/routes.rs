@@ -467,6 +467,10 @@ struct ValidatedPayment {
     amount: Decimal,
     method: payment_model::PaymentMethod,
     received_at: OffsetDateTime,
+    /// `Some` only when the client explicitly supplied `receivedAt` —
+    /// the idempotency fingerprint hashes INTENT, not the
+    /// server-generated default (PILOT-FIX-001 / F4).
+    received_at_intent: Option<OffsetDateTime>,
     note: Option<String>,
     destination_account_id: Uuid,
     idempotency_key: String,
@@ -507,6 +511,7 @@ fn validated_payment(
     };
     payment_model::validate_received_at(received_at, now)
         .map_err(|_| ApiError::ValidationFailed)?;
+    let received_at_intent = payload.received_at.is_some().then_some(received_at);
     let note = payment_model::validate_note(payload.note.as_deref())
         .map_err(|_| ApiError::ValidationFailed)?;
     let idempotency_key = payment_model::validate_idempotency_key(&payload.idempotency_key)
@@ -534,6 +539,7 @@ fn validated_payment(
         amount,
         method,
         received_at,
+        received_at_intent,
         note,
         destination_account_id: payload.destination_account_id,
         idempotency_key,
@@ -614,7 +620,7 @@ pub async fn create_payment(
         payer_last_name: validated.payer_last_name.as_deref(),
         amount: validated.amount,
         method: validated.method,
-        received_at: validated.received_at,
+        received_at: validated.received_at_intent,
         note: validated.note.as_deref(),
         destination_account_id: validated.destination_account_id,
         allocations: &validated

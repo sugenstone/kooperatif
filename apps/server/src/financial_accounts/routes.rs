@@ -104,6 +104,9 @@ fn command_error(error: AccountCommandError) -> ApiError {
         AccountCommandError::InsufficientFunds
         | AccountCommandError::IdempotencyConflict
         | AccountCommandError::NotPosted => ApiError::Conflict,
+        AccountCommandError::InsufficientUnrestrictedFunds => {
+            ApiError::InsufficientUnrestrictedFunds
+        }
         AccountCommandError::StaleState => ApiError::StaleState,
         AccountCommandError::Database(error) => {
             tracing::error!(error = %error, "financial account command failed");
@@ -662,6 +665,9 @@ pub async fn post_transfer(
     };
     account_model::validate_occurred_at(occurred_at, now)
         .map_err(|_| ApiError::ValidationFailed)?;
+    // Idempotency covers CLIENT INTENT: an omitted occurredAt must not
+    // enter the fingerprint as the server-generated default (F4).
+    let occurred_at_intent = body.occurred_at.is_some().then_some(occurred_at);
     let note = account_model::validate_note(body.note.as_deref())
         .map_err(|_| ApiError::ValidationFailed)?;
     let idempotency_key = account_model::validate_idempotency_key(&body.idempotency_key)
@@ -673,7 +679,7 @@ pub async fn post_transfer(
         source_account_id: body.source_account_id,
         destination_account_id: body.destination_account_id,
         amount,
-        occurred_at,
+        occurred_at: occurred_at_intent,
         note: note.clone(),
     });
 

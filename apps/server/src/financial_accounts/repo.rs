@@ -314,6 +314,10 @@ pub enum AccountCommandError {
     /// Effect would take the account below zero — negative balances
     /// are forbidden by the approved operator decision.
     InsufficientFunds,
+    /// Effect would consume cash reserved for Social Aid funds
+    /// (PILOT-FIX-001 hard reservation): the operation stays within
+    /// the physical balance but exceeds the UNRESTRICTED portion of it.
+    InsufficientUnrestrictedFunds,
     /// Idempotency key reused with a different payload.
     IdempotencyConflict,
     /// Optimistic-concurrency precondition failed (updated_at moved).
@@ -456,6 +460,50 @@ pub async fn locked_balance(
     .map_err(AccountCommandError::Database)
 }
 
+/// Derived Social Aid reservation attributed to ONE physical account
+/// across ALL funds (PILOT-FIX-001 hard reservation, docs/11):
+/// `sum(posted donations) - sum(posted disbursements)` bound to this
+/// account. The value is derived from the authoritative Social Aid
+/// ledger rows — never a stored/cached number — and the Social Aid
+/// lifecycle guarantees each (fund, account) pair stays >= 0.
+///
+/// Call ONLY while holding the account row lock: every writer of the
+/// underlying rows (`social_aid` commands) also holds that same lock
+/// (canonical prefix fund -> account), so a caller holding the account
+/// lock is serialized against every concurrent reservation mutation.
+pub async fn locked_reserved_social_aid(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    account_id: Uuid,
+) -> Result<Decimal, AccountCommandError> {
+    sqlx::query_scalar::<_, Option<Decimal>>(
+        "SELECT \
+            COALESCE((SELECT sum(amount) FROM social_aid_donations \
+                      WHERE financial_account_id = $1 AND status = 'posted'), 0) \
+          - COALESCE((SELECT sum(amount) FROM social_aid_disbursements \
+                      WHERE financial_account_id = $1 AND status = 'posted'), 0)",
+    )
+    .bind(account_id)
+    .fetch_one(tx.as_mut())
+    .await
+    .map(|v| v.unwrap_or_default())
+    .map_err(AccountCommandError::Database)
+}
+
+/// Ordinary spendable balance of an account under the row lock:
+/// `physical_balance - reserved_social_aid`. Every ORDINARY outflow
+/// (transfer-out, expense, settlement, investment funding) and every
+/// inflow-removing reversal must satisfy `amount <= spendable` /
+/// `post_state >= reserved` — restricted money is not cooperative
+/// cash (PILOT-FIX-001 user-approved hard reservation).
+pub async fn locked_spendable_balance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    account_id: Uuid,
+) -> Result<Decimal, AccountCommandError> {
+    let balance = locked_balance(tx, account_id).await?;
+    let reserved = locked_reserved_social_aid(tx, account_id).await?;
+    Ok(balance - reserved)
+}
+
 /// Payload of a new account movement — kept as a struct so every leg
 /// carries the same fields (payment posting and both transfer legs).
 pub struct NewMovement {
@@ -596,9 +644,16 @@ pub async fn post_transfer(
     }
 
     // 3. Negative balances are forbidden: recompute under the locks.
+    //    PILOT-FIX-001 hard reservation: an ordinary transfer may only
+    //    spend the UNRESTRICTED portion — Social Aid reservations are
+    //    not transferable cooperative cash.
     let source_balance = locked_balance(&mut tx, command.source_account_id).await?;
     if command.amount > source_balance {
         return Err(AccountCommandError::InsufficientFunds);
+    }
+    let source_reserved = locked_reserved_social_aid(&mut tx, command.source_account_id).await?;
+    if command.amount > source_balance - source_reserved {
+        return Err(AccountCommandError::InsufficientUnrestrictedFunds);
     }
 
     // 4. Transfer + the two paired legs — one transaction, or nothing.
@@ -721,8 +776,16 @@ pub async fn reverse_transfer(
     let mut ids = [source_id, destination_id];
     ids.sort_unstable();
     lock_accounts(&mut tx, &ids).await?;
-    if locked_balance(&mut tx, destination_id).await? - amount < Decimal::ZERO {
+    let destination_balance = locked_balance(&mut tx, destination_id).await?;
+    if destination_balance - amount < Decimal::ZERO {
         return Err(AccountCommandError::InsufficientFunds);
+    }
+    // Reversal removes the destination inflow: the post-reversal
+    // physical balance must still cover the Social Aid reservation
+    // held in that account (PILOT-FIX-001).
+    let destination_reserved = locked_reserved_social_aid(&mut tx, destination_id).await?;
+    if destination_balance - amount < destination_reserved {
+        return Err(AccountCommandError::InsufficientUnrestrictedFunds);
     }
 
     reverse_movements_of_source(

@@ -94,6 +94,7 @@ fn command_error(error: InvestmentCommandError) -> ApiError {
         E::StaleState => ApiError::StaleState,
         E::InvalidState | E::InactiveAccount => ApiError::ValidationFailed,
         E::HasFinancialEvents | E::InsufficientFunds | E::IdempotencyConflict => ApiError::Conflict,
+        E::InsufficientUnrestrictedFunds => ApiError::InsufficientUnrestrictedFunds,
         E::AccountInvariant(inner) => {
             tracing::error!(error = ?inner, "unexpected account-layer error");
             ApiError::Internal

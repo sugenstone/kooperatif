@@ -13,6 +13,7 @@ export function apiErrorKey(error: unknown): MessageKey {
 		permission_denied: 'errors.permission_denied',
 		not_found: 'errors.not_found',
 		conflict: 'errors.conflict',
+		insufficient_unrestricted_funds: 'errors.insufficient_unrestricted_funds',
 		lockout_prevented: 'errors.lockout_prevented',
 		validation_failed: 'errors.validation_failed',
 		csrf_failed: 'auth.login.error.csrf_failed',

@@ -44,6 +44,7 @@ export type ApiErrorCode =
 	| 'permission_denied'
 	| 'conflict'
 	| 'lockout_prevented'
+	| 'insufficient_unrestricted_funds'
 	| 'stale_state';
 
 export interface ApiErrorBody {

@@ -107,6 +107,7 @@ fn command_error(error: IncomeExpenseCommandError) -> ApiError {
         CategoryInvalid | InactiveAccount => ApiError::ValidationFailed,
         // State-dependent rejections (docs/21 conflict semantics).
         InsufficientFunds | IdempotencyConflict | DuplicateName => ApiError::Conflict,
+        InsufficientUnrestrictedFunds => ApiError::InsufficientUnrestrictedFunds,
         StaleState => ApiError::StaleState,
         AccountInvariant(error) => {
             tracing::error!(error = ?error, "unexpected account-layer error in entry command");
@@ -619,6 +620,10 @@ async fn post_entry_of(
         None => now,
     };
     entry_model::validate_occurred_at(occurred_at, now).map_err(|_| ApiError::ValidationFailed)?;
+    // Idempotency covers CLIENT INTENT: an omitted occurredAt must not
+    // enter the fingerprint as the server-generated default, or a
+    // retry-after-timeout would collide as a false 409 (F4).
+    let occurred_at_intent = body.occurred_at.is_some().then_some(occurred_at);
     let description = entry_model::validate_entry_description(&body.description)
         .map_err(|_| ApiError::ValidationFailed)?;
     let counterparty = entry_model::validate_counterparty(body.counterparty.as_deref())
@@ -631,7 +636,7 @@ async fn post_entry_of(
         financial_account_id: body.financial_account_id,
         category_id: body.category_id,
         amount,
-        occurred_at,
+        occurred_at: occurred_at_intent,
         description: description.clone(),
         counterparty: counterparty.clone(),
         reference_no: reference_no.clone(),

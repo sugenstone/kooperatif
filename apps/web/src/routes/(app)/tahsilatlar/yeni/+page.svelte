@@ -626,7 +626,12 @@
 		<CardContent class="grid gap-4 md:grid-cols-2">
 			<div>
 				<Label for="pay-amount">{t('payments.new.paymentAmount')}</Label>
-				<Input id="pay-amount" inputmode="decimal" bind:value={paymentAmount} placeholder="30.000,00" />
+				<Input
+					id="pay-amount"
+					inputmode="decimal"
+					bind:value={paymentAmount}
+					placeholder="30.000,00"
+				/>
 			</div>
 			<div>
 				<Label for="pay-method">{t('payments.method')}</Label>

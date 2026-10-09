@@ -296,6 +296,10 @@ pub enum IncomeExpenseCommandError {
     /// Effect would take the account below zero — negative balances
     /// are forbidden by the STEP-008 operator decision.
     InsufficientFunds,
+    /// Effect would consume cash reserved for Social Aid funds
+    /// (PILOT-FIX-001 hard reservation): within the physical balance
+    /// but beyond its unrestricted portion.
+    InsufficientUnrestrictedFunds,
     /// Idempotency key reused with a different payload.
     IdempotencyConflict,
     /// Optimistic-concurrency precondition failed (updated_at moved).
@@ -495,12 +499,22 @@ pub async fn post_entry(
 
     // 4. Negative balances are forbidden: an Expense must be fundable
     //    under the account lock (concurrent postings serialize here).
+    //    PILOT-FIX-001 hard reservation: only the UNRESTRICTED portion
+    //    of the physical balance is spendable — cash reserved for
+    //    Social Aid funds can never fund an operational expense.
     if kind == EntryKind::Expense {
         let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
             .await
             .map_err(account_to_entry_error)?;
         if command.amount > balance {
             return Err(IncomeExpenseCommandError::InsufficientFunds);
+        }
+        let reserved =
+            account_repo::locked_reserved_social_aid(&mut tx, command.financial_account_id)
+                .await
+                .map_err(account_to_entry_error)?;
+        if command.amount > balance - reserved {
+            return Err(IncomeExpenseCommandError::InsufficientUnrestrictedFunds);
         }
     }
 
@@ -629,13 +643,21 @@ pub async fn reverse_entry(
         .map_err(account_to_entry_error)?;
 
     // Removing an Income inflow decreases the balance — refuse if the
-    // money is no longer there (docs/19 reversal safety).
+    // money is no longer there (docs/19 reversal safety). The
+    // post-reversal balance must also still cover the Social Aid
+    // reservation held in the account (PILOT-FIX-001).
     if kind == EntryKind::Income {
         let balance = account_repo::locked_balance(&mut tx, account_id)
             .await
             .map_err(account_to_entry_error)?;
         if balance - amount < Decimal::ZERO {
             return Err(IncomeExpenseCommandError::InsufficientFunds);
+        }
+        let reserved = account_repo::locked_reserved_social_aid(&mut tx, account_id)
+            .await
+            .map_err(account_to_entry_error)?;
+        if balance - amount < reserved {
+            return Err(IncomeExpenseCommandError::InsufficientUnrestrictedFunds);
         }
     }
 
@@ -679,6 +701,9 @@ fn account_to_entry_error(error: account_repo::AccountCommandError) -> IncomeExp
         }
         account_repo::AccountCommandError::InsufficientFunds => {
             IncomeExpenseCommandError::InsufficientFunds
+        }
+        account_repo::AccountCommandError::InsufficientUnrestrictedFunds => {
+            IncomeExpenseCommandError::InsufficientUnrestrictedFunds
         }
         account_repo::AccountCommandError::IdempotencyConflict => {
             IncomeExpenseCommandError::IdempotencyConflict

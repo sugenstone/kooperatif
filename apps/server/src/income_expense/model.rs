@@ -247,7 +247,12 @@ pub struct EntryFingerprint {
     pub financial_account_id: uuid::Uuid,
     pub category_id: uuid::Uuid,
     pub amount: Decimal,
-    pub occurred_at: OffsetDateTime,
+    /// The CLIENT-EXPRESSED timestamp only: `None` when the request
+    /// omitted `occurredAt` and the server defaulted it. A retried
+    /// request that again omits the field must produce the identical
+    /// fingerprint — hashing a server-generated `now` would make every
+    /// retry a false 409 (PILOT-FIX-001 / F4).
+    pub occurred_at: Option<OffsetDateTime>,
     pub description: String,
     pub counterparty: Option<String>,
     pub reference_no: Option<String>,
@@ -364,7 +369,7 @@ mod tests {
             financial_account_id: Uuid::from_u128(1),
             category_id: Uuid::from_u128(2),
             amount: Decimal::new(100, 2),
-            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            occurred_at: Some(OffsetDateTime::UNIX_EPOCH),
             description: "x".to_string(),
             counterparty: None,
             reference_no: None,

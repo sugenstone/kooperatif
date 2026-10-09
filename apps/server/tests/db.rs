@@ -19,19 +19,29 @@ use kooperatif_server::config::AuthConfig;
 use kooperatif_server::db;
 use kooperatif_server::http::{cors_layer, router, AppState};
 
+/// Required DB-gated test gate (PILOT-FIX-001 / F5): a missing
+/// KOOPERATIF_TEST_DATABASE_URL is an explicit FAILURE, never a
+/// silent skip — CI and release gates must prove these tests ran.
+/// Unit-only execution stays unaffected: this function is only
+/// reached by database-gated setup paths.
 fn test_database_url() -> Option<String> {
-    std::env::var("KOOPERATIF_TEST_DATABASE_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    let value = std::env::var("KOOPERATIF_TEST_DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "KOOPERATIF_TEST_DATABASE_URL is not set — required DB-gated              integration tests cannot silently pass; point it at a              disposable PostgreSQL database"
+        )
+    });
+    let trimmed = value.trim().to_string();
+    assert!(
+        !trimmed.is_empty(),
+        "KOOPERATIF_TEST_DATABASE_URL is empty — required DB-gated tests need a database"
+    );
+    Some(trimmed)
 }
 
 #[tokio::test]
 async fn migrations_apply_to_a_clean_database_and_readiness_reports_ready() {
-    let Some(url) = test_database_url() else {
-        eprintln!("SKIPPED: KOOPERATIF_TEST_DATABASE_URL is not set");
-        return;
-    };
+    // PILOT-FIX-001 / F5: test_database_url() fails loudly when unset.
+    let url = test_database_url().expect("test database url");
 
     let pool = db::connect(&url).await.expect("database connectivity");
 

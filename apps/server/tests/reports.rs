@@ -59,7 +59,12 @@ impl TestApp {
 }
 
 async fn setup() -> Option<TestApp> {
-    let url = std::env::var("KOOPERATIF_TEST_DATABASE_URL").ok()?;
+    // PILOT-FIX-001 / F5: missing test DB URL is an explicit failure.
+    let url = std::env::var("KOOPERATIF_TEST_DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "KOOPERATIF_TEST_DATABASE_URL is not set — required DB-gated              integration tests cannot silently pass"
+        )
+    });
     let database_name = format!("kooperatif_test_{}", Uuid::new_v4().simple());
     let admin_url = url
         .rsplit_once('/')
@@ -67,6 +72,8 @@ async fn setup() -> Option<TestApp> {
         .unwrap();
     let base_url = url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap();
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
+    // F11: bound per-test database accumulation (24 h cutoff, no connections).
+    let _ = app_db::drop_stale_test_databases(&admin).await;
     sqlx::query(&format!("CREATE DATABASE {database_name}"))
         .execute(&admin)
         .await

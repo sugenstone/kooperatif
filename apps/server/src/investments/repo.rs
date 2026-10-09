@@ -34,6 +34,10 @@ pub enum InvestmentCommandError {
     HasFinancialEvents,
     InactiveAccount,
     InsufficientFunds,
+    /// The operation would consume cash reserved for Social Aid funds
+    /// (PILOT-FIX-001 hard reservation): within the physical balance
+    /// but beyond its unrestricted portion.
+    InsufficientUnrestrictedFunds,
     IdempotencyConflict,
     Database(sqlx::Error),
     AccountInvariant(account_repo::AccountCommandError),
@@ -45,6 +49,7 @@ fn account_to_error(error: account_repo::AccountCommandError) -> InvestmentComma
         A::NotFound => InvestmentCommandError::NotFound,
         A::InactiveAccount => InvestmentCommandError::InactiveAccount,
         A::InsufficientFunds => InvestmentCommandError::InsufficientFunds,
+        A::InsufficientUnrestrictedFunds => InvestmentCommandError::InsufficientUnrestrictedFunds,
         A::IdempotencyConflict => InvestmentCommandError::IdempotencyConflict,
         A::StaleState => InvestmentCommandError::StaleState,
         A::Database(error) => InvestmentCommandError::Database(error),
@@ -639,11 +644,20 @@ pub async fn post_funding(
     }
 
     // 4. No-negative-balance under the account row lock.
+    //    PILOT-FIX-001 hard reservation: funding is an ordinary
+    //    outflow — only the UNRESTRICTED portion of the physical
+    //    balance may be spent on an asset.
     let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
         .await
         .map_err(account_to_error)?;
     if command.amount > balance {
         return Err(InvestmentCommandError::InsufficientFunds);
+    }
+    let reserved = account_repo::locked_reserved_social_aid(&mut tx, command.financial_account_id)
+        .await
+        .map_err(account_to_error)?;
+    if command.amount > balance - reserved {
+        return Err(InvestmentCommandError::InsufficientUnrestrictedFunds);
     }
 
     // 5. Movement first, then the bound domain row.
@@ -1149,6 +1163,14 @@ pub async fn reverse_income(
         .map_err(account_to_error)?;
     if balance - amount < Decimal::ZERO {
         return Err(InvestmentCommandError::InsufficientFunds);
+    }
+    // Reversal removes an inflow: the post-reversal physical balance
+    // must still cover the Social Aid reservation (PILOT-FIX-001).
+    let reserved = account_repo::locked_reserved_social_aid(&mut tx, account_id)
+        .await
+        .map_err(account_to_error)?;
+    if balance - amount < reserved {
+        return Err(InvestmentCommandError::InsufficientUnrestrictedFunds);
     }
 
     account_repo::reverse_movements_of_source(

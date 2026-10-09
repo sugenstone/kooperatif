@@ -309,7 +309,10 @@ pub struct TransferFingerprint {
     pub source_account_id: uuid::Uuid,
     pub destination_account_id: uuid::Uuid,
     pub amount: Decimal,
-    pub occurred_at: OffsetDateTime,
+    /// CLIENT-EXPRESSED timestamp only — `None` when the request omitted
+    /// `occurredAt` (PILOT-FIX-001 / F4: server defaults must not enter
+    /// the fingerprint or retries collide as false 409s).
+    pub occurred_at: Option<OffsetDateTime>,
     pub note: Option<String>,
 }
 
@@ -424,7 +427,7 @@ mod tests {
             source_account_id: a,
             destination_account_id: b,
             amount: Decimal::new(1000, 2),
-            occurred_at: now,
+            occurred_at: Some(now),
             note: None,
         };
         assert_eq!(transfer_fingerprint(&base), transfer_fingerprint(&base));
@@ -434,7 +437,7 @@ mod tests {
                 source_account_id: a,
                 destination_account_id: b,
                 amount: Decimal::new(1000, 2),
-                occurred_at: now,
+                occurred_at: Some(now),
                 note: None,
             }
         };

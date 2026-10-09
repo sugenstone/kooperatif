@@ -109,6 +109,7 @@ fn command_error(error: return_repo::ShareReturnCommandError) -> ApiError {
         | E::InactiveAccount
         | E::InsufficientFunds
         | E::IdempotencyConflict => ApiError::Conflict,
+        E::InsufficientUnrestrictedFunds => ApiError::InsufficientUnrestrictedFunds,
         E::AccountInvariant(inner) => {
             tracing::error!(error = ?inner, "unexpected account-layer error");
             ApiError::Internal
@@ -908,10 +909,15 @@ pub async fn post_settlement(
     if settled_at > now {
         return Err(ApiError::ValidationFailed);
     }
+    let settled_at_intent = body.settled_at.is_some().then_some(settled_at);
     let idempotency_key = return_model::validate_idempotency_key(&body.idempotency_key)
         .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint =
-        return_model::settlement_fingerprint(id, body.financial_account_id, amount, settled_at);
+    let fingerprint = return_model::settlement_fingerprint(
+        id,
+        body.financial_account_id,
+        amount,
+        settled_at_intent,
+    );
 
     let outcome = return_repo::post_settlement(
         pool,

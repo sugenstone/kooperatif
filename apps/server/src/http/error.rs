@@ -39,6 +39,12 @@ pub enum ApiError {
     /// 409 — mutation rejected by the last-administration-path guard
     /// (STEP-003 §28).
     LockoutPrevented,
+    /// 409 — ordinary outflow rejected: the account holds enough
+    /// physical cash but the operation would consume the portion
+    /// reserved for Social Aid funds (PILOT-FIX-001 hard
+    /// reservation). Distinct code so the UI can explain WHY the
+    /// spendable balance is lower than the physical balance.
+    InsufficientUnrestrictedFunds,
     /// 409 — optimistic-concurrency precondition failed: the record
     /// changed after the caller loaded it (docs/21 stale-state).
     StaleState,
@@ -59,6 +65,7 @@ impl ApiError {
             Self::PermissionDenied => "permission_denied",
             Self::Conflict => "conflict",
             Self::LockoutPrevented => "lockout_prevented",
+            Self::InsufficientUnrestrictedFunds => "insufficient_unrestricted_funds",
             Self::StaleState => "stale_state",
         }
     }
@@ -74,7 +81,10 @@ impl ApiError {
             Self::CsrfFailed | Self::PermissionDenied => StatusCode::FORBIDDEN,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::DependencyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Conflict | Self::LockoutPrevented | Self::StaleState => StatusCode::CONFLICT,
+            Self::Conflict
+            | Self::LockoutPrevented
+            | Self::InsufficientUnrestrictedFunds
+            | Self::StaleState => StatusCode::CONFLICT,
         }
     }
 }

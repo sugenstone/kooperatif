@@ -210,11 +210,14 @@ pub fn initiate_fingerprint(
 }
 
 /// Canonical JSON fingerprint of a settle command (ADR-006).
+/// `settled_at` is the CLIENT-EXPRESSED timestamp only — `None` when
+/// the request omitted it and the server defaulted (PILOT-FIX-001 /
+/// F4: retries of a defaulted request must replay, not false-409).
 pub fn settlement_fingerprint(
     entitlement_id: uuid::Uuid,
     financial_account_id: uuid::Uuid,
     amount: Decimal,
-    settled_at: OffsetDateTime,
+    settled_at: Option<OffsetDateTime>,
 ) -> String {
     serde_json::json!({
         "entitlementId": entitlement_id,
@@ -288,13 +291,13 @@ mod tests {
             Uuid::from_u128(1),
             Uuid::from_u128(2),
             Decimal::new(100, 2),
-            OffsetDateTime::UNIX_EPOCH,
+            Some(OffsetDateTime::UNIX_EPOCH),
         );
         let s2 = settlement_fingerprint(
             Uuid::from_u128(1),
             Uuid::from_u128(2),
             Decimal::new(200, 2),
-            OffsetDateTime::UNIX_EPOCH,
+            Some(OffsetDateTime::UNIX_EPOCH),
         );
         assert_ne!(s1, s2);
     }

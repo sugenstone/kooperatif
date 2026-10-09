@@ -23,11 +23,23 @@ use kooperatif_server::http::{cors_layer, router, AppState};
 const ORIGIN: &str = "http://localhost:5173";
 const TEST_PASSWORD: &str = "domain-test-parola-1";
 
+/// Required DB-gated test gate (PILOT-FIX-001 / F5): a missing
+/// KOOPERATIF_TEST_DATABASE_URL is an explicit FAILURE, never a
+/// silent skip — CI and release gates must prove these tests ran.
+/// Unit-only execution stays unaffected: this function is only
+/// reached by database-gated setup paths.
 fn test_database_url() -> Option<String> {
-    std::env::var("KOOPERATIF_TEST_DATABASE_URL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    let value = std::env::var("KOOPERATIF_TEST_DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "KOOPERATIF_TEST_DATABASE_URL is not set — required DB-gated              integration tests cannot silently pass; point it at a              disposable PostgreSQL database"
+        )
+    });
+    let trimmed = value.trim().to_string();
+    assert!(
+        !trimmed.is_empty(),
+        "KOOPERATIF_TEST_DATABASE_URL is empty — required DB-gated tests need a database"
+    );
+    Some(trimmed)
 }
 
 struct TestApp {
@@ -59,6 +71,8 @@ async fn setup() -> Option<TestApp> {
         .unwrap();
     let base_url = url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap();
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
+    // F11: bound per-test database accumulation (24 h cutoff, no connections).
+    let _ = app_db::drop_stale_test_databases(&admin).await;
     sqlx::query(&format!("CREATE DATABASE {database_name}"))
         .execute(&admin)
         .await
