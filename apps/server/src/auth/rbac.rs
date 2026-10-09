@@ -136,6 +136,8 @@ pub fn rbac_router() -> Router<AppState> {
             get(get_role_permissions).put(set_role_permissions),
         )
         .route("/api/users", get(list_users))
+        .route("/api/users/{id}/disable", post(disable_user))
+        .route("/api/users/{id}/enable", post(enable_user))
         .route(
             "/api/users/{id}/roles",
             get(get_user_roles).put(set_user_roles),
@@ -509,6 +511,141 @@ async fn set_role_status(
     )
     .await;
     tracing::info!(outcome = "role_status_changed", role_id = %role_id, status, actor = %auth.user_id);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn disable_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: CurrentAuth,
+    Path(user_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let pool = guarded_mutation!(
+        &state,
+        &headers,
+        &auth,
+        authz::catalog::USERS_MANAGE,
+        &axum::http::Method::POST
+    );
+    set_user_status(pool, &auth, user_id, "disabled").await
+}
+
+pub async fn enable_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: CurrentAuth,
+    Path(user_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let pool = guarded_mutation!(
+        &state,
+        &headers,
+        &auth,
+        authz::catalog::USERS_MANAGE,
+        &axum::http::Method::POST
+    );
+    set_user_status(pool, &auth, user_id, "active").await
+}
+
+async fn set_user_status(
+    pool: &sqlx::PgPool,
+    auth: &CurrentAuth,
+    user_id: Uuid,
+    status: &str,
+) -> Result<Response, ApiError> {
+    // Guarded transaction: disabling a user can remove the last
+    // administration path (§28/§44) — the count already excludes
+    // non-active users, so the check runs inside the same tx that
+    // performs the status change.
+    let mut tx = authz::begin_guarded_transaction(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "guard tx failed");
+            ApiError::Internal
+        })?;
+
+    let updated = sqlx::query(
+        "UPDATE users SET status = $2, updated_at = now() WHERE id = $1 AND status <> $2",
+    )
+    .bind(user_id)
+    .bind(status)
+    .execute(tx.as_mut())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "user status change failed");
+        ApiError::Internal
+    })?;
+    if updated.rows_affected() == 0 {
+        // Unknown user, or already in the target state (idempotent).
+        tx.rollback().await.map_err(|error| {
+            tracing::error!(error = %error, "rollback failed");
+            ApiError::Internal
+        })?;
+        let exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "user existence check failed");
+                ApiError::Internal
+            })?;
+        if exists.is_none() {
+            return Err(ApiError::NotFound);
+        }
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    if status == "disabled" {
+        // Immediate explicit revocation on top of the validation-time
+        // rejection: active sessions (HTTP + WS) die at once rather
+        // than on next classify.
+        sqlx::query(
+            "UPDATE user_sessions SET revoked_at = now(), revocation_reason = 'user_disabled' \
+             WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(tx.as_mut())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "session revocation failed");
+            ApiError::Internal
+        })?;
+    }
+
+    if status == "disabled"
+        && authz::administration_path_count(&mut tx)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "admin path count failed");
+                ApiError::Internal
+            })?
+            == 0
+    {
+        tx.rollback().await.map_err(|error| {
+            tracing::error!(error = %error, "rollback failed");
+            ApiError::Internal
+        })?;
+        audit_lockout_prevention(pool, auth, "user_disable", user_id).await;
+        return Err(ApiError::LockoutPrevented);
+    }
+
+    tx.commit().await.map_err(|error| {
+        tracing::error!(error = %error, "commit failed");
+        ApiError::Internal
+    })?;
+
+    audit::record(
+        pool,
+        if status == "disabled" {
+            SecurityEventType::UserDisabled
+        } else {
+            SecurityEventType::UserEnabled
+        },
+        Some(auth.user_id),
+        None,
+        serde_json::json!({ "user_id": user_id }),
+    )
+    .await;
+    tracing::info!(outcome = "user_status_changed", user_id = %user_id, status, actor = %auth.user_id);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

@@ -53,6 +53,8 @@ export {
 	roleEnablePath,
 	rolePath,
 	rolePermissionsPath,
+	userDisablePath,
+	userEnablePath,
 	userRolesPath
 } from './rbac';
 export type {

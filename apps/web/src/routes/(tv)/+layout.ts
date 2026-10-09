@@ -15,8 +15,8 @@ export const load = async () => {
 	if (auth.status !== 'authenticated') {
 		redirect(307, '/login');
 	}
-	if (!auth.permissions.includes('reports.read')) {
-		redirect(307, '/');
-	}
-	return {};
+	// Permission-stripped session: do NOT bounce to the app shell — that
+	// silently shows an unrelated UI. Render an in-place denial instead
+	// (+layout.svelte), so the display never pretends to be live.
+	return { denied: !auth.permissions.includes('reports.read') };
 };

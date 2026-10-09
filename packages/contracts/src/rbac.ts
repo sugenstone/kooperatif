@@ -70,6 +70,8 @@ export const roleEnablePath = (id: string): string => `/api/roles/${id}/enable`;
 export const rolePermissionsPath = (id: string): string => `/api/roles/${id}/permissions`;
 export const USERS_PATH = '/api/users';
 export const userRolesPath = (id: string): string => `/api/users/${id}/roles`;
+export const userDisablePath = (id: string): string => `/api/users/${id}/disable`;
+export const userEnablePath = (id: string): string => `/api/users/${id}/enable`;
 
 /** Permission keys of the STEP-003 catalog (typed for `can()` helpers). */
 export const PERMISSION_KEYS = {

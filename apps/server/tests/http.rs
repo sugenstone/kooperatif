@@ -172,3 +172,64 @@ async fn every_response_carries_baseline_security_headers() {
         );
     }
 }
+
+#[tokio::test]
+async fn framework_rejections_never_leak_internal_detail() {
+    // F6 (PILOT-FIX-001): axum's default rejection rendering answers
+    // text/plain bodies echoing serde/parse internals. The boundary
+    // middleware must rewrite every such body to the stable
+    // `{error:{code}}` contract — clients never see implementation
+    // strings.
+    let app = app_without_database();
+
+    // Malformed JSON to a public endpoint: the Json extractor rejects
+    // with a serde detail message before the handler runs.
+    let mut request = Request::post("/api/auth/login")
+        .header("origin", "http://localhost:5173")
+        .header("content-type", "application/json")
+        .body(Body::from("{ \"username\": \"x\", \"password\": }"))
+        .expect("valid request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo::<std::net::SocketAddr>(
+            "127.0.0.1:0".parse().expect("static addr"),
+        ));
+    let response = app.oneshot(request).await.expect("infallible");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("readable body");
+    let body: Value = serde_json::from_slice(&bytes)
+        .expect("sanitized body must be the JSON contract, not text/plain");
+    assert_eq!(body["error"]["code"], "validation_failed");
+    let text = String::from_utf8_lossy(&bytes);
+    for needle in [
+        "serde",
+        "expected value",
+        "Failed to parse",
+        "line ",
+        "column",
+    ] {
+        assert!(
+            !text.contains(needle),
+            "response leaked parser detail {needle:?}: {text}"
+        );
+    }
+
+    // Method-not-allowed: framework rejection → stable not_found.
+    let response = app_without_database()
+        .oneshot(
+            Request::delete("/api/auth/login")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .expect("infallible");
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("readable body");
+    let body: Value =
+        serde_json::from_slice(&bytes).expect("sanitized body must be the JSON contract");
+    assert_eq!(body["error"]["code"], "not_found");
+}

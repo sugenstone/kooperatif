@@ -208,6 +208,15 @@ export const trTR = {
 	'users.detail.noRoles': 'Atanmış rol yok.',
 	'users.loading': 'Yükleniyor…',
 	'users.error': 'Kullanıcılar yüklenemedi.',
+	'users.status': 'Durum',
+	'users.active': 'Aktif',
+	'users.disabled': 'Pasif',
+	'users.disable': 'Devre Dışı Bırak',
+	'users.enable': 'Etkinleştir',
+	'users.confirmDisable':
+		'Bu kullanıcıyı devre dışı bırakmak istediğinize emin misiniz? Kullanıcının tüm oturumları sonlandırılır.',
+	'users.confirmEnable': 'Bu kullanıcıyı yeniden etkinleştirmek istediğinize emin misiniz?',
+	'users.statusSaved': 'Kullanıcı durumu güncellendi.',
 	'nav.periods': 'Dönemler',
 	'periods.title': 'Dönemler',
 	'periods.description':
@@ -523,6 +532,8 @@ export const trTR = {
 	'errors.not_found': 'Kayıt bulunamadı.',
 	'errors.permission_denied': 'Bu işlem için yetkiniz yok.',
 	'errors.conflict': 'Bu isim zaten kullanılıyor.',
+	'errors.insufficient_unrestricted_funds':
+		'Bu işlem için kullanılabilir serbest kasa bakiyesi yetersiz. Kasadaki tutarın bir bölümü sosyal yardım fonlarına ayrılmıştır.',
 	'errors.lockout_prevented':
 		'Bu değişiklik, son yönetim yolunu kaldıracağı için güvenlik nedeniyle reddedildi.',
 	'errors.validation_failed': 'Gönderilen bilgi geçersiz.',
@@ -1343,6 +1354,10 @@ export const trTR = {
 	'tv.fullscreen': 'Tam ekran',
 	'tv.exitFullscreen': 'Tam ekrandan çık',
 	'tv.readonly': 'Salt okunur canlı izleme — işlem yetkisi yoktur.',
+	'tv.denied.title': 'Bu ekranı görüntüleme yetkiniz yok',
+	'tv.denied.body':
+		'Canlı ekran yalnızca rapor görüntüleme yetkisine sahip kullanıcılara açıktır. Yetkiniz değiştiyse yöneticinize başvurun.',
+	'tv.denied.back': 'Ana sayfaya dön',
 	'nav.liveDisplay': 'Canlı Ekran',
 	'nav.home': 'Ana Sayfa',
 	'nav.categories': 'Kategoriler',

@@ -9,7 +9,7 @@ use axum::extract::Request;
 use axum::http::header;
 use axum::http::HeaderValue;
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use health::{health, ready};
@@ -94,6 +94,63 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
+/// F6 (PILOT-FIX-001) — error-body sanitization at the boundary.
+///
+/// Every legitimate handler answers through `ApiError` (the stable
+/// `{error:{code}}` JSON contract) or `Json<Dto>`. The only remaining
+/// path that can hand internal implementation text to a client is the
+/// framework's DEFAULT rejection rendering: axum extractor rejections
+/// (`Json`/`Query`/`Path`) and `http` layer failures respond with
+/// `text/plain` bodies — or no contract body at all (405) — that can
+/// echo serde internals, parse details or other implementation strings
+/// the API contract never promised.
+///
+/// Rule: a non-JSON error body is NEVER a contract response — rewrite
+/// it to the matching `ApiError` code. Handler-produced `ApiError`
+/// bodies (JSON) and `Json<Dto>` payloads pass through untouched;
+/// expected business-rule errors keep their typed codes.
+async fn sanitize_rejection_bodies(request: Request, next: Next) -> Response {
+    use axum::body::to_bytes;
+
+    let response = next.run(request).await;
+    let status = response.status();
+    if status.is_success() {
+        return response;
+    }
+    let is_json_contract = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("application/json"))
+        .unwrap_or(false);
+    if is_json_contract {
+        return response;
+    }
+    // Drain the internal body for diagnostics, then replace it with
+    // the contract shape — the client only ever sees a stable code.
+    // The original headers (e.g. `Allow` on 405) are preserved; only
+    // content-type/length are replaced by the contract JSON.
+    let (mut parts, body) = response.into_parts();
+    let detail = to_bytes(body, 4096).await.unwrap_or_default();
+    tracing::warn!(
+        status = %status,
+        detail = %String::from_utf8_lossy(&detail),
+        "sanitized framework rejection body"
+    );
+    let api_error = match status.as_u16() {
+        404 | 405 => error::ApiError::NotFound,
+        500..=503 => error::ApiError::Internal,
+        _ => error::ApiError::ValidationFailed,
+    };
+    let contract = api_error.into_response().into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        contract.0.headers[header::CONTENT_TYPE].clone(),
+    );
+    Response::from_parts(parts, contract.1)
+}
+
 /// Build the application router with observability middleware.
 pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
     let trace = TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
@@ -129,6 +186,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(crate::reports::routes::reports_router())
         .merge(crate::realtime::routes::realtime_router())
         .fallback(fallback)
+        .layer(middleware::from_fn(sanitize_rejection_bodies))
         .layer(middleware::from_fn(security_headers))
         .layer(trace)
         .layer(cors)

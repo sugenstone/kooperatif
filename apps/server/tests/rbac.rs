@@ -30,11 +30,23 @@ fn sysadmin_role_id() -> Uuid {
     Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("fixed seed uuid")
 }
 
+/// Required DB-gated test gate (PILOT-FIX-001 / F5): a missing
+/// KOOPERATIF_TEST_DATABASE_URL is an explicit FAILURE, never a
+/// silent skip — CI and release gates must prove these tests ran.
+/// Unit-only execution stays unaffected: this function is only
+/// reached by database-gated setup paths.
 fn test_database_url() -> Option<String> {
-    std::env::var("KOOPERATIF_TEST_DATABASE_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    let value = std::env::var("KOOPERATIF_TEST_DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "KOOPERATIF_TEST_DATABASE_URL is not set — required DB-gated              integration tests cannot silently pass; point it at a              disposable PostgreSQL database"
+        )
+    });
+    let trimmed = value.trim().to_string();
+    assert!(
+        !trimmed.is_empty(),
+        "KOOPERATIF_TEST_DATABASE_URL is empty — required DB-gated tests need a database"
+    );
+    Some(trimmed)
 }
 
 struct TestApp {
@@ -93,6 +105,8 @@ async fn setup() -> Option<TestApp> {
     let admin = app_db::connect(&admin_url)
         .await
         .expect("admin connectivity");
+    // F11: bound per-test database accumulation (24 h cutoff, no connections).
+    let _ = app_db::drop_stale_test_databases(&admin).await;
     sqlx::query(&format!("CREATE DATABASE {database_name}"))
         .execute(&admin)
         .await
@@ -1268,4 +1282,157 @@ async fn database_constraints_enforce_rbac_integrity() {
         orphan_permission.is_err(),
         "FK must reject unknown permission"
     );
+}
+
+// ------------------------------------------------------------------
+// §28/§44: user disable/enable lifecycle (PILOT-FIX-001 F9)
+// ------------------------------------------------------------------
+
+#[tokio::test]
+async fn user_disable_enable_lifecycle() {
+    let Some(test) = setup().await else {
+        eprintln!("SKIPPED: KOOPERATIF_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let admin_name = format!("user.admin.{}", Uuid::new_v4().simple());
+    create_user(&test.pool, &admin_name, true).await;
+    let (admin_cookie, admin_csrf, _) = login(&test.app, test.peer(), &admin_name).await;
+
+    // Plain user with an active session.
+    let target_name = format!("user.target.{}", Uuid::new_v4().simple());
+    let target_id = create_user(&test.pool, &target_name, false).await;
+    let (target_cookie, _, _) = login(&test.app, test.peer(), &target_name).await;
+
+    // Non-admin cannot disable users (permission boundary).
+    let (status, body) = send(
+        &test.app,
+        request_builder(
+            "POST",
+            &format!("/api/users/{target_id}/disable"),
+            &target_cookie,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED,
+        "{status} {body}"
+    );
+
+    // Disable: 204, sessions revoked, login blocked.
+    let (status, body) = send(
+        &test.app,
+        request_builder(
+            "POST",
+            &format!("/api/users/{target_id}/disable"),
+            &admin_cookie,
+            Some(&admin_csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let status_db: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(target_id)
+        .fetch_one(&test.pool)
+        .await
+        .expect("user row");
+    assert_eq!(status_db, "disabled");
+
+    // Old session is dead immediately (explicit revocation).
+    let (status, _) = send(
+        &test.app,
+        request_builder("GET", "/api/auth/me", &target_cookie, None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Idempotent repeat.
+    let (status, _) = send(
+        &test.app,
+        request_builder(
+            "POST",
+            &format!("/api/users/{target_id}/disable"),
+            &admin_cookie,
+            Some(&admin_csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Enable restores login capability.
+    let (status, body) = send(
+        &test.app,
+        request_builder(
+            "POST",
+            &format!("/api/users/{target_id}/enable"),
+            &admin_cookie,
+            Some(&admin_csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let _ = login(&test.app, test.peer(), &target_name).await;
+
+    // Unknown user → 404.
+    let (status, _) = send(
+        &test.app,
+        request_builder(
+            "POST",
+            &format!("/api/users/{}/disable", Uuid::new_v4()),
+            &admin_cookie,
+            Some(&admin_csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Audit provenance.
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type FROM security_events \
+         WHERE metadata->>'user_id' = $1 ORDER BY occurred_at",
+    )
+    .bind(target_id.to_string())
+    .fetch_all(&test.pool)
+    .await
+    .expect("audit readable");
+    assert_eq!(events, vec!["user_disabled", "user_enabled"], "{events:?}");
+}
+
+#[tokio::test]
+async fn disabling_last_administration_user_is_lockout_prevented() {
+    let Some(test) = setup().await else {
+        eprintln!("SKIPPED: KOOPERATIF_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let admin_name = format!("last.admin.{}", Uuid::new_v4().simple());
+    let admin_id = create_user(&test.pool, &admin_name, true).await;
+    let (admin_cookie, admin_csrf, _) = login(&test.app, test.peer(), &admin_name).await;
+
+    // Sole roles.manage holder cannot be disabled (last admin path, §28).
+    let (status, body) = send(
+        &test.app,
+        request_builder(
+            "POST",
+            &format!("/api/users/{admin_id}/disable"),
+            &admin_cookie,
+            Some(&admin_csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "lockout_prevented", "{body}");
+
+    let status_db: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(admin_id)
+        .fetch_one(&test.pool)
+        .await
+        .expect("user row");
+    assert_eq!(status_db, "active");
 }
