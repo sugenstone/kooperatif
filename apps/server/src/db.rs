@@ -36,16 +36,24 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
 /// admin connection so accumulation stays bounded.
 ///
 /// Safety rule: a database is dropped only when ALL of these hold —
-/// it matches the exact harness prefix, it is not a template, it has
-/// zero active connections, and its on-disk catalog is older than 24 h.
-/// A still-running test's database is always younger than the cutoff,
-/// so concurrent runs can never drop each other's databases. Any other
-/// naming class (`kooperatif`, `kooperatif_e2e_*`, audit fixtures) is
-/// never touched here.
+/// it matches the exact harness pattern (`kooperatif_test_<32 hex>`,
+/// enforced via regex so `kooperatif_test_seed` and friends are
+/// immune), it is not a template, and it has zero
+/// active connections. The zero-connection clause is the real guard:
+/// a still-running test always holds connections to its database, so
+/// concurrent runs can never drop each other's databases.
+///
+/// The 24 h catalog-mtime clause is only a heuristic tie-breaker, not
+/// the guard — CREATE DATABASE preserves the template's file mtimes,
+/// so even a just-created test database can satisfy the age check.
+/// That is desirable here: it lets a run reclaim the previous run's
+/// finished leftovers promptly. Any other naming class (`kooperatif`,
+/// `kooperatif_test_seed`, `kooperatif_e2e_*`, audit fixtures) is
+/// never touched.
 pub async fn drop_stale_test_databases(admin: &PgPool) -> u64 {
     let names: Vec<String> = match sqlx::query_scalar(
         "SELECT d.datname FROM pg_database d \
-         WHERE d.datname LIKE 'kooperatif\\_test\\_%' ESCAPE '\\' \
+         WHERE d.datname ~ '^kooperatif_test_[0-9a-f]{32}$' \
            AND NOT d.datistemplate \
            AND NOT EXISTS ( \
                SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname \
