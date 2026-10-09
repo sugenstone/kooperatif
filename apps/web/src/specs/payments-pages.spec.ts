@@ -116,7 +116,7 @@ describe('HOTFIX-001 — canonical money never enters the tr-TR input raw', () =
 		render(PaymentDetailPage, { data: { id: PAYMENT_ID } });
 
 		await screen.findByRole('heading', { name: /Tahsilat Detayı/ });
-		await userEvent.click(screen.getByRole('button', { name: 'Dağılım Ekle' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Borca Dağıt' }));
 		await userEvent.type(screen.getByPlaceholderText('Hissedar ara (ad, vasi, aile no)'), 'Ali');
 		await userEvent.click(screen.getByRole('button', { name: 'Ara' }));
 		await userEvent.click(await screen.findByRole('button', { name: /Ali Veli/ }));
@@ -164,7 +164,7 @@ describe('HOTFIX-001 — canonical money never enters the tr-TR input raw', () =
 		render(PaymentDetailPage, { data: { id: PAYMENT_ID } });
 
 		await screen.findByRole('heading', { name: /Tahsilat Detayı/ });
-		await userEvent.click(screen.getByRole('button', { name: 'Dağılım Ekle' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Borca Dağıt' }));
 		await userEvent.type(screen.getByPlaceholderText('Hissedar ara (ad, vasi, aile no)'), 'Ali');
 		await userEvent.click(screen.getByRole('button', { name: 'Ara' }));
 		await userEvent.click(await screen.findByRole('button', { name: /Ali Veli/ }));
@@ -173,7 +173,7 @@ describe('HOTFIX-001 — canonical money never enters the tr-TR input raw', () =
 		expect(amountInput.value).toBe('300,00');
 
 		await userEvent.selectOptions(
-			screen.getByLabelText('Tahakkuk'),
+			screen.getByLabelText('Aidat Borcu'),
 			'88888888-8888-4888-8888-888888888888'
 		);
 		// Canonical "1234.56" → editable "1234,56" (never "123456").

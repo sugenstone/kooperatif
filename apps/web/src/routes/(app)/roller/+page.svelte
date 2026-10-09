@@ -19,7 +19,7 @@
 		TableRow
 	} from '$lib/components/ui/table';
 	import { apiErrorKey } from '$lib/api-errors';
-	import { apiFetch } from '$lib/api-client';
+	import { ApiError, apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { ROLES_PATH, type CreateRoleRequest, type Role } from '@kooperatif/contracts';
@@ -58,7 +58,10 @@
 			newDescription = '';
 			await refresh();
 		} catch (error) {
-			createError = apiErrorKey(error);
+			createError =
+				error instanceof ApiError && error.code === 'conflict'
+					? 'roles.errors.nameConflict'
+					: apiErrorKey(error);
 		} finally {
 			creating = false;
 		}

@@ -72,7 +72,7 @@
 	const grouped = $derived.by(() => {
 		const groups: { category: string; permissions: Permission[] }[] = [];
 		for (const permission of catalog) {
-			const category = permission.category || 'Diğer';
+			const category = permission.category || t('roles.categoryOther');
 			const existing = groups.find((group) => group.category === category);
 			if (existing) {
 				existing.permissions.push(permission);

@@ -281,7 +281,7 @@
 					</div>
 					<div class="flex gap-2">
 						<Button disabled={busy || !selectedPerson} onclick={submitMembership}>
-							{t('decisions.save')}
+							{t('memberships.addSubmit')}
 						</Button>
 						<Button variant="ghost" onclick={() => (panel = null)}>{t('common.cancel')}</Button>
 					</div>

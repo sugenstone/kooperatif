@@ -196,16 +196,16 @@ describe('Income detail (/gelirler/[id])', () => {
 		render(IncomeDetailPage, { data: { id: INCOME_ID } });
 
 		await screen.findByRole('heading', { name: /Gelir Detayı #1/ });
-		await userEvent.click(screen.getByRole('button', { name: 'Geliri Ters Kaydet' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Geliri Geri Al' }));
 		// Empty reason → confirm stays disabled.
-		const confirm = screen.getByRole('button', { name: 'Geliri Ters Kaydet' });
+		const confirm = screen.getByRole('button', { name: 'Geliri Geri Al' });
 		expect(confirm).toBeDisabled();
-		await userEvent.type(screen.getByLabelText('Ters Kayıt Gerekçesi'), 'yanlış tutar');
+		await userEvent.type(screen.getByLabelText('Geri Alma Gerekçesi'), 'yanlış tutar');
 		await userEvent.click(confirm);
 		await tick();
 
 		expect(reversedBody).toEqual({ reason: 'yanlış tutar' });
-		expect(await screen.findAllByText('Ters Kayıt')).not.toHaveLength(0);
+		expect(await screen.findAllByText('Geri Alındı')).not.toHaveLength(0);
 	});
 });
 
@@ -234,7 +234,7 @@ describe('Expense create (/giderler/yeni)', () => {
 
 		const body = postedBody as Record<string, string>;
 		expect(body.amount).toBe('999999.99');
-		expect(await screen.findByText(/hesap bakiyesi yetersiz/i)).toBeInTheDocument();
+		expect(await screen.findByText(/yeterli kullanılabilir para yok/i)).toBeInTheDocument();
 	});
 });
 
@@ -258,7 +258,7 @@ describe('Expense list + detail (/giderler)', () => {
 		render(ExpenseDetailPage, { data: { id: EXPENSE_ID } });
 		await screen.findByRole('heading', { name: /Gider Detayı #1/ });
 		expect(screen.getByText('d2d2d2d2-0000-4000-8000-000000000002')).toBeInTheDocument();
-		expect(screen.queryByRole('button', { name: 'Gideri Ters Kaydet' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Gideri Geri Al' })).not.toBeInTheDocument();
 	});
 });
 

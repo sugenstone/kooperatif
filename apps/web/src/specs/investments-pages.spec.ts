@@ -186,7 +186,7 @@ describe('investments list page', () => {
 			return jsonResponse({}, 404);
 		});
 		render(InvestmentListPage);
-		await screen.findByText('Yatırım kaydı bulunamadı.');
+		await screen.findByText(/Yatırım kaydı bulunamadı/);
 		expect(screen.queryByRole('link', { name: 'Yeni Yatırım' })).not.toBeInTheDocument();
 	});
 });
@@ -355,12 +355,12 @@ describe('investment detail page', () => {
 		render(InvestmentDetailPage, { data: { id: INVESTMENT_ID } });
 		await screen.findByText(/Depo Binası/);
 
-		await userEvent.click(screen.getByRole('button', { name: 'Finansmanı Ters Kaydet' }));
-		const reasonInput = screen.getByPlaceholderText('Ters kayıt gerekçesi') as HTMLInputElement;
+		await userEvent.click(screen.getByRole('button', { name: 'Finansmanı Geri Al' }));
+		const reasonInput = screen.getByPlaceholderText('Geri alma gerekçesi') as HTMLInputElement;
 		reasonInput.value = 'yanlış tutar';
 		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
 		await tick();
-		const buttons = screen.getAllByRole('button', { name: 'Finansmanı Ters Kaydet' });
+		const buttons = screen.getAllByRole('button', { name: 'Finansmanı Geri Al' });
 		await userEvent.click(buttons[buttons.length - 1]);
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ reason: 'yanlış tutar' });

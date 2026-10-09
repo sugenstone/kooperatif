@@ -108,6 +108,8 @@ describe('Roles page', () => {
 		await userEvent.type(await screen.findByLabelText('Rol adı'), 'Muhasebe');
 		await userEvent.click(screen.getByRole('button', { name: 'Rol Oluştur' }));
 
-		expect(await screen.findByText('Bu isim zaten kullanılıyor.')).toBeInTheDocument();
+		expect(
+			await screen.findByText('Bu rol adı zaten kullanılıyor. Lütfen farklı bir ad seçin.')
+		).toBeInTheDocument();
 	});
 });

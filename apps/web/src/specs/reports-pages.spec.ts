@@ -142,9 +142,9 @@ describe('reports hub page', () => {
 		expect(screen.getByText('1.100,00 ₺')).toBeInTheDocument();
 		expect(screen.getAllByText('200,00 ₺').length).toBeGreaterThan(0);
 		// Social-aid restricted balance carries the "not extra cash" note.
-		expect(screen.getByText('Sosyal Yardım Tahsisli Bakiye')).toBeInTheDocument();
+		expect(screen.getByText('Yardım İçin Ayrılan Para')).toBeInTheDocument();
 		// Valuation carries the "informational, not cash" note.
-		expect(screen.getByText('Güncel Değerleme Toplamı')).toBeInTheDocument();
+		expect(screen.getByText('Yatırımların Güncel Tahmini Değeri')).toBeInTheDocument();
 	});
 
 	it('switches to the movements report and shows provenance + summary', async () => {

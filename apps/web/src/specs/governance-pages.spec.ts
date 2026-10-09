@@ -212,7 +212,7 @@ describe('new body page', () => {
 		});
 		render(BodyNewPage);
 
-		const submit = screen.getByRole('button', { name: 'Kaydet' });
+		const submit = screen.getByRole('button', { name: 'Kurulu Oluştur' });
 		expect(submit).toBeDisabled();
 		await userEvent.type(screen.getByLabelText('Kurul Adı'), 'Denetim Kurulu');
 		await userEvent.type(screen.getByLabelText('Kurul Türü'), 'Denetim Kurulu');
@@ -285,7 +285,7 @@ describe('body detail page', () => {
 		await userEvent.click(screen.getByRole('button', { name: /Mehmet Demir/ }));
 		await tick();
 
-		const submitButtons = screen.getAllByRole('button', { name: 'Kaydet' });
+		const submitButtons = screen.getAllByRole('button', { name: 'Üyeliği Kaydet' });
 		await userEvent.click(submitButtons[submitButtons.length - 1]);
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ personId: PERSON_B });
@@ -321,7 +321,7 @@ describe('decision create page', () => {
 		date.dispatchEvent(new Event('input', { bubbles: true }));
 		await tick();
 
-		await userEvent.click(screen.getByRole('button', { name: 'Kaydet' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Taslağı Kaydet' }));
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({
 			bodyId: BODY_ID,

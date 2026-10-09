@@ -202,8 +202,8 @@ describe('Yeni Dönem page', () => {
 		await userEvent.type(screen.getByLabelText('Tahsilat Başlangıcı'), '2026-12-01');
 		await userEvent.type(screen.getByLabelText('Son Ödeme Tarihi'), '2026-12-15');
 		await userEvent.click(screen.getByRole('button', { name: 'Hisse Başına' }));
-		await userEvent.type(screen.getByLabelText('Tahakkuk Tutarı'), '1.250,50');
-		await userEvent.type(screen.getByLabelText('Tahakkuk Geçerlilik Tarihi'), '2026-12-01');
+		await userEvent.type(screen.getByLabelText('Aidat Tutarı'), '1.250,50');
+		await userEvent.type(screen.getByLabelText('Aidat Geçerlilik Tarihi'), '2026-12-01');
 		await userEvent.click(screen.getByRole('button', { name: 'Dönemi Oluştur' }));
 		await tick();
 
@@ -233,12 +233,12 @@ describe('Yeni Dönem page', () => {
 		await userEvent.type(screen.getByLabelText('Dönem Adı'), 'X');
 		await userEvent.type(screen.getByLabelText('Tahsilat Başlangıcı'), '2026-12-01');
 		await userEvent.type(screen.getByLabelText('Son Ödeme Tarihi'), '2026-12-15');
-		await userEvent.type(screen.getByLabelText('Tahakkuk Tutarı'), 'abc');
-		await userEvent.type(screen.getByLabelText('Tahakkuk Geçerlilik Tarihi'), '2026-12-01');
+		await userEvent.type(screen.getByLabelText('Aidat Tutarı'), 'abc');
+		await userEvent.type(screen.getByLabelText('Aidat Geçerlilik Tarihi'), '2026-12-01');
 		await userEvent.click(screen.getByRole('button', { name: 'Dönemi Oluştur' }));
 		await tick();
 
-		expect(screen.getByText(/Geçerli bir tahakkuk tutarı/)).toBeInTheDocument();
+		expect(screen.getByText(/Geçerli bir aidat tutarı/)).toBeInTheDocument();
 		expect(fetchMock.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
 	});
 });
@@ -290,7 +290,7 @@ describe('Dönem detail page', () => {
 		render(PeriodDetail, { data: { id: draftDetail.id } });
 
 		await screen.findByText('Önizlemeyi Çalıştır');
-		await userEvent.click(screen.getByRole('button', { name: 'Tahakkukları Oluştur' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Aidat Borçlarını Oluştur' }));
 		await tick();
 
 		const call = fetchMock.mock.calls.find(([input]) =>
@@ -307,7 +307,9 @@ describe('Dönem detail page', () => {
 		render(PeriodDetail, { data: { id: draftDetail.id } });
 
 		await screen.findByText('Önizlemeyi Çalıştır');
-		expect(screen.queryByRole('button', { name: 'Tahakkukları Oluştur' })).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole('button', { name: 'Aidat Borçlarını Oluştur' })
+		).not.toBeInTheDocument();
 	});
 
 	it('lists generated assessments on an open period', async () => {
@@ -326,7 +328,7 @@ describe('Dönem detail page', () => {
 	});
 });
 
-describe('Tahakkuk detail page', () => {
+describe('Assessment detail page', () => {
 	it('renders the obligation and its per-share provenance', async () => {
 		stubFetch(async (url) => {
 			if (url.includes('/api/assessments/')) return jsonResponse(assessmentDetailPayload);

@@ -86,7 +86,7 @@
 			{/if}
 			<div class="flex gap-2">
 				<Button disabled={busy || !name.trim() || !bodyType.trim()} onclick={submit}>
-					{t('decisions.save')}
+					{t('governance.bodies.createSubmit')}
 				</Button>
 				<Button variant="ghost" href="/yonetim/kurullar">{t('common.cancel')}</Button>
 			</div>

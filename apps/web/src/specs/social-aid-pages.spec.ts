@@ -176,7 +176,7 @@ describe('social aid list page', () => {
 			return jsonResponse({}, 404);
 		});
 		render(SocialAidListPage);
-		await screen.findByText('Sosyal yardım fonu bulunamadı.');
+		await screen.findByText(/Sosyal yardım fonu bulunamadı/);
 		expect(screen.queryByRole('link', { name: 'Yeni Fon' })).not.toBeInTheDocument();
 	});
 });
@@ -314,7 +314,7 @@ describe('social aid fund detail page', () => {
 		await tick();
 		// The restricted availability of THIS fund in this account is
 		// shown — never the raw account balance alone.
-		expect(screen.getByText(/Bu hesaptaki tahsisli bakiye/)).toBeInTheDocument();
+		expect(screen.getByText(/Bu hesapta yardım için ayrılan para/)).toBeInTheDocument();
 		const amount = document.getElementById('dis-amount') as HTMLInputElement;
 		amount.value = '1.000,00';
 		amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -346,12 +346,12 @@ describe('social aid fund detail page', () => {
 		render(SocialAidDetailPage, { data: { id: FUND_ID } });
 		await screen.findByText(/Eğitim Yardımı/);
 
-		await userEvent.click(screen.getByRole('button', { name: 'Bağışı Ters Kaydet' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Bağışı Geri Al' }));
 		const reasonInput = document.getElementById('rev-don-reason') as HTMLInputElement;
 		reasonInput.value = 'yanlış tutar';
 		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
 		await tick();
-		const buttons = screen.getAllByRole('button', { name: 'Bağışı Ters Kaydet' });
+		const buttons = screen.getAllByRole('button', { name: 'Bağışı Geri Al' });
 		await userEvent.click(buttons[buttons.length - 1]);
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ reason: 'yanlış tutar' });
@@ -373,6 +373,6 @@ describe('social aid fund detail page', () => {
 		expect(await screen.findByText(/Eğitim Yardımı/)).toBeInTheDocument();
 		expect(screen.queryByRole('button', { name: 'Bağış Kaydet' })).not.toBeInTheDocument();
 		// Reversal of history remains available even on a closed fund.
-		expect(screen.getByRole('button', { name: 'Bağışı Ters Kaydet' })).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Bağışı Geri Al' })).toBeInTheDocument();
 	});
 });

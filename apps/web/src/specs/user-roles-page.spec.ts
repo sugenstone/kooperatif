@@ -131,7 +131,7 @@ describe('User role assignment page', () => {
 
 		expect(
 			await screen.findByText(
-				'Bu değişiklik, son yönetim yolunu kaldıracağı için güvenlik nedeniyle reddedildi.'
+				'Bu işlem güvenlik nedeniyle reddedildi: sistemde yönetim yetkisine sahip en az bir etkin kullanıcı kalmalıdır.'
 			)
 		).toBeInTheDocument();
 	});

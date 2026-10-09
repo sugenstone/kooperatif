@@ -308,7 +308,7 @@ describe('share return detail page', () => {
 		expect(screen.getAllByText('Kâr Payı Hakkı').length).toBeGreaterThan(0);
 		expect(screen.getAllByText('Henüz belirlenmedi').length).toBeGreaterThan(0);
 		expect(screen.getAllByText(/700,00 ₺/).length).toBeGreaterThan(0);
-		expect(screen.queryByText('Ters Kayıt')).not.toBeInTheDocument();
+		expect(screen.queryByText('Geri Alındı')).not.toBeInTheDocument();
 	});
 
 	it('settles an entitlement with canonical amount and account id', async () => {
@@ -374,13 +374,13 @@ describe('share return detail page', () => {
 		render(ReturnDetailPage, { data: { id: RETURN_ID } });
 		await screen.findByText('Kayıtlı');
 
-		await userEvent.click(screen.getByRole('button', { name: 'Ödemeyi Ters Kaydet' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Ödemeyi Geri Al' }));
 		const reason = document.getElementById('rev-reason') as HTMLInputElement | null;
-		const reasonInput = reason ?? screen.getByPlaceholderText('Ters kayıt gerekçesi');
+		const reasonInput = reason ?? screen.getByPlaceholderText('Geri alma gerekçesi');
 		reasonInput.value = 'yanlış hesap';
 		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
 		await tick();
-		const buttons = screen.getAllByRole('button', { name: 'Ödemeyi Ters Kaydet' });
+		const buttons = screen.getAllByRole('button', { name: 'Ödemeyi Geri Al' });
 		await userEvent.click(buttons[buttons.length - 1]);
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ reason: 'yanlış hesap' });

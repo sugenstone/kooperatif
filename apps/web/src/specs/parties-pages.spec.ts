@@ -252,7 +252,7 @@ describe('Shareholder detail page', () => {
 		const firstInput = screen.getByLabelText('Ad');
 		await userEvent.clear(firstInput);
 		await userEvent.type(firstInput, 'Abdüllatif');
-		await userEvent.click(screen.getByRole('button', { name: 'Kaydet' }));
+		await userEvent.click(screen.getByRole('button', { name: 'Bilgileri Kaydet' }));
 		await tick();
 
 		const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');

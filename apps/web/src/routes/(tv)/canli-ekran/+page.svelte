@@ -204,75 +204,123 @@
 				<p class="text-2xl text-neutral-400">{t('reports.loading')}</p>
 			{:else}
 				{#if mode === 'overview' || mode === 'collection'}
-					<section class="grid grid-cols-3 gap-6">
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.assessed')}</div>
-							<div class="mt-3 text-6xl font-bold tabular-nums" data-testid="tv-assessed">
-								{metric(overview.assessmentsTotal)}
+					<section aria-labelledby="tv-group-aidat">
+						<h2
+							id="tv-group-aidat"
+							class="mb-3 text-2xl font-semibold tracking-wide text-neutral-300 uppercase"
+						>
+							{t('tv.group.aidat')}
+						</h2>
+						<div class="grid grid-cols-3 gap-6">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.assessed')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.assessed')}
+								</p>
+								<div class="mt-3 text-6xl font-bold tabular-nums" data-testid="tv-assessed">
+									{metric(overview.assessmentsTotal)}
+								</div>
 							</div>
-						</div>
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.postedPayments')}</div>
-							<div
-								class="mt-3 text-6xl font-bold text-emerald-300 tabular-nums"
-								data-testid="tv-collected"
-							>
-								{metric(overview.postedPaymentsTotal)}
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.postedPayments')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.paid')}
+								</p>
+								<div
+									class="mt-3 text-6xl font-bold text-emerald-300 tabular-nums"
+									data-testid="tv-collected"
+								>
+									{metric(overview.postedPaymentsTotal)}
+								</div>
 							</div>
-						</div>
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.outstandingDebt')}</div>
-							<div
-								class="mt-3 text-6xl font-bold text-rose-300 tabular-nums"
-								data-testid="tv-outstanding"
-							>
-								{metric(overview.outstandingAssessmentDebt)}
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.outstandingDebt')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.outstanding')}
+								</p>
+								<div
+									class="mt-3 text-6xl font-bold text-rose-300 tabular-nums"
+									data-testid="tv-outstanding"
+								>
+									{metric(overview.outstandingAssessmentDebt)}
+								</div>
 							</div>
 						</div>
 					</section>
 				{/if}
 				{#if mode === 'overview' || mode === 'accounts'}
-					<section class="grid grid-cols-3 gap-6">
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.cash')}</div>
-							<div class="mt-3 text-5xl font-bold tabular-nums" data-testid="tv-cash">
-								{metric(overview.financialAccountsBalance)}
+					<section aria-labelledby="tv-group-cash">
+						<h2
+							id="tv-group-cash"
+							class="mb-3 text-2xl font-semibold tracking-wide text-neutral-300 uppercase"
+						>
+							{t('tv.group.cash')}
+						</h2>
+						<div class="grid grid-cols-3 gap-6">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.cash')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">{t('tv.help.cash')}</p>
+								<div class="mt-3 text-5xl font-bold tabular-nums" data-testid="tv-cash">
+									{metric(overview.financialAccountsBalance)}
+								</div>
 							</div>
-						</div>
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.operationalIncome')}</div>
-							<div class="mt-3 text-5xl font-bold tabular-nums">
-								{metric(overview.operationalIncomeTotal)}
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.operationalIncome')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.income')}
+								</p>
+								<div class="mt-3 text-5xl font-bold tabular-nums">
+									{metric(overview.operationalIncomeTotal)}
+								</div>
 							</div>
-						</div>
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.operationalExpense')}</div>
-							<div class="mt-3 text-5xl font-bold tabular-nums">
-								{metric(overview.operationalExpenseTotal)}
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.operationalExpense')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.expense')}
+								</p>
+								<div class="mt-3 text-5xl font-bold tabular-nums">
+									{metric(overview.operationalExpenseTotal)}
+								</div>
 							</div>
 						</div>
 					</section>
 				{/if}
 				{#if mode === 'overview' || mode === 'aid'}
-					<section class="grid grid-cols-3 gap-6">
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.aidDonations')}</div>
-							<div class="mt-3 text-5xl font-bold tabular-nums">
-								{metric(overview.socialAidDonationsTotal)}
+					<section aria-labelledby="tv-group-aid">
+						<h2
+							id="tv-group-aid"
+							class="mb-3 text-2xl font-semibold tracking-wide text-neutral-300 uppercase"
+						>
+							{t('tv.group.aid')}
+						</h2>
+						<div class="grid grid-cols-3 gap-6">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.aidDonations')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.donations')}
+								</p>
+								<div class="mt-3 text-5xl font-bold tabular-nums">
+									{metric(overview.socialAidDonationsTotal)}
+								</div>
 							</div>
-						</div>
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.aidDisbursements')}</div>
-							<div class="mt-3 text-5xl font-bold tabular-nums">
-								{metric(overview.socialAidDisbursementsTotal)}
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.aidDisbursements')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.disbursements')}
+								</p>
+								<div class="mt-3 text-5xl font-bold tabular-nums">
+									{metric(overview.socialAidDisbursementsTotal)}
+								</div>
 							</div>
-						</div>
-						<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-							<div class="text-xl text-neutral-400">{t('reports.ov.aidRestricted')}</div>
-							<div class="mt-3 text-5xl font-bold tabular-nums">
-								{metric(overview.socialAidRestrictedAvailable)}
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
+								<div class="text-xl text-neutral-400">{t('reports.ov.aidRestricted')}</div>
+								<p class="mt-1 text-base leading-snug text-neutral-500">
+									{t('tv.help.restricted')}
+								</p>
+								<div class="mt-3 text-5xl font-bold tabular-nums">
+									{metric(overview.socialAidRestrictedAvailable)}
+								</div>
 							</div>
-							<div class="mt-2 text-base text-neutral-500">{t('reports.ov.noteRestricted')}</div>
 						</div>
 					</section>
 				{/if}
