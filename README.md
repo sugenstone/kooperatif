@@ -1104,6 +1104,42 @@ transaction, so a signal can only ever exist for a committed change.**
   push/SMS/email, no public kiosk access, no dashboard designer —
   deferred.
 
+## Final Hardening & Release Candidate (STEP-017, docs/12 + docs/13 + docs/22 + docs/26)
+
+The closing core-development milestone: professional UI polish,
+responsive/mobile operation, security hardening and a verified release
+candidate for controlled pilot — no new business rules.
+
+- **Navigation shell** — `lib/components/app-nav.svelte`: grouped,
+  domain-oriented navigation (Genel / Kimlik / Finans / Varlıklar /
+  Yönetişim / Sistem) as a persistent sidebar on desktop and an
+  `aria-expanded` collapsible menu on mobile, with `aria-current`
+  active-route marking and a user/logout block. Visibility is
+  permission-filtered UX only; the backend still enforces.
+- **Shared primitives** — `page-header.svelte` (title + description +
+  actions, applied to all list screens) and `empty-state.svelte`; the
+  home route is a `reports.read`-gated dashboard fed by the canonical
+  overview API — never locally computed totals.
+- **Mobile** — no horizontal page overflow at 360/390/768/1440 px
+  (verified on the real stack, `scripts/e2e-step017-uiux.mjs`);
+  `inputmode="decimal"` on every money input; tables keep their
+  labelled scroll container per docs/12.
+- **Security hardening** — `nosniff`, `X-Frame-Options: DENY` and
+  `Referrer-Policy: no-referrer` on every API response; `pnpm audit`
+  clean via pinned overrides (`source-map-js@1.2.2`, `cookie@0.7.2`).
+- **Realtime recovery** — `RealtimeClient.wake()`: visibility/online
+  events resume an exhausted reconnect sequence and force-cycle a
+  socket silent past 90 s, so a sleeping laptop never leaves a
+  permanently stale screen; the TV banner exposes a manual
+  "Yeniden Bağlan" action.
+- **Release-candidate verification** — `scripts/e2e-step017-rc.mjs`
+  exercises journeys A–K (onboarding, assessment/collection, credit,
+  transfers, income/expense, share return, investment, social aid,
+  governance, reporting parity, live TV) on a fresh database through
+  Chromium, with Firefox + WebKit smoke coverage and DOM-level
+  accessibility assertions. Evidence:
+  `implementation/STEP-017-UIUX-FINAL-HARDENING.md`.
+
 ## Shareholder Credit / Excess Payment (STEP-009, docs/05 + docs/19)
 
 The money-who boundary. **Money location is not credit ownership: a
