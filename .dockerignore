@@ -1,0 +1,26 @@
+# Local dependency/build artifacts — never shadow pnpm/cargo state inside images
+**/node_modules
+**/.pnpm-store
+**/target
+**/dist
+**/build
+**/.svelte-kit
+**/*.tsbuildinfo
+**/coverage
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# VCS / IDE / OS noise
+.git
+.gitignore
+.vscode
+.idea
+**/.DS_Store
+**/Thumbs.db
+
+# Dev-only artifacts
+docker/volumes
+**/tmp

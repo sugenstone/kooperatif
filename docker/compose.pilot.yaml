@@ -1,0 +1,115 @@
+# Local pilot stack (PILOT-FIX-001 F2).
+#
+# Reproducible, isolated, localhost-only packaging for pilot evaluation:
+#   - every port binds 127.0.0.1 — nothing is exposed beyond the host;
+#   - KOOPERATIF_ENV stays `development` because the browser talks plain
+#     HTTP on localhost (production mode correctly refuses insecure
+#     cookies). A real deployment MUST run KOOPERATIF_ENV=production
+#     behind TLS (ADR-012) — that topology is deliberately out of scope
+#     for this local artifact;
+#   - credentials below are pilot-only defaults, never real secrets;
+#   - migrations run as an explicit one-shot step before the API starts
+#     (controlled startup, ADR-012), never implicitly;
+#   - the database volume is persistent and survives `compose down`.
+#
+# Usage:
+#   docker compose -f docker/compose.pilot.yaml up -d --build
+#   # web:  http://localhost:4173   api: http://localhost:18080
+#   docker compose -f docker/compose.pilot.yaml down      # keeps data
+#   docker compose -f docker/compose.pilot.yaml down -v   # destroys data
+name: kooperatif-pilot
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PILOT_POSTGRES_USER:-kooperatif}
+      POSTGRES_PASSWORD: ${PILOT_POSTGRES_PASSWORD:-kooperatif_pilot_password}
+      POSTGRES_DB: ${PILOT_POSTGRES_DB:-kooperatif}
+    # Localhost-only for operator access (backup/psql); the app reaches
+    # it over the internal compose network.
+    ports:
+      - "127.0.0.1:${PILOT_POSTGRES_PORT:-5594}:5432"
+    volumes:
+      - kooperatif_pilot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      KOOPERATIF_ENV: development
+      KOOPERATIF_DATABASE_URL:
+        postgres://${PILOT_POSTGRES_USER:-kooperatif}:${PILOT_POSTGRES_PASSWORD:-kooperatif_pilot_password}@postgres:5432/${PILOT_POSTGRES_DB:-kooperatif}
+    command: ["migrate"]
+
+  server:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    environment:
+      KOOPERATIF_ENV: development
+      KOOPERATIF_HOST: 0.0.0.0
+      KOOPERATIF_PORT: "8080"
+      KOOPERATIF_DATABASE_URL:
+        postgres://${PILOT_POSTGRES_USER:-kooperatif}:${PILOT_POSTGRES_PASSWORD:-kooperatif_pilot_password}@postgres:5432/${PILOT_POSTGRES_DB:-kooperatif}
+      # The browser reaches the API on the localhost-published port and
+      # arrives with the web origin — both lists must match that origin.
+      KOOPERATIF_ALLOWED_ORIGINS: http://localhost:${PILOT_WEB_PORT:-4173}
+      KOOPERATIF_CORS_ORIGINS: http://localhost:${PILOT_WEB_PORT:-4173}
+      KOOPERATIF_COOKIE_SECURE: "false"
+      KOOPERATIF_FORWARDED_IP: "false"
+    ports:
+      - "127.0.0.1:${PILOT_API_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Baked into the bundle at build time — rebuild on change.
+        PUBLIC_API_BASE_URL: http://localhost:${PILOT_API_PORT:-18080}
+    depends_on:
+      server:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PILOT_WEB_PORT:-4173}:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+volumes:
+  kooperatif_pilot_pgdata:
