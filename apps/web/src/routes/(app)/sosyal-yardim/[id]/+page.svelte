@@ -11,6 +11,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -558,36 +559,44 @@
 									{t('common.search')}
 								</Button>
 							</div>
-							<select
-								id="don-person"
-								aria-label={t('donations.donorPerson')}
-								class="rounded-md border bg-background px-3 py-2 text-sm"
-								bind:value={donorPersonId}
-							>
-								<option value="">—</option>
-								{#each donorResults as person (person.id)}
-									<option value={person.id}>{person.firstName} {person.lastName}</option>
-								{/each}
-							</select>
+							<Select.Root type="single" bind:value={donorPersonId}>
+								<Select.Trigger class="w-full" aria-label={t('donations.donorPerson')}>
+									{(() => {
+										const p = donorResults.find((pp) => pp.id === donorPersonId);
+										return p ? `${p.firstName} ${p.lastName}` : '—';
+									})()}
+								</Select.Trigger>
+								<Select.Content>
+									{#each donorResults as person (person.id)}
+										<Select.Item value={person.id}>
+											{person.firstName}
+											{person.lastName}
+										</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 						</div>
 						<div class="flex flex-col gap-1">
 							<Label for="don-display">{t('donations.donorDisplayName')}</Label>
 							<Input id="don-display" bind:value={donorDisplayName} />
 						</div>
 						<div class="flex flex-col gap-1">
-							<Label for="don-account">{t('donations.account')}</Label>
-							<select
-								id="don-account"
-								class="rounded-md border bg-background px-3 py-2 text-sm"
-								bind:value={donAccountId}
-							>
-								<option value="">—</option>
-								{#each accounts?.items ?? [] as account (account.id)}
-									<option value={account.id}>
-										{account.name} · {formatTry(account.balance)}
-									</option>
-								{/each}
-							</select>
+							<Label id="don-account-label">{t('donations.account')}</Label>
+							<Select.Root type="single" bind:value={donAccountId}>
+								<Select.Trigger id="don-account" class="w-full" aria-labelledby="don-account-label">
+									{(() => {
+										const a = accounts?.items?.find((aa) => aa.id === donAccountId);
+										return a ? `${a.name} · ${formatTry(a.balance)}` : '—';
+									})()}
+								</Select.Trigger>
+								<Select.Content>
+									{#each accounts?.items ?? [] as account (account.id)}
+										<Select.Item value={account.id}>
+											{account.name} · {formatTry(account.balance)}
+										</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 						</div>
 						<div class="flex flex-col gap-1">
 							<Label for="don-amount">{t('donations.amount')}</Label>
@@ -639,36 +648,44 @@
 									{t('common.search')}
 								</Button>
 							</div>
-							<select
-								id="dis-person"
-								aria-label={t('aidDisbursements.beneficiaryPerson')}
-								class="rounded-md border bg-background px-3 py-2 text-sm"
-								bind:value={beneficiaryPersonId}
-							>
-								<option value="">—</option>
-								{#each beneficiaryResults as person (person.id)}
-									<option value={person.id}>{person.firstName} {person.lastName}</option>
-								{/each}
-							</select>
+							<Select.Root type="single" bind:value={beneficiaryPersonId}>
+								<Select.Trigger class="w-full" aria-label={t('aidDisbursements.beneficiaryPerson')}>
+									{(() => {
+										const p = beneficiaryResults.find((pp) => pp.id === beneficiaryPersonId);
+										return p ? `${p.firstName} ${p.lastName}` : '—';
+									})()}
+								</Select.Trigger>
+								<Select.Content>
+									{#each beneficiaryResults as person (person.id)}
+										<Select.Item value={person.id}>
+											{person.firstName}
+											{person.lastName}
+										</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 						</div>
 						<div class="flex flex-col gap-1">
 							<Label for="dis-display">{t('aidDisbursements.beneficiaryDisplayName')}</Label>
 							<Input id="dis-display" bind:value={beneficiaryDisplayName} />
 						</div>
 						<div class="flex flex-col gap-1">
-							<Label for="dis-account">{t('aidDisbursements.account')}</Label>
-							<select
-								id="dis-account"
-								class="rounded-md border bg-background px-3 py-2 text-sm"
-								bind:value={disAccountId}
-							>
-								<option value="">—</option>
-								{#each accounts?.items ?? [] as account (account.id)}
-									<option value={account.id}>
-										{account.name} · {formatTry(account.balance)}
-									</option>
-								{/each}
-							</select>
+							<Label id="dis-account-label">{t('aidDisbursements.account')}</Label>
+							<Select.Root type="single" bind:value={disAccountId}>
+								<Select.Trigger id="dis-account" class="w-full" aria-labelledby="dis-account-label">
+									{(() => {
+										const a = accounts?.items?.find((aa) => aa.id === disAccountId);
+										return a ? `${a.name} · ${formatTry(a.balance)}` : '—';
+									})()}
+								</Select.Trigger>
+								<Select.Content>
+									{#each accounts?.items ?? [] as account (account.id)}
+										<Select.Item value={account.id}>
+											{account.name} · {formatTry(account.balance)}
+										</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 							{#if disAccountId}
 								<p class="text-xs text-muted-foreground">
 									{t('aidDisbursements.availableHint')}: {formatTry(

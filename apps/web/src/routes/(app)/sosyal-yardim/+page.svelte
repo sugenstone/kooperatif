@@ -1,8 +1,12 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import MoneyText from '$lib/components/money-text.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { resolve } from '$app/paths';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -13,6 +17,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -26,7 +31,6 @@
 	import { apiFetch } from '$lib/api-client';
 	import { can } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { formatTry } from '$lib/money';
 	import {
 		SOCIAL_AID_FUNDS_PATH,
 		type Paginated,
@@ -34,7 +38,7 @@
 		type SocialAidFundStatus
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let page = $state(1);
 	let data = $state<Paginated<SocialAidFundListItem> | null>(null);
@@ -48,7 +52,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (search.trim()) params.set('search', search.trim());
 			if (status) params.set('status', status);
@@ -75,15 +79,21 @@
 		void refresh();
 	}
 
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
+		void refresh();
+	}
+
 	const pages = $derived(data ? Math.max(1, Math.ceil(data.totalCount / data.pageSize)) : 1);
 
 	function statusBadge(s: SocialAidFundStatus): {
 		label: MessageKey;
-		variant: 'default' | 'outline' | 'secondary';
+		tone: 'success' | 'neutral';
 	} {
-		if (s === 'active') return { label: 'socialAid.statusActive', variant: 'default' };
-		if (s === 'closed') return { label: 'socialAid.statusClosed', variant: 'secondary' };
-		return { label: 'socialAid.statusCancelled', variant: 'outline' };
+		if (s === 'active') return { label: 'socialAid.statusActive', tone: 'success' };
+		if (s === 'closed') return { label: 'socialAid.statusClosed', tone: 'neutral' };
+		return { label: 'socialAid.statusCancelled', tone: 'neutral' };
 	}
 
 	$effect(() => {
@@ -104,36 +114,49 @@
 		{/snippet}
 	</PageHeader>
 
-	<div class="flex flex-wrap items-end gap-3">
-		<div class="flex flex-col gap-1">
+	<form
+		class="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3"
+		onsubmit={(e) => {
+			e.preventDefault();
+			applyFilters();
+		}}
+	>
+		<div class="flex min-w-44 flex-1 flex-col gap-1">
 			<Label for="aid-search">{t('common.search')}</Label>
-			<Input id="aid-search" class="w-64" bind:value={search} placeholder={t('socialAid.search')} />
+			<Input id="aid-search" bind:value={search} placeholder={t('socialAid.search')} />
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="aid-status">{t('socialAid.status')}</Label>
-			<select
-				id="aid-status"
-				class="w-40 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={status}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				<option value="active">{t('socialAid.statusActive')}</option>
-				<option value="closed">{t('socialAid.statusClosed')}</option>
-				<option value="cancelled">{t('socialAid.statusCancelled')}</option>
-			</select>
+			<Label id="aid-status-label">{t('socialAid.status')}</Label>
+			<Select.Root type="single" bind:value={status}>
+				<Select.Trigger class="w-40" aria-labelledby="aid-status-label">
+					{status === 'active'
+						? t('socialAid.statusActive')
+						: status === 'closed'
+							? t('socialAid.statusClosed')
+							: status === 'cancelled'
+								? t('socialAid.statusCancelled')
+								: t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					<Select.Item value="active">{t('socialAid.statusActive')}</Select.Item>
+					<Select.Item value="closed">{t('socialAid.statusClosed')}</Select.Item>
+					<Select.Item value="cancelled">{t('socialAid.statusCancelled')}</Select.Item>
+				</Select.Content>
+			</Select.Root>
 		</div>
-		<Button variant="outline" size="sm" onclick={applyFilters}>
+		<Button type="submit" variant="outline" size="sm">
 			{t('incomeExpense.filters.apply')}
 		</Button>
-		<Button variant="ghost" size="sm" onclick={clearFilters}>
+		<Button type="button" variant="ghost" size="sm" onclick={clearFilters}>
 			{t('incomeExpense.filters.clear')}
 		</Button>
-	</div>
+	</form>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="socialAid.empty" />
 	{:else}
@@ -149,9 +172,9 @@
 							<TableHead>{t('socialAid.number')}</TableHead>
 							<TableHead>{t('socialAid.name')}</TableHead>
 							<TableHead>{t('socialAid.status')}</TableHead>
-							<TableHead>{t('socialAid.totalDonated')}</TableHead>
-							<TableHead>{t('socialAid.totalDisbursed')}</TableHead>
-							<TableHead>{t('socialAid.available')}</TableHead>
+							<TableHead class="text-right">{t('socialAid.totalDonated')}</TableHead>
+							<TableHead class="text-right">{t('socialAid.totalDisbursed')}</TableHead>
+							<TableHead class="text-right">{t('socialAid.available')}</TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>
@@ -175,33 +198,26 @@
 								</TableCell>
 								<TableCell>
 									{@const badge = statusBadge(item.status)}
-									<Badge variant={badge.variant}>{t(badge.label)}</Badge>
+									<StatusBadge label={t(badge.label)} tone={badge.tone} />
 								</TableCell>
-								<TableCell>{formatTry(item.totalDonated)}</TableCell>
-								<TableCell>{formatTry(item.totalDisbursed)}</TableCell>
-								<TableCell>{formatTry(item.available)}</TableCell>
+								<TableCell class="text-right"><MoneyText value={item.totalDonated} /></TableCell>
+								<TableCell class="text-right"><MoneyText value={item.totalDisbursed} /></TableCell>
+								<TableCell class="text-right">
+									<MoneyText value={item.available} class="font-medium" />
+								</TableCell>
 							</TableRow>
 						{/each}
 					</TableBody>
 				</Table>
-				<div class="mt-3 flex items-center justify-between">
-					<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-						{t('pagination.previous')}
-					</Button>
-					<span class="text-sm text-muted-foreground">
-						{t('pagination.pageInfo')
-							.replace('{page}', String(page))
-							.replace('{pages}', String(pages))
-							.replace('{total}', String(data.totalCount))}
-					</span>
-					<Button
-						variant="outline"
-						size="sm"
-						disabled={page >= pages}
-						onclick={() => goPage(page + 1)}
-					>
-						{t('pagination.next')}
-					</Button>
+				<div class="mt-3">
+					<Pager
+						{page}
+						{pages}
+						total={data.totalCount}
+						{pageSize}
+						onPage={goPage}
+						onPageSize={setPageSize}
+					/>
 				</div>
 			</CardContent>
 		</Card>

@@ -1,5 +1,8 @@
 <script lang="ts">
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import StatCard from '$lib/components/stat-card.svelte';
 	import {
 		Card,
 		CardContent,
@@ -8,6 +11,7 @@
 		CardTitle
 	} from '$lib/components/ui/card';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
@@ -195,51 +199,56 @@
 	<PageHeader titleKey="reports.title" descriptionKey="reports.description">
 		{#snippet actions()}
 			<div class="flex flex-col gap-1">
-				<Label for="report-type">{t('reports.type')}</Label>
-				<select
-					id="report-type"
-					class="w-72 rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={selectedType}
-				>
-					<option value="overview">{t('reports.type.overview')}</option>
-					{#each REPORT_DEFS as def (def.id)}
-						<option value={def.id}>{t(def.labelKey)}</option>
-					{/each}
-					<option value="socialAid">{t('reports.type.socialAid')}</option>
-					<option value="governance">{t('reports.type.governance')}</option>
-					<option value="incomeExpenseTrend">{t('reports.type.incomeExpenseTrend')}</option>
-				</select>
+				<Label id="report-type-label">{t('reports.type')}</Label>
+				<Select.Root type="single" bind:value={selectedType}>
+					<Select.Trigger class="w-72" aria-labelledby="report-type-label">
+						{selectedType === 'overview'
+							? t('reports.type.overview')
+							: selectedType === 'socialAid'
+								? t('reports.type.socialAid')
+								: selectedType === 'governance'
+									? t('reports.type.governance')
+									: selectedType === 'incomeExpenseTrend'
+										? t('reports.type.incomeExpenseTrend')
+										: t(findReport(selectedType)?.labelKey ?? 'reports.type.overview')}
+					</Select.Trigger>
+					<Select.Content>
+						<Select.Item value="overview">{t('reports.type.overview')}</Select.Item>
+						{#each REPORT_DEFS as def (def.id)}
+							<Select.Item value={def.id}>{t(def.labelKey)}</Select.Item>
+						{/each}
+						<Select.Item value="socialAid">{t('reports.type.socialAid')}</Select.Item>
+						<Select.Item value="governance">{t('reports.type.governance')}</Select.Item>
+						<Select.Item value="incomeExpenseTrend">
+							{t('reports.type.incomeExpenseTrend')}
+						</Select.Item>
+					</Select.Content>
+				</Select.Root>
 			</div>
 		{/snippet}
 	</PageHeader>
 
 	{#if selectedType === 'overview'}
 		{#if loadError}
-			<p class="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
-				{t(loadError)}
-			</p>
+			<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 		{:else if !overview}
-			<p class="text-sm text-muted-foreground">{t('reports.loading')}</p>
+			<ListSkeleton rows={4} />
 		{:else}
 			{#each overviewGroups as group (group.title)}
-				<Card>
-					<CardHeader>
-						<CardTitle class="text-base">{t(group.title)}</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<div class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
-							{#each group.cards as card (card.labelKey)}
-								<div class="rounded-lg border px-4 py-3">
-									<div class="text-xs text-muted-foreground">{t(card.labelKey)}</div>
-									<div class="mt-1 text-lg font-semibold tabular-nums">{cardValue(card)}</div>
-									{#if card.noteKey}
-										<div class="mt-1 text-xs text-muted-foreground">{t(card.noteKey)}</div>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					</CardContent>
-				</Card>
+				<section class="flex flex-col gap-3">
+					<h2 class="text-sm font-semibold tracking-wide text-muted-foreground uppercase">
+						{t(group.title)}
+					</h2>
+					<div class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+						{#each group.cards as card (card.labelKey)}
+							<StatCard
+								label={t(card.labelKey)}
+								value={cardValue(card)}
+								hint={card.noteKey ? t(card.noteKey) : undefined}
+							/>
+						{/each}
+					</div>
+				</section>
 			{/each}
 		{/if}
 	{:else if selectedType === 'socialAid'}

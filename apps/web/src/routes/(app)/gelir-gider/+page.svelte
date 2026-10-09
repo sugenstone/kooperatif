@@ -1,14 +1,12 @@
 <script lang="ts">
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import MoneyText from '$lib/components/money-text.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import StatCard from '$lib/components/stat-card.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import {
-		Card,
-		CardContent,
-		CardDescription,
-		CardHeader,
-		CardTitle
-	} from '$lib/components/ui/card';
+	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import {
@@ -119,35 +117,22 @@
 	</div>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if summary}
 		<div class="grid gap-4 sm:grid-cols-3">
-			<Card>
-				<CardHeader>
-					<CardTitle>{t('incomeExpense.summary.incomeTotal')}</CardTitle>
-					<CardDescription>{summary.incomeCount}</CardDescription>
-				</CardHeader>
-				<CardContent class="text-xl font-semibold">
-					{formatTry(summary.incomeTotal)}
-				</CardContent>
-			</Card>
-			<Card>
-				<CardHeader>
-					<CardTitle>{t('incomeExpense.summary.expenseTotal')}</CardTitle>
-					<CardDescription>{summary.expenseCount}</CardDescription>
-				</CardHeader>
-				<CardContent class="text-xl font-semibold">
-					{formatTry(summary.expenseTotal)}
-				</CardContent>
-			</Card>
-			<Card>
-				<CardHeader>
-					<CardTitle>{t('incomeExpense.summary.net')}</CardTitle>
-				</CardHeader>
-				<CardContent class="text-xl font-semibold">
-					{formatTry(summary.net)}
-				</CardContent>
-			</Card>
+			<StatCard
+				label={t('incomeExpense.summary.incomeTotal')}
+				value={formatTry(summary.incomeTotal)}
+				hint={String(summary.incomeCount)}
+				tone="success"
+			/>
+			<StatCard
+				label={t('incomeExpense.summary.expenseTotal')}
+				value={formatTry(summary.expenseTotal)}
+				hint={String(summary.expenseCount)}
+				tone="danger"
+			/>
+			<StatCard label={t('incomeExpense.summary.net')} value={formatTry(summary.net)} />
 		</div>
 
 		<div class="grid gap-4 lg:grid-cols-2">
@@ -162,7 +147,7 @@
 								<TableHead>{t('income.number')}</TableHead>
 								<TableHead>{t('incomeExpense.date')}</TableHead>
 								<TableHead>{t('incomeExpense.category')}</TableHead>
-								<TableHead>{t('incomeExpense.amount')}</TableHead>
+								<TableHead class="text-right">{t('incomeExpense.amount')}</TableHead>
 							</TableRow>
 						</TableHeader>
 						<TableBody>
@@ -178,7 +163,9 @@
 									</TableCell>
 									<TableCell>{formatDate(item.occurredAt)}</TableCell>
 									<TableCell>{item.categoryName}</TableCell>
-									<TableCell>{formatTry(item.amount)}</TableCell>
+									<TableCell class="text-right">
+										<MoneyText value={item.amount} class="font-medium" />
+									</TableCell>
 								</TableRow>
 							{:else}
 								<TableRow>
@@ -202,7 +189,7 @@
 								<TableHead>{t('expense.number')}</TableHead>
 								<TableHead>{t('incomeExpense.date')}</TableHead>
 								<TableHead>{t('incomeExpense.category')}</TableHead>
-								<TableHead>{t('incomeExpense.amount')}</TableHead>
+								<TableHead class="text-right">{t('incomeExpense.amount')}</TableHead>
 							</TableRow>
 						</TableHeader>
 						<TableBody>
@@ -218,7 +205,9 @@
 									</TableCell>
 									<TableCell>{formatDate(item.occurredAt)}</TableCell>
 									<TableCell>{item.categoryName}</TableCell>
-									<TableCell>{formatTry(item.amount)}</TableCell>
+									<TableCell class="text-right">
+										<MoneyText value={item.amount} class="font-medium" />
+									</TableCell>
 								</TableRow>
 							{:else}
 								<TableRow>
@@ -233,6 +222,6 @@
 			</Card>
 		</div>
 	{:else}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton rows={4} />
 	{/if}
 </section>

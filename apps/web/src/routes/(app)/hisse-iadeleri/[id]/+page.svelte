@@ -12,6 +12,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -690,19 +691,28 @@
 												</p>
 												<div class="grid grid-cols-4 items-end gap-3">
 													<div class="flex flex-col gap-1">
-														<Label for="st-account">{t('settlements.new.account')}</Label>
-														<select
-															id="st-account"
-															class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-															bind:value={settleAccountId}
-														>
-															<option value="">—</option>
-															{#each (accounts?.items ?? []).filter((a) => a.status === 'active') as account (account.id)}
-																<option value={account.id}>
-																	{account.name} ({formatTry(account.balance)})
-																</option>
-															{/each}
-														</select>
+														<Label id="st-account-label">{t('settlements.new.account')}</Label>
+														<Select.Root type="single" bind:value={settleAccountId}>
+															<Select.Trigger
+																id="st-account"
+																class="w-full"
+																aria-labelledby="st-account-label"
+															>
+																{(() => {
+																	const a = (accounts?.items ?? []).find(
+																		(aa) => aa.id === settleAccountId
+																	);
+																	return a ? `${a.name} (${formatTry(a.balance)})` : '—';
+																})()}
+															</Select.Trigger>
+															<Select.Content>
+																{#each (accounts?.items ?? []).filter((a) => a.status === 'active') as account (account.id)}
+																	<Select.Item value={account.id}>
+																		{account.name} ({formatTry(account.balance)})
+																	</Select.Item>
+																{/each}
+															</Select.Content>
+														</Select.Root>
 													</div>
 													<div class="flex flex-col gap-1">
 														<Label for="st-amount">{t('settlements.new.amount')}</Label>

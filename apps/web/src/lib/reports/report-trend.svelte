@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -39,16 +40,15 @@
 
 <div class="flex flex-wrap items-end gap-3">
 	<div class="flex flex-col gap-1">
-		<Label for="rt-months">{t('reports.filter.months')}</Label>
-		<select
-			id="rt-months"
-			class="w-32 rounded-md border bg-background px-3 py-2 text-sm"
-			bind:value={months}
-		>
-			{#each [3, 6, 12, 24] as n (n)}
-				<option value={String(n)}>{n}</option>
-			{/each}
-		</select>
+		<Label id="rt-months-label">{t('reports.filter.months')}</Label>
+		<Select.Root type="single" bind:value={months}>
+			<Select.Trigger class="w-32" aria-labelledby="rt-months-label">{months}</Select.Trigger>
+			<Select.Content>
+				{#each [3, 6, 12, 24] as n (n)}
+					<Select.Item value={String(n)}>{n}</Select.Item>
+				{/each}
+			</Select.Content>
+		</Select.Root>
 	</div>
 	<Button variant="secondary" size="sm" onclick={() => void refresh()}>
 		{t('reports.applyFilters')}

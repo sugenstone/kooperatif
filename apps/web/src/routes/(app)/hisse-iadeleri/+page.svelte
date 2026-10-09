@@ -1,8 +1,12 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import MoneyText from '$lib/components/money-text.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { resolve } from '$app/paths';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -13,6 +17,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -26,7 +31,6 @@
 	import { apiFetch } from '$lib/api-client';
 	import { can } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { formatTry } from '$lib/money';
 	import {
 		SHARE_RETURNS_PATH,
 		type Paginated,
@@ -34,7 +38,7 @@
 		type ShareReturnStatus
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let page = $state(1);
 	let data = $state<Paginated<ShareReturnListItem> | null>(null);
@@ -64,7 +68,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (search.trim()) params.set('search', search.trim());
 			if (status) params.set('status', status);
@@ -91,15 +95,21 @@
 		void refresh();
 	}
 
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
+		void refresh();
+	}
+
 	const pages = $derived(data ? Math.max(1, Math.ceil(data.totalCount / data.pageSize)) : 1);
 
 	function statusBadge(s: ShareReturnStatus): {
 		label: MessageKey;
-		variant: 'default' | 'outline' | 'secondary';
+		tone: 'warning' | 'success' | 'neutral';
 	} {
-		if (s === 'pending') return { label: 'shareReturns.statusPending', variant: 'secondary' };
-		if (s === 'finalized') return { label: 'shareReturns.statusFinalized', variant: 'default' };
-		return { label: 'shareReturns.statusCancelled', variant: 'outline' };
+		if (s === 'pending') return { label: 'shareReturns.statusPending', tone: 'warning' };
+		if (s === 'finalized') return { label: 'shareReturns.statusFinalized', tone: 'success' };
+		return { label: 'shareReturns.statusCancelled', tone: 'neutral' };
 	}
 
 	$effect(() => {
@@ -120,41 +130,49 @@
 		{/snippet}
 	</PageHeader>
 
-	<div class="flex flex-wrap items-end gap-3">
-		<div class="flex flex-col gap-1">
+	<form
+		class="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3"
+		onsubmit={(e) => {
+			e.preventDefault();
+			applyFilters();
+		}}
+	>
+		<div class="flex min-w-44 flex-1 flex-col gap-1">
 			<Label for="sr-search">{t('common.search')}</Label>
-			<Input
-				id="sr-search"
-				class="w-64"
-				bind:value={search}
-				placeholder={t('shareReturns.search')}
-			/>
+			<Input id="sr-search" bind:value={search} placeholder={t('shareReturns.search')} />
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="sr-status">{t('shareReturns.status')}</Label>
-			<select
-				id="sr-status"
-				class="w-40 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={status}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				<option value="pending">{t('shareReturns.statusPending')}</option>
-				<option value="finalized">{t('shareReturns.statusFinalized')}</option>
-				<option value="cancelled">{t('shareReturns.statusCancelled')}</option>
-			</select>
+			<Label id="sr-status-label">{t('shareReturns.status')}</Label>
+			<Select.Root type="single" bind:value={status}>
+				<Select.Trigger class="w-40" aria-labelledby="sr-status-label">
+					{status === 'pending'
+						? t('shareReturns.statusPending')
+						: status === 'finalized'
+							? t('shareReturns.statusFinalized')
+							: status === 'cancelled'
+								? t('shareReturns.statusCancelled')
+								: t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					<Select.Item value="pending">{t('shareReturns.statusPending')}</Select.Item>
+					<Select.Item value="finalized">{t('shareReturns.statusFinalized')}</Select.Item>
+					<Select.Item value="cancelled">{t('shareReturns.statusCancelled')}</Select.Item>
+				</Select.Content>
+			</Select.Root>
 		</div>
-		<Button variant="outline" size="sm" onclick={applyFilters}>
+		<Button type="submit" variant="outline" size="sm">
 			{t('incomeExpense.filters.apply')}
 		</Button>
-		<Button variant="ghost" size="sm" onclick={clearFilters}>
+		<Button type="button" variant="ghost" size="sm" onclick={clearFilters}>
 			{t('incomeExpense.filters.clear')}
 		</Button>
-	</div>
+	</form>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="shareReturns.empty" />
 	{:else}
@@ -174,7 +192,7 @@
 							<TableHead>{t('shareReturns.effectiveDate')}</TableHead>
 							<TableHead>{t('shareReturns.status')}</TableHead>
 							<TableHead>{t('shareReturns.entitlementCount')}</TableHead>
-							<TableHead>{t('shareReturns.outstanding')}</TableHead>
+							<TableHead class="text-right">{t('shareReturns.outstanding')}</TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>
@@ -208,12 +226,12 @@
 								<TableCell>{formatDate(item.effectiveReturnDate)}</TableCell>
 								<TableCell>
 									{@const badge = statusBadge(item.status)}
-									<Badge variant={badge.variant}>{t(badge.label)}</Badge>
+									<StatusBadge label={t(badge.label)} tone={badge.tone} />
 								</TableCell>
 								<TableCell>{item.entitlementCount}</TableCell>
-								<TableCell>
+								<TableCell class="text-right">
 									{#if item.outstandingAmount !== null}
-										{formatTry(item.outstandingAmount)}
+										<MoneyText value={item.outstandingAmount} class="font-medium" />
 									{:else}
 										<span class="text-muted-foreground">—</span>
 									{/if}
@@ -225,19 +243,13 @@
 			</CardContent>
 		</Card>
 
-		<div class="flex items-center justify-between">
-			<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-				{t('pagination.previous')}
-			</Button>
-			<span class="text-sm text-muted-foreground">
-				{t('pagination.pageInfo')
-					.replace('{page}', String(page))
-					.replace('{pages}', String(pages))
-					.replace('{total}', String(data.totalCount))}
-			</span>
-			<Button variant="outline" size="sm" disabled={page >= pages} onclick={() => goPage(page + 1)}>
-				{t('pagination.next')}
-			</Button>
-		</div>
+		<Pager
+			{page}
+			{pages}
+			total={data.totalCount}
+			{pageSize}
+			onPage={goPage}
+			onPageSize={setPageSize}
+		/>
 	{/if}
 </section>

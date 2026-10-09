@@ -11,6 +11,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -531,24 +532,35 @@
 								</p>
 							{:else}
 								<div class="grid gap-3 md:grid-cols-2">
-									<div>
-										<Label for="alloc-assessment">{t('payments.allocationAssessment')}</Label>
-										<select
-											id="alloc-assessment"
-											class="w-full rounded-md border bg-background px-3 py-2 text-sm"
+									<div class="flex flex-col gap-1">
+										<Label id="alloc-assessment-label">
+											{t('payments.allocationAssessment')}
+										</Label>
+										<Select.Root
+											type="single"
 											bind:value={allocAssessmentId}
-											onchange={() => {
-												const chosen = allocAssessments.find((a) => a.id === allocAssessmentId);
+											onValueChange={(v) => {
+												const chosen = allocAssessments.find((a) => a.id === v);
 												if (chosen) allocAmount = canonicalToTryInput(chosen.remainingAmount);
 											}}
 										>
-											{#each allocAssessments as assessment (assessment.id)}
-												<option value={assessment.id}>
-													{assessment.periodNumber} — {assessment.periodName} ·
-													{formatTry(assessment.remainingAmount)}
-												</option>
-											{/each}
-										</select>
+											<Select.Trigger class="w-full" aria-labelledby="alloc-assessment-label">
+												{(() => {
+													const chosen = allocAssessments.find((a) => a.id === allocAssessmentId);
+													return chosen
+														? `${chosen.periodNumber} — ${chosen.periodName} · ${formatTry(chosen.remainingAmount)}`
+														: '—';
+												})()}
+											</Select.Trigger>
+											<Select.Content>
+												{#each allocAssessments as assessment (assessment.id)}
+													<Select.Item value={assessment.id}>
+														{assessment.periodNumber} — {assessment.periodName} ·
+														{formatTry(assessment.remainingAmount)}
+													</Select.Item>
+												{/each}
+											</Select.Content>
+										</Select.Root>
 									</div>
 									<div>
 										<Label for="alloc-amount">{t('payments.new.allocateAmount')}</Label>

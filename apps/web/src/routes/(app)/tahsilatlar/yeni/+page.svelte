@@ -3,15 +3,11 @@
 	import { resolve } from '$app/paths';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import {
-		Card,
-		CardContent,
-		CardDescription,
-		CardHeader,
-		CardTitle
-	} from '$lib/components/ui/card';
+	import { Card, CardContent, CardHeader } from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import StepHeader from '$lib/components/step-header.svelte';
 	import {
 		Table,
 		TableBody,
@@ -350,8 +346,7 @@
 	<!-- 1. Payer -->
 	<Card>
 		<CardHeader>
-			<CardTitle>{t('payments.new.stepPayer')}</CardTitle>
-			<CardDescription>{t('payments.new.payerHint')}</CardDescription>
+			<StepHeader step={1} title={t('payments.new.stepPayer')} hint={t('payments.new.payerHint')} />
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
 			<div class="flex gap-2">
@@ -431,7 +426,7 @@
 	<!-- 2. Debt selection -->
 	<Card>
 		<CardHeader>
-			<CardTitle>{t('payments.new.stepDebt')}</CardTitle>
+			<StepHeader step={2} title={t('payments.new.stepDebt')} />
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
 			<div class="flex gap-2">
@@ -621,7 +616,7 @@
 	<!-- 3. Amounts -->
 	<Card>
 		<CardHeader>
-			<CardTitle>{t('payments.new.stepAmounts')}</CardTitle>
+			<StepHeader step={3} title={t('payments.new.stepAmounts')} />
 		</CardHeader>
 		<CardContent class="grid gap-4 md:grid-cols-2">
 			<div>
@@ -634,35 +629,43 @@
 				/>
 			</div>
 			<div>
-				<Label for="pay-method">{t('payments.method')}</Label>
-				<select
-					id="pay-method"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={method}
-				>
-					<option value="cash">{t('payments.methodCash')}</option>
-					<option value="bank_transfer">{t('payments.methodBankTransfer')}</option>
-					<option value="card">{t('payments.methodCard')}</option>
-					<option value="other">{t('payments.methodOther')}</option>
-				</select>
+				<Label id="pay-method-label" for="">{t('payments.method')}</Label>
+				<Select.Root type="single" bind:value={method}>
+					<Select.Trigger class="w-full" aria-labelledby="pay-method-label">
+						{t(
+							`payments.method${method === 'cash' ? 'Cash' : method === 'bank_transfer' ? 'BankTransfer' : method === 'card' ? 'Card' : 'Other'}` as MessageKey
+						)}
+					</Select.Trigger>
+					<Select.Content>
+						<Select.Item value="cash">{t('payments.methodCash')}</Select.Item>
+						<Select.Item value="bank_transfer">{t('payments.methodBankTransfer')}</Select.Item>
+						<Select.Item value="card">{t('payments.methodCard')}</Select.Item>
+						<Select.Item value="other">{t('payments.methodOther')}</Select.Item>
+					</Select.Content>
+				</Select.Root>
 			</div>
 			<div>
-				<Label for="pay-account">{t('payments.destinationAccount')}</Label>
-				<select
-					id="pay-account"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={destinationAccountId}
-					disabled={accountsLoadError !== null}
-				>
-					<option value="">—</option>
-					{#each accountOptions as account (account.id)}
-						<option value={account.id}>
-							{account.name} ({account.accountType === 'cash'
-								? t('accounts.typeCash')
-								: t('accounts.typeBank')})
-						</option>
-					{/each}
-				</select>
+				<Label id="pay-account-label" for="">{t('payments.destinationAccount')}</Label>
+				<Select.Root type="single" bind:value={destinationAccountId}>
+					<Select.Trigger
+						class="w-full"
+						aria-labelledby="pay-account-label"
+						disabled={accountsLoadError !== null}
+					>
+						{selectedAccount
+							? `${selectedAccount.name} (${selectedAccount.accountType === 'cash' ? t('accounts.typeCash') : t('accounts.typeBank')})`
+							: '—'}
+					</Select.Trigger>
+					<Select.Content>
+						{#each accountOptions as account (account.id)}
+							<Select.Item value={account.id}>
+								{account.name} ({account.accountType === 'cash'
+									? t('accounts.typeCash')
+									: t('accounts.typeBank')})
+							</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 				<p class="mt-1 text-xs text-muted-foreground">
 					{t('payments.destinationAccountHelp')}
 				</p>
@@ -685,7 +688,7 @@
 	<!-- 4. Preview & confirm -->
 	<Card>
 		<CardHeader>
-			<CardTitle>{t('payments.new.stepReview')}</CardTitle>
+			<StepHeader step={4} title={t('payments.new.stepReview')} />
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
 			<dl class="grid grid-cols-[minmax(180px,auto)_1fr] gap-x-6 gap-y-2 text-sm">

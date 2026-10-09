@@ -11,6 +11,8 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
@@ -100,10 +102,11 @@
 </svelte:head>
 
 <section class="flex max-w-2xl flex-col gap-6">
-	<div class="flex items-center gap-3">
-		<Button variant="ghost" size="sm" href="/transferler">← {t('transfers.title')}</Button>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('transfers.new.title')}</h1>
-	</div>
+	<PageHeader titleKey="transfers.new.title" descriptionKey="transfers.description">
+		{#snippet actions()}
+			<Button variant="ghost" size="sm" href="/transferler">← {t('transfers.title')}</Button>
+		{/snippet}
+	</PageHeader>
 
 	<Card>
 		<CardHeader>
@@ -111,33 +114,35 @@
 			<CardDescription>{t('transfers.description')}</CardDescription>
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
-			<div>
-				<Label for="tr-source">{t('transfers.source')}</Label>
-				<select
-					id="tr-source"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={sourceAccountId}
-					disabled={accountsError !== null}
-				>
-					<option value="">—</option>
-					{#each accounts as account (account.id)}
-						<option value={account.id}>{accountLabel(account)}</option>
-					{/each}
-				</select>
+			<div class="flex flex-col gap-1">
+				<Label id="tr-source-label">{t('transfers.source')}</Label>
+				<Select.Root type="single" bind:value={sourceAccountId} disabled={accountsError !== null}>
+					<Select.Trigger class="w-full" aria-labelledby="tr-source-label">
+						{source ? accountLabel(source) : '—'}
+					</Select.Trigger>
+					<Select.Content>
+						{#each accounts as account (account.id)}
+							<Select.Item value={account.id}>{accountLabel(account)}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 			</div>
-			<div>
-				<Label for="tr-destination">{t('transfers.destination')}</Label>
-				<select
-					id="tr-destination"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
+			<div class="flex flex-col gap-1">
+				<Label id="tr-destination-label">{t('transfers.destination')}</Label>
+				<Select.Root
+					type="single"
 					bind:value={destinationAccountId}
 					disabled={accountsError !== null}
 				>
-					<option value="">—</option>
-					{#each accounts as account (account.id)}
-						<option value={account.id}>{accountLabel(account)}</option>
-					{/each}
-				</select>
+					<Select.Trigger class="w-full" aria-labelledby="tr-destination-label">
+						{destination ? accountLabel(destination) : '—'}
+					</Select.Trigger>
+					<Select.Content>
+						{#each accounts as account (account.id)}
+							<Select.Item value={account.id}>{accountLabel(account)}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 			</div>
 			{#if sameAccount}
 				<p class="text-sm text-destructive">{t('transfers.errors.sameAccount')}</p>

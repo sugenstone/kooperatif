@@ -11,6 +11,8 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
@@ -78,10 +80,11 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('decisions.createTitle')}</h1>
-		<p class="mt-1 max-w-2xl text-muted-foreground">{t('decisions.createDescription')}</p>
-	</div>
+	<PageHeader titleKey="decisions.createTitle" descriptionKey="decisions.createDescription">
+		{#snippet actions()}
+			<Button variant="ghost" size="sm" href="/yonetim">← {t('governance.title')}</Button>
+		{/snippet}
+	</PageHeader>
 
 	<Card class="max-w-xl">
 		<CardHeader>
@@ -90,17 +93,17 @@
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
 			<div class="flex flex-col gap-1">
-				<Label for="dec-body">{t('decisions.body')}</Label>
-				<select
-					id="dec-body"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={bodyId}
-				>
-					<option value="">—</option>
-					{#each bodies?.items ?? [] as body (body.id)}
-						<option value={body.id}>{body.name}</option>
-					{/each}
-				</select>
+				<Label id="dec-body-label">{t('decisions.body')}</Label>
+				<Select.Root type="single" bind:value={bodyId}>
+					<Select.Trigger id="dec-body" class="w-full" aria-labelledby="dec-body-label">
+						{bodies?.items?.find((b) => b.id === bodyId)?.name ?? '—'}
+					</Select.Trigger>
+					<Select.Content>
+						{#each bodies?.items ?? [] as body (body.id)}
+							<Select.Item value={body.id}>{body.name}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 			</div>
 			<div class="flex flex-col gap-1">
 				<Label for="dec-title">{t('decisions.field.title')}</Label>

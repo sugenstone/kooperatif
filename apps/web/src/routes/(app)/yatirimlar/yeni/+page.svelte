@@ -12,6 +12,8 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
@@ -74,10 +76,11 @@
 </svelte:head>
 
 <section class="flex max-w-2xl flex-col gap-6">
-	<div class="flex items-center gap-3">
-		<Button variant="ghost" size="sm" href="/yatirimlar">← {t('investments.title')}</Button>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('investments.createTitle')}</h1>
-	</div>
+	<PageHeader titleKey="investments.createTitle" descriptionKey="investments.createDescription">
+		{#snippet actions()}
+			<Button variant="ghost" size="sm" href="/yatirimlar">← {t('investments.title')}</Button>
+		{/snippet}
+	</PageHeader>
 
 	{#if submitError}
 		<Alert variant="destructive">{t(submitError)}</Alert>
@@ -94,15 +97,18 @@
 				<Input id="inv-name" bind:value={name} />
 			</div>
 			<div class="flex flex-col gap-1">
-				<Label for="inv-type">{t('investments.type')}</Label>
-				<select
-					id="inv-type"
-					class="w-56 rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={investmentType}
-				>
-					<option value="real_estate">{t('investments.typeRealEstate')}</option>
-					<option value="business">{t('investments.typeBusiness')}</option>
-				</select>
+				<Label id="inv-type-label">{t('investments.type')}</Label>
+				<Select.Root type="single" bind:value={investmentType}>
+					<Select.Trigger class="w-56" aria-labelledby="inv-type-label">
+						{investmentType === 'real_estate'
+							? t('investments.typeRealEstate')
+							: t('investments.typeBusiness')}
+					</Select.Trigger>
+					<Select.Content>
+						<Select.Item value="real_estate">{t('investments.typeRealEstate')}</Select.Item>
+						<Select.Item value="business">{t('investments.typeBusiness')}</Select.Item>
+					</Select.Content>
+				</Select.Root>
 			</div>
 			<div class="flex flex-col gap-1">
 				<Label for="inv-acquired">{t('investments.acquiredAt')}</Label>

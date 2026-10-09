@@ -1,6 +1,8 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
-	import { Badge } from '$lib/components/ui/badge';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -86,10 +88,7 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('auth.sessions.title')}</h1>
-		<p class="mt-1 max-w-2xl text-muted-foreground">{t('auth.sessions.description')}</p>
-	</div>
+	<PageHeader titleKey="auth.sessions.title" descriptionKey="auth.sessions.description" />
 
 	<Card class="w-full">
 		<CardHeader>
@@ -105,9 +104,11 @@
 		<CardContent class="flex flex-col gap-4">
 			{#if loadError}
 				<p class="text-sm text-destructive">{t('auth.login.error.fallback')}</p>
-			{:else if sessions && sessions.sessions.length === 0}
+			{:else if sessions === null}
+				<ListSkeleton rows={3} />
+			{:else if sessions.sessions.length === 0}
 				<EmptyState messageKey="auth.sessions.empty" />
-			{:else if sessions}
+			{:else}
 				<Table>
 					<TableHeader>
 						<TableRow>
@@ -127,7 +128,7 @@
 								<TableCell>{formatTimestamp(session.expiresAt)}</TableCell>
 								<TableCell class="text-right">
 									{#if session.current}
-										<Badge>{t('auth.sessions.current')}</Badge>
+										<StatusBadge label={t('auth.sessions.current')} tone="success" />
 									{:else}
 										<Button
 											variant="outline"

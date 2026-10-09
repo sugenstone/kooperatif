@@ -15,6 +15,7 @@ import BodyDetailPage from '../routes/(app)/yonetim/kurullar/[id]/+page.svelte';
 import DecisionNewPage from '../routes/(app)/yonetim/kararlar/yeni/+page.svelte';
 import DecisionDetailPage from '../routes/(app)/yonetim/kararlar/[id]/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOption, waitForUnlockedBody } from './select-helper';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
 	const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) =>
@@ -308,10 +309,8 @@ describe('decision create page', () => {
 		});
 		render(DecisionNewPage);
 
-		await waitFor(() => screen.getByText('Yönetim Kurulu'));
-		const bodySelect = document.getElementById('dec-body') as HTMLSelectElement;
-		bodySelect.value = BODY_ID;
-		bodySelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await screen.findByLabelText('Konu');
+		await pickSelectOption('dec-body', 'Yönetim Kurulu');
 		await userEvent.type(screen.getByLabelText('Konu'), 'Bütçe onayı');
 		const text = document.getElementById('dec-text') as HTMLTextAreaElement;
 		text.value = '2026 bütçesi onaylansın.';
@@ -377,15 +376,14 @@ describe('decision detail page', () => {
 		await screen.findByText('Bütçe onayı');
 
 		await userEvent.click(screen.getByRole('button', { name: 'Oy Kaydet' }));
-		const select = document.getElementById('vote-person') as HTMLSelectElement;
 		// Only the eligible (not-yet-voted) member is offered.
-		expect(select.options.length).toBe(2);
-		select.value = PERSON_A;
-		select.dispatchEvent(new Event('change', { bubbles: true }));
-		const choice = document.getElementById('vote-choice') as HTMLSelectElement;
-		choice.value = 'abstain';
-		choice.dispatchEvent(new Event('change', { bubbles: true }));
-		await tick();
+		const personTrigger = document.getElementById('vote-person') as HTMLElement;
+		await userEvent.click(personTrigger);
+		const options = await screen.findAllByRole('option', { hidden: true });
+		expect(options.length).toBe(1);
+		await userEvent.click(options[0]);
+		await waitForUnlockedBody();
+		await pickSelectOption('vote-choice', 'Çekimser');
 
 		await userEvent.click(screen.getByRole('button', { name: 'Oyu Kaydet' }));
 		await waitFor(() => expect(posted).not.toBeNull());

@@ -1,6 +1,9 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
-	import { Badge } from '$lib/components/ui/badge';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -78,15 +81,12 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('roles.title')}</h1>
-		<p class="mt-1 max-w-2xl text-muted-foreground">{t('roles.description')}</p>
-	</div>
+	<PageHeader titleKey="roles.title" descriptionKey="roles.description" />
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if roles === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton rows={4} />
 	{:else if roles.length === 0}
 		<EmptyState messageKey="roles.empty" />
 	{:else}
@@ -111,9 +111,9 @@
 								<TableCell>{role.name}</TableCell>
 								<TableCell>
 									{#if role.status === 'active'}
-										<Badge>{t('roles.active')}</Badge>
+										<StatusBadge label={t('roles.active')} tone="success" />
 									{:else}
-										<Badge variant="outline">{t('roles.disabled')}</Badge>
+										<StatusBadge label={t('roles.disabled')} tone="neutral" />
 									{/if}
 								</TableCell>
 								<TableCell>{role.permissions.length}</TableCell>

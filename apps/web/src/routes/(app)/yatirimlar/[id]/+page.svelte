@@ -11,6 +11,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -145,7 +146,7 @@
 	}
 
 	function accountBalance(accountId: string): string | null {
-		return accounts?.items.find((a) => a.id === accountId)?.balance ?? null;
+		return accounts?.items?.find((a) => a.id === accountId)?.balance ?? null;
 	}
 
 	function mapError(error: unknown): MessageKey {
@@ -560,19 +561,22 @@
 				<CardContent class="flex flex-col gap-3">
 					<div class="grid grid-cols-2 gap-3">
 						<div class="flex flex-col gap-1">
-							<Label for="fnd-account">{t('fundings.account')}</Label>
-							<select
-								id="fnd-account"
-								class="rounded-md border bg-background px-3 py-2 text-sm"
-								bind:value={fundAccountId}
-							>
-								<option value="">—</option>
-								{#each accounts?.items ?? [] as account (account.id)}
-									<option value={account.id}>
-										{account.name} · {formatTry(account.balance)}
-									</option>
-								{/each}
-							</select>
+							<Label id="fnd-account-label">{t('fundings.account')}</Label>
+							<Select.Root type="single" bind:value={fundAccountId}>
+								<Select.Trigger id="fnd-account" class="w-full" aria-labelledby="fnd-account-label">
+									{(() => {
+										const a = accounts?.items?.find((aa) => aa.id === fundAccountId);
+										return a ? `${a.name} · ${formatTry(a.balance)}` : '—';
+									})()}
+								</Select.Trigger>
+								<Select.Content>
+									{#each accounts?.items ?? [] as account (account.id)}
+										<Select.Item value={account.id}>
+											{account.name} · {formatTry(account.balance)}
+										</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 							{#if accountBalance(fundAccountId)}
 								<p class="text-xs text-muted-foreground">
 									{t('fundings.availableBalance')}: {formatTry(accountBalance(fundAccountId))}
@@ -666,19 +670,22 @@
 				<CardContent class="flex flex-col gap-3">
 					<div class="grid grid-cols-2 gap-3">
 						<div class="flex flex-col gap-1">
-							<Label for="inc-account">{t('investmentIncomes.account')}</Label>
-							<select
-								id="inc-account"
-								class="rounded-md border bg-background px-3 py-2 text-sm"
-								bind:value={incAccountId}
-							>
-								<option value="">—</option>
-								{#each accounts?.items ?? [] as account (account.id)}
-									<option value={account.id}>
-										{account.name} · {formatTry(account.balance)}
-									</option>
-								{/each}
-							</select>
+							<Label id="inc-account-label">{t('investmentIncomes.account')}</Label>
+							<Select.Root type="single" bind:value={incAccountId}>
+								<Select.Trigger id="inc-account" class="w-full" aria-labelledby="inc-account-label">
+									{(() => {
+										const a = accounts?.items?.find((aa) => aa.id === incAccountId);
+										return a ? `${a.name} · ${formatTry(a.balance)}` : '—';
+									})()}
+								</Select.Trigger>
+								<Select.Content>
+									{#each accounts?.items ?? [] as account (account.id)}
+										<Select.Item value={account.id}>
+											{account.name} · {formatTry(account.balance)}
+										</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 						</div>
 						<div class="flex flex-col gap-1">
 							<Label for="inc-amount">{t('investmentIncomes.amount')}</Label>
@@ -758,20 +765,30 @@
 								class="grid grid-cols-[1fr_160px_200px_auto] items-end gap-2 rounded-md border p-3"
 							>
 								<div class="flex flex-col gap-1">
-									<Label for={`disp-leg-acc-${i}`}>{t('disposals.proceedsAccount')}</Label>
-									<select
-										id={`disp-leg-acc-${i}`}
-										class="rounded-md border bg-background px-3 py-2 text-sm"
+									<Label>{t('disposals.proceedsAccount')}</Label>
+									<Select.Root
+										type="single"
 										value={leg.financialAccountId}
-										onchange={(e) => updateLeg(i, 'financialAccountId', e.currentTarget.value)}
+										onValueChange={(v) => updateLeg(i, 'financialAccountId', v)}
 									>
-										<option value="">—</option>
-										{#each accounts?.items ?? [] as account (account.id)}
-											<option value={account.id}>
-												{account.name} · {formatTry(account.balance)}
-											</option>
-										{/each}
-									</select>
+										<Select.Trigger
+											id={`disp-leg-acc-${i}`}
+											class="w-full"
+											aria-label={t('disposals.proceedsAccount')}
+										>
+											{(() => {
+												const a = accounts?.items?.find((aa) => aa.id === leg.financialAccountId);
+												return a ? `${a.name} · ${formatTry(a.balance)}` : '—';
+											})()}
+										</Select.Trigger>
+										<Select.Content>
+											{#each accounts?.items ?? [] as account (account.id)}
+												<Select.Item value={account.id}>
+													{account.name} · {formatTry(account.balance)}
+												</Select.Item>
+											{/each}
+										</Select.Content>
+									</Select.Root>
 								</div>
 								<div class="flex flex-col gap-1">
 									<Label for={`disp-leg-amount-${i}`}>{t('disposals.proceedsAmount')}</Label>

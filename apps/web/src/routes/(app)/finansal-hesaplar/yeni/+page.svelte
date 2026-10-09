@@ -11,6 +11,8 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
@@ -68,10 +70,11 @@
 </svelte:head>
 
 <section class="flex max-w-2xl flex-col gap-6">
-	<div class="flex items-center gap-3">
-		<Button variant="ghost" size="sm" href="/finansal-hesaplar">← {t('accounts.title')}</Button>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('accounts.create')}</h1>
-	</div>
+	<PageHeader titleKey="accounts.create" descriptionKey="accounts.description">
+		{#snippet actions()}
+			<Button variant="ghost" size="sm" href="/finansal-hesaplar">← {t('accounts.title')}</Button>
+		{/snippet}
+	</PageHeader>
 
 	<Card>
 		<CardHeader>
@@ -83,16 +86,17 @@
 				<Label for="acc-name">{t('accounts.name')}</Label>
 				<Input id="acc-name" bind:value={name} placeholder="Merkez Kasa" />
 			</div>
-			<div>
-				<Label for="acc-type">{t('accounts.type')}</Label>
-				<select
-					id="acc-type"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={accountType}
-				>
-					<option value="cash">{t('accounts.typeCash')}</option>
-					<option value="bank">{t('accounts.typeBank')}</option>
-				</select>
+			<div class="flex flex-col gap-1">
+				<Label id="acc-type-label">{t('accounts.type')}</Label>
+				<Select.Root type="single" bind:value={accountType}>
+					<Select.Trigger class="w-full" aria-labelledby="acc-type-label">
+						{accountType === 'cash' ? t('accounts.typeCash') : t('accounts.typeBank')}
+					</Select.Trigger>
+					<Select.Content>
+						<Select.Item value="cash">{t('accounts.typeCash')}</Select.Item>
+						<Select.Item value="bank">{t('accounts.typeBank')}</Select.Item>
+					</Select.Content>
+				</Select.Root>
 			</div>
 			<div>
 				<Label for="acc-description">{t('accounts.descriptionField')}</Label>

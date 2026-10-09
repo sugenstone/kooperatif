@@ -1,5 +1,9 @@
 <script lang="ts">
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
+	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -32,6 +36,7 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let toggling = $state<string | null>(null);
+	let pending: { user: UserWithRoles; status: 'disabled' | 'active' } | null = $state(null);
 
 	async function refresh(): Promise<void> {
 		loadError = null;
@@ -42,12 +47,9 @@
 		}
 	}
 
-	async function setUserStatus(user: UserWithRoles, status: 'disabled' | 'active'): Promise<void> {
-		if (toggling !== null) return;
-		const confirmed = confirm(
-			t(status === 'disabled' ? 'users.confirmDisable' : 'users.confirmEnable')
-		);
-		if (!confirmed) return;
+	async function confirmStatusChange(): Promise<void> {
+		if (toggling !== null || pending === null) return;
+		const { user, status } = pending;
 		toggling = user.id;
 		actionError = null;
 		try {
@@ -55,6 +57,7 @@
 				method: 'POST',
 				csrfToken: auth.csrfToken
 			});
+			pending = null;
 			await refresh();
 		} catch (error) {
 			actionError = apiErrorKey(error);
@@ -80,9 +83,9 @@
 	{/if}
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if users === null}
-		<p class="text-sm text-muted-foreground">{t('users.loading')}</p>
+		<ListSkeleton />
 	{:else}
 		<Card class="w-full">
 			<CardHeader>
@@ -122,9 +125,9 @@
 								</TableCell>
 								<TableCell>
 									{#if user.status === 'active'}
-										<Badge variant="secondary">{t('users.active')}</Badge>
+										<StatusBadge label={t('users.active')} tone="success" />
 									{:else}
-										<Badge variant="outline">{t('users.disabled')}</Badge>
+										<StatusBadge label={t('users.disabled')} tone="danger" />
 									{/if}
 								</TableCell>
 								<TableCell class="text-right">
@@ -135,7 +138,7 @@
 													variant="outline"
 													size="sm"
 													disabled={toggling !== null}
-													onclick={() => void setUserStatus(user, 'disabled')}
+													onclick={() => (pending = { user, status: 'disabled' })}
 												>
 													{t('users.disable')}
 												</Button>
@@ -144,7 +147,7 @@
 													variant="outline"
 													size="sm"
 													disabled={toggling !== null}
-													onclick={() => void setUserStatus(user, 'active')}
+													onclick={() => (pending = { user, status: 'active' })}
 												>
 													{t('users.enable')}
 												</Button>
@@ -162,4 +165,33 @@
 			</CardContent>
 		</Card>
 	{/if}
+
+	<AlertDialog.Root
+		open={pending !== null}
+		onOpenChange={(open) => {
+			if (!open && toggling === null) pending = null;
+		}}
+	>
+		<AlertDialog.Content>
+			<AlertDialog.Header>
+				<AlertDialog.Title>
+					{pending?.status === 'disabled' ? t('users.disable') : t('users.enable')}
+				</AlertDialog.Title>
+				<AlertDialog.Description>
+					{pending?.status === 'disabled' ? t('users.confirmDisable') : t('users.confirmEnable')}
+					{#if pending}
+						— {pending.user.displayName}
+					{/if}
+				</AlertDialog.Description>
+			</AlertDialog.Header>
+			<AlertDialog.Footer>
+				<AlertDialog.Cancel disabled={toggling !== null}>
+					{t('common.cancel')}
+				</AlertDialog.Cancel>
+				<AlertDialog.Action disabled={toggling !== null} onclick={() => void confirmStatusChange()}>
+					{pending?.status === 'disabled' ? t('users.disable') : t('users.enable')}
+				</AlertDialog.Action>
+			</AlertDialog.Footer>
+		</AlertDialog.Content>
+	</AlertDialog.Root>
 </section>

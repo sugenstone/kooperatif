@@ -11,6 +11,7 @@ import ReportsPage from '../routes/(app)/raporlar/+page.svelte';
 import ReportPanel from '$lib/reports/report-panel.svelte';
 import AppNav from './app-shell-harness.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOptionByLabel } from './select-helper';
 import { findReport } from '$lib/reports/catalog';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
@@ -157,8 +158,7 @@ describe('reports hub page', () => {
 		await waitFor(() => {
 			expect(screen.getByText('Finansal Görünüm')).toBeInTheDocument();
 		});
-		const user = userEvent.setup();
-		await user.selectOptions(screen.getByLabelText('Rapor türü'), 'movements');
+		await pickSelectOptionByLabel('Rapor türü', 'Hesap Hareketleri ve Kaynak İzi');
 		await waitFor(() => {
 			expect(screen.getByText('Kaynak Türü')).toBeInTheDocument();
 		});
@@ -200,7 +200,7 @@ describe('report panel', () => {
 			expect(screen.getByText('Kaynak Türü')).toBeInTheDocument();
 		});
 		const user = userEvent.setup();
-		await user.selectOptions(screen.getByLabelText('Kaynak türü'), 'transfer');
+		await pickSelectOptionByLabel('Kaynak türü', 'Transfer');
 		await user.click(screen.getByRole('button', { name: 'Filtrele' }));
 		await waitFor(() => {
 			const last = String(fetchMock.mock.calls.at(-1)?.[0]);

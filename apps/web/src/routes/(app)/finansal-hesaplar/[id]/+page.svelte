@@ -11,6 +11,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import Pager from '$lib/components/pager.svelte';
 	import {
 		Table,
 		TableBody,
@@ -364,35 +365,16 @@
 							{/each}
 						</TableBody>
 					</Table>
-					<div class="mt-3 flex items-center justify-between">
-						<Button
-							variant="outline"
-							size="sm"
-							disabled={movementsPage <= 1}
-							onclick={() => {
-								movementsPage -= 1;
+					<div class="mt-3">
+						<Pager
+							page={movementsPage}
+							pages={movementsPages}
+							total={movements.totalCount}
+							onPage={(next) => {
+								movementsPage = next;
 								void refreshMovements();
 							}}
-						>
-							{t('pagination.previous')}
-						</Button>
-						<span class="text-sm text-muted-foreground">
-							{t('pagination.pageInfo')
-								.replace('{page}', String(movementsPage))
-								.replace('{pages}', String(movementsPages))
-								.replace('{total}', String(movements.totalCount))}
-						</span>
-						<Button
-							variant="outline"
-							size="sm"
-							disabled={movementsPage >= movementsPages}
-							onclick={() => {
-								movementsPage += 1;
-								void refreshMovements();
-							}}
-						>
-							{t('pagination.next')}
-						</Button>
+						/>
 					</div>
 				{/if}
 			</CardContent>

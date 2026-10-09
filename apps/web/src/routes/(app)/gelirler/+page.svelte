@@ -1,7 +1,11 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import MoneyText from '$lib/components/money-text.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
-	import { Badge } from '$lib/components/ui/badge';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -12,6 +16,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -26,7 +31,6 @@
 	import { apiFetch } from '$lib/api-client';
 	import { can } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { formatTry } from '$lib/money';
 	import {
 		FINANCIAL_ACCOUNTS_PATH,
 		FINANCIAL_CATEGORY_OPTIONS_PATH,
@@ -37,7 +41,7 @@
 		type IncomeEntryList
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let page = $state(1);
 	let data = $state<IncomeEntryList | null>(null);
@@ -66,7 +70,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (search.trim()) params.set('search', search.trim());
 			if (accountId) params.set('financialAccountId', accountId);
@@ -114,12 +118,18 @@
 		void refresh();
 	}
 
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
+		void refresh();
+	}
+
 	const pages = $derived(data ? Math.max(1, Math.ceil(data.totalCount / data.pageSize)) : 1);
 
-	function statusBadge(s: EntryStatus): { label: MessageKey; variant: 'default' | 'outline' } {
+	function statusBadge(s: EntryStatus): { label: MessageKey; tone: 'success' | 'neutral' } {
 		return s === 'posted'
-			? { label: 'incomeExpense.statusPosted', variant: 'default' }
-			: { label: 'incomeExpense.statusReversed', variant: 'outline' };
+			? { label: 'incomeExpense.statusPosted', tone: 'success' }
+			: { label: 'incomeExpense.statusReversed', tone: 'neutral' };
 	}
 
 	$effect(() => {
@@ -141,48 +151,61 @@
 		{/snippet}
 	</PageHeader>
 
-	<div class="flex flex-wrap items-end gap-3">
-		<div class="flex flex-col gap-1">
+	<form
+		class="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3"
+		onsubmit={(e) => {
+			e.preventDefault();
+			applyFilters();
+		}}
+	>
+		<div class="flex min-w-44 flex-1 flex-col gap-1">
 			<Label for="inc-search">{t('common.search')}</Label>
-			<Input id="inc-search" class="w-56" bind:value={search} />
+			<Input id="inc-search" bind:value={search} />
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="inc-account">{t('incomeExpense.account')}</Label>
-			<select
-				id="inc-account"
-				class="w-48 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={accountId}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				{#each accounts?.items ?? [] as account (account.id)}
-					<option value={account.id}>{account.name}</option>
-				{/each}
-			</select>
+			<Label id="inc-account-label">{t('incomeExpense.account')}</Label>
+			<Select.Root type="single" bind:value={accountId}>
+				<Select.Trigger class="w-48" aria-labelledby="inc-account-label">
+					{accounts?.items?.find((a) => a.id === accountId)?.name ?? t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					{#each accounts?.items ?? [] as account (account.id)}
+						<Select.Item value={account.id}>{account.name}</Select.Item>
+					{/each}
+				</Select.Content>
+			</Select.Root>
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="inc-category">{t('incomeExpense.category')}</Label>
-			<select
-				id="inc-category"
-				class="w-48 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={categoryId}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				{#each categories as category (category.id)}
-					<option value={category.id}>{category.name}</option>
-				{/each}
-			</select>
+			<Label id="inc-category-label">{t('incomeExpense.category')}</Label>
+			<Select.Root type="single" bind:value={categoryId}>
+				<Select.Trigger class="w-48" aria-labelledby="inc-category-label">
+					{categories.find((c) => c.id === categoryId)?.name ?? t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					{#each categories as category (category.id)}
+						<Select.Item value={category.id}>{category.name}</Select.Item>
+					{/each}
+				</Select.Content>
+			</Select.Root>
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="inc-status">{t('incomeExpense.status')}</Label>
-			<select
-				id="inc-status"
-				class="w-36 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={status}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				<option value="posted">{t('incomeExpense.statusPosted')}</option>
-				<option value="reversed">{t('incomeExpense.statusReversed')}</option>
-			</select>
+			<Label id="inc-status-label">{t('incomeExpense.status')}</Label>
+			<Select.Root type="single" bind:value={status}>
+				<Select.Trigger class="w-40" aria-labelledby="inc-status-label">
+					{status === 'posted'
+						? t('incomeExpense.statusPosted')
+						: status === 'reversed'
+							? t('incomeExpense.statusReversed')
+							: t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					<Select.Item value="posted">{t('incomeExpense.statusPosted')}</Select.Item>
+					<Select.Item value="reversed">{t('incomeExpense.statusReversed')}</Select.Item>
+				</Select.Content>
+			</Select.Root>
 		</div>
 		<div class="flex flex-col gap-1">
 			<Label for="inc-from">{t('incomeExpense.filters.from')}</Label>
@@ -192,18 +215,18 @@
 			<Label for="inc-to">{t('incomeExpense.filters.to')}</Label>
 			<Input id="inc-to" type="date" bind:value={dateTo} />
 		</div>
-		<Button variant="outline" size="sm" onclick={applyFilters}>
+		<Button type="submit" variant="outline" size="sm">
 			{t('incomeExpense.filters.apply')}
 		</Button>
-		<Button variant="ghost" size="sm" onclick={clearFilters}>
+		<Button type="button" variant="ghost" size="sm" onclick={clearFilters}>
 			{t('incomeExpense.filters.clear')}
 		</Button>
-	</div>
+	</form>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="income.empty" />
 	{:else}
@@ -221,7 +244,7 @@
 							<TableHead>{t('incomeExpense.category')}</TableHead>
 							<TableHead>{t('incomeExpense.account')}</TableHead>
 							<TableHead>{t('incomeExpense.description')}</TableHead>
-							<TableHead>{t('incomeExpense.amount')}</TableHead>
+							<TableHead class="text-right">{t('incomeExpense.amount')}</TableHead>
 							<TableHead>{t('incomeExpense.status')}</TableHead>
 						</TableRow>
 					</TableHeader>
@@ -240,10 +263,12 @@
 								<TableCell>{item.categoryName}</TableCell>
 								<TableCell>{item.accountName}</TableCell>
 								<TableCell class="max-w-56 truncate">{item.description}</TableCell>
-								<TableCell>{formatTry(item.amount)}</TableCell>
+								<TableCell class="text-right">
+									<MoneyText value={item.amount} class="font-medium" />
+								</TableCell>
 								<TableCell>
 									{@const badge = statusBadge(item.status)}
-									<Badge variant={badge.variant}>{t(badge.label)}</Badge>
+									<StatusBadge label={t(badge.label)} tone={badge.tone} />
 								</TableCell>
 							</TableRow>
 						{/each}
@@ -252,19 +277,13 @@
 			</CardContent>
 		</Card>
 
-		<div class="flex items-center justify-between">
-			<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-				{t('pagination.previous')}
-			</Button>
-			<span class="text-sm text-muted-foreground">
-				{t('pagination.pageInfo')
-					.replace('{page}', String(page))
-					.replace('{pages}', String(pages))
-					.replace('{total}', String(data.totalCount))}
-			</span>
-			<Button variant="outline" size="sm" disabled={page >= pages} onclick={() => goPage(page + 1)}>
-				{t('pagination.next')}
-			</Button>
-		</div>
+		<Pager
+			{page}
+			{pages}
+			total={data.totalCount}
+			{pageSize}
+			onPage={goPage}
+			onPageSize={setPageSize}
+		/>
 	{/if}
 </section>

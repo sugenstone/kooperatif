@@ -12,6 +12,7 @@ import InvestmentListPage from '../routes/(app)/yatirimlar/+page.svelte';
 import InvestmentNewPage from '../routes/(app)/yatirimlar/yeni/+page.svelte';
 import InvestmentDetailPage from '../routes/(app)/yatirimlar/[id]/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOption } from './select-helper';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
 	const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) =>
@@ -257,10 +258,7 @@ describe('investment detail page', () => {
 		await screen.findByText(/Depo Binası/);
 
 		await userEvent.click(screen.getByRole('button', { name: 'Finansman Kaydet' }));
-		const accountSelect = document.getElementById('fnd-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('fnd-account', /Merkez Kasa/);
 		const amount = document.getElementById('fnd-amount') as HTMLInputElement;
 		amount.value = '75.000,50';
 		amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -322,10 +320,7 @@ describe('investment detail page', () => {
 		await screen.findByText(/Depo Binası/);
 
 		await userEvent.click(screen.getByRole('button', { name: 'Yatırım Geliri Kaydet' }));
-		const accountSelect = document.getElementById('inc-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('inc-account', /Merkez Kasa/);
 		const amount = document.getElementById('inc-amount') as HTMLInputElement;
 		amount.value = '4.500,00';
 		amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -386,10 +381,7 @@ describe('investment detail page', () => {
 		consideration.value = '650.000,00';
 		consideration.dispatchEvent(new Event('input', { bubbles: true }));
 
-		const accountSelect = document.getElementById('disp-leg-acc-0') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('disp-leg-acc-0', /Merkez Kasa/);
 		const legAmount = document.getElementById('disp-leg-amount-0') as HTMLInputElement;
 		legAmount.value = '300.000,00';
 		legAmount.dispatchEvent(new Event('input', { bubbles: true }));

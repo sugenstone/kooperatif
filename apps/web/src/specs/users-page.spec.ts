@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -58,11 +58,14 @@ beforeEach(() => {
 	auth.user = { id: 'u-1', username: 'admin', displayName: 'Admin' };
 	auth.csrfToken = 'csrf-raw';
 	auth.permissions = ['users.read', 'users.manage'];
-	vi.stubGlobal(
-		'confirm',
-		vi.fn(() => true)
-	);
 });
+
+/** The disable/enable lifecycle is confirmed through an AlertDialog —
+ * the dialog's action button carries the same label as the row action. */
+async function confirmLifecycleDialog(action: string): Promise<void> {
+	const dialog = await screen.findByRole('alertdialog');
+	await userEvent.click(within(dialog).getByRole('button', { name: action }));
+}
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -85,7 +88,7 @@ describe('users list — disable/enable lifecycle', () => {
 		expect(screen.getByText('Pasif')).toBeInTheDocument();
 
 		await userEvent.click(disableButton);
-		expect(vi.mocked(confirm)).toHaveBeenCalled();
+		await confirmLifecycleDialog('Devre Dışı Bırak');
 
 		await waitFor(() => {
 			const post = calls.find((c) => c.init?.method === 'POST');
@@ -104,6 +107,7 @@ describe('users list — disable/enable lifecycle', () => {
 		render(UsersPage);
 
 		await userEvent.click(await screen.findByRole('button', { name: 'Etkinleştir' }));
+		await confirmLifecycleDialog('Etkinleştir');
 		await waitFor(() => {
 			const post = calls.find((c) => c.init?.method === 'POST');
 			expect(post?.url).toBe(`http://localhost:8080/api/users/${DISABLED}/enable`);
@@ -111,7 +115,6 @@ describe('users list — disable/enable lifecycle', () => {
 	});
 
 	it('cancelled confirmation never reaches the API', async () => {
-		vi.mocked(confirm).mockReturnValue(false);
 		const calls: { url: string; init?: RequestInit }[] = [];
 		stubFetch(async (url, init) => {
 			calls.push({ url, init });
@@ -120,6 +123,8 @@ describe('users list — disable/enable lifecycle', () => {
 		render(UsersPage);
 
 		await userEvent.click(await screen.findByRole('button', { name: 'Devre Dışı Bırak' }));
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
 		expect(calls.every((c) => c.init?.method !== 'POST')).toBe(true);
 	});
 
@@ -133,6 +138,7 @@ describe('users list — disable/enable lifecycle', () => {
 		render(UsersPage);
 
 		await userEvent.click(await screen.findByRole('button', { name: 'Devre Dışı Bırak' }));
+		await confirmLifecycleDialog('Devre Dışı Bırak');
 		const message = await screen.findByText(/son yönetim yolu|reddedildi/i, {}, { timeout: 3000 });
 		expect(message).toBeInTheDocument();
 	});

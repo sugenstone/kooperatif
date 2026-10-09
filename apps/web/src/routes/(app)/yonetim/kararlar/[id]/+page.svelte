@@ -11,6 +11,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -390,31 +391,39 @@
 				</CardHeader>
 				<CardContent class="flex flex-col gap-4">
 					<div class="flex flex-col gap-1">
-						<Label for="vote-person">{t('votes.voter')}</Label>
-						<select
-							id="vote-person"
-							class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-							bind:value={votePersonId}
-						>
-							<option value="">—</option>
-							{#each votableMembers as m (m.id)}
-								<option value={m.personId}>
-									{m.personName}{m.title ? ` (${m.title})` : ''}
-								</option>
-							{/each}
-						</select>
+						<Label id="vote-person-label">{t('votes.voter')}</Label>
+						<Select.Root type="single" bind:value={votePersonId}>
+							<Select.Trigger id="vote-person" class="w-full" aria-labelledby="vote-person-label">
+								{(() => {
+									const m = votableMembers.find((mm) => mm.personId === votePersonId);
+									return m ? `${m.personName}${m.title ? ` (${m.title})` : ''}` : '—';
+								})()}
+							</Select.Trigger>
+							<Select.Content>
+								{#each votableMembers as m (m.id)}
+									<Select.Item value={m.personId}>
+										{m.personName}{m.title ? ` (${m.title})` : ''}
+									</Select.Item>
+								{/each}
+							</Select.Content>
+						</Select.Root>
 					</div>
 					<div class="flex flex-col gap-1">
-						<Label for="vote-choice">{t('votes.choice')}</Label>
-						<select
-							id="vote-choice"
-							class="w-40 rounded-md border bg-background px-3 py-2 text-sm"
-							bind:value={voteChoice}
-						>
-							<option value="approve">{t('votes.choiceApprove')}</option>
-							<option value="reject">{t('votes.choiceReject')}</option>
-							<option value="abstain">{t('votes.choiceAbstain')}</option>
-						</select>
+						<Label id="vote-choice-label">{t('votes.choice')}</Label>
+						<Select.Root type="single" bind:value={voteChoice}>
+							<Select.Trigger id="vote-choice" class="w-40" aria-labelledby="vote-choice-label">
+								{voteChoice === 'approve'
+									? t('votes.choiceApprove')
+									: voteChoice === 'reject'
+										? t('votes.choiceReject')
+										: t('votes.choiceAbstain')}
+							</Select.Trigger>
+							<Select.Content>
+								<Select.Item value="approve">{t('votes.choiceApprove')}</Select.Item>
+								<Select.Item value="reject">{t('votes.choiceReject')}</Select.Item>
+								<Select.Item value="abstain">{t('votes.choiceAbstain')}</Select.Item>
+							</Select.Content>
+						</Select.Root>
 					</div>
 					<div class="flex flex-col gap-1">
 						<Label for="vote-note">{t('votes.note')}</Label>
@@ -436,15 +445,22 @@
 				</CardHeader>
 				<CardContent class="flex flex-col gap-4">
 					<div class="flex flex-col gap-1">
-						<Label for="finalize-outcome">{t('decisions.outcome')}</Label>
-						<select
-							id="finalize-outcome"
-							class="w-48 rounded-md border bg-background px-3 py-2 text-sm"
-							bind:value={outcome}
-						>
-							<option value="approved">{t('decisions.outcomeApproved')}</option>
-							<option value="rejected">{t('decisions.outcomeRejected')}</option>
-						</select>
+						<Label id="finalize-outcome-label">{t('decisions.outcome')}</Label>
+						<Select.Root type="single" bind:value={outcome}>
+							<Select.Trigger
+								id="finalize-outcome"
+								class="w-48"
+								aria-labelledby="finalize-outcome-label"
+							>
+								{outcome === 'approved'
+									? t('decisions.outcomeApproved')
+									: t('decisions.outcomeRejected')}
+							</Select.Trigger>
+							<Select.Content>
+								<Select.Item value="approved">{t('decisions.outcomeApproved')}</Select.Item>
+								<Select.Item value="rejected">{t('decisions.outcomeRejected')}</Select.Item>
+							</Select.Content>
+						</Select.Root>
 					</div>
 					<p class="text-sm text-muted-foreground">{t('decisions.finalizeConfirm')}</p>
 					<div class="flex gap-2">

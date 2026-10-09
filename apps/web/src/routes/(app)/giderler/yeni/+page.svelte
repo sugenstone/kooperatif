@@ -11,6 +11,8 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
@@ -114,10 +116,11 @@
 </svelte:head>
 
 <section class="flex max-w-2xl flex-col gap-6">
-	<div class="flex items-center gap-3">
-		<Button variant="ghost" size="sm" href="/giderler">← {t('expense.title')}</Button>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('expense.new.title')}</h1>
-	</div>
+	<PageHeader titleKey="expense.new.title" descriptionKey="expense.description">
+		{#snippet actions()}
+			<Button variant="ghost" size="sm" href="/giderler">← {t('expense.title')}</Button>
+		{/snippet}
+	</PageHeader>
 
 	<Card>
 		<CardHeader>
@@ -125,33 +128,31 @@
 			<CardDescription>{t('expense.description')}</CardDescription>
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
-			<div>
-				<Label for="exp-account">{t('incomeExpense.account')}</Label>
-				<select
-					id="exp-account"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={accountId}
-					disabled={loadError !== null}
-				>
-					<option value="">—</option>
-					{#each accounts as account (account.id)}
-						<option value={account.id}>{accountLabel(account)}</option>
-					{/each}
-				</select>
+			<div class="flex flex-col gap-1">
+				<Label id="exp-account-label">{t('incomeExpense.account')}</Label>
+				<Select.Root type="single" bind:value={accountId} disabled={loadError !== null}>
+					<Select.Trigger class="w-full" aria-labelledby="exp-account-label">
+						{account ? accountLabel(account) : '—'}
+					</Select.Trigger>
+					<Select.Content>
+						{#each accounts as acc (acc.id)}
+							<Select.Item value={acc.id}>{accountLabel(acc)}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 			</div>
-			<div>
-				<Label for="exp-category">{t('incomeExpense.category')}</Label>
-				<select
-					id="exp-category"
-					class="w-full rounded-md border bg-background px-3 py-2 text-sm"
-					bind:value={categoryId}
-					disabled={loadError !== null}
-				>
-					<option value="">—</option>
-					{#each categories as category (category.id)}
-						<option value={category.id}>{category.name}</option>
-					{/each}
-				</select>
+			<div class="flex flex-col gap-1">
+				<Label id="exp-category-label">{t('incomeExpense.category')}</Label>
+				<Select.Root type="single" bind:value={categoryId} disabled={loadError !== null}>
+					<Select.Trigger class="w-full" aria-labelledby="exp-category-label">
+						{category?.name ?? '—'}
+					</Select.Trigger>
+					<Select.Content>
+						{#each categories as cat (cat.id)}
+							<Select.Item value={cat.id}>{cat.name}</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
 			</div>
 			<div>
 				<Label for="exp-amount">{t('incomeExpense.amount')}</Label>

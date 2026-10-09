@@ -1,7 +1,11 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import ListToolbar from '$lib/components/list-toolbar.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
-	import { Badge } from '$lib/components/ui/badge';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -10,7 +14,6 @@
 		CardHeader,
 		CardTitle
 	} from '$lib/components/ui/card';
-	import { Input } from '$lib/components/ui/input';
 	import {
 		Table,
 		TableBody,
@@ -32,7 +35,7 @@
 		type ShareStatus
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let search = $state('');
 	let appliedSearch = $state('');
@@ -46,7 +49,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (appliedSearch.trim()) params.set('search', appliedSearch.trim());
 			data = await apiFetch<Paginated<ShareListItem>>(`${SHARES_PATH}?${params}`);
@@ -57,8 +60,7 @@
 		}
 	}
 
-	function submitSearch(event: SubmitEvent): void {
-		event.preventDefault();
+	function submitSearch(): void {
 		page = 1;
 		appliedSearch = search;
 		searching = true;
@@ -70,18 +72,24 @@
 		void refresh();
 	}
 
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
+		void refresh();
+	}
+
 	const pages = $derived(data ? Math.max(1, Math.ceil(data.totalCount / data.pageSize)) : 1);
 
 	function statusBadge(status: ShareStatus): {
 		label: MessageKey;
-		variant: 'default' | 'outline' | 'secondary';
+		tone: 'success' | 'warning' | 'neutral';
 	} {
-		if (status === 'active') return { label: 'shares.statusActive', variant: 'default' };
-		if (status === 'suspended') return { label: 'shares.statusSuspended', variant: 'secondary' };
+		if (status === 'active') return { label: 'shares.statusActive', tone: 'success' };
+		if (status === 'suspended') return { label: 'shares.statusSuspended', tone: 'warning' };
 		if (status === 'return_pending')
-			return { label: 'shares.statusReturnPending', variant: 'secondary' };
-		if (status === 'closed') return { label: 'shares.statusClosed', variant: 'outline' };
-		return { label: 'shares.statusVoided', variant: 'outline' };
+			return { label: 'shares.statusReturnPending', tone: 'warning' };
+		if (status === 'closed') return { label: 'shares.statusClosed', tone: 'neutral' };
+		return { label: 'shares.statusVoided', tone: 'neutral' };
 	}
 
 	function acquisitionLabel(acq: string | null): MessageKey | null {
@@ -117,23 +125,17 @@
 		{/snippet}
 	</PageHeader>
 
-	<form class="flex max-w-md gap-2" onsubmit={submitSearch}>
-		<Input
-			type="search"
-			bind:value={search}
-			placeholder={t('shares.search')}
-			aria-label={t('shares.search')}
-			disabled={searching}
-		/>
-		<Button type="submit" variant="outline" disabled={searching}>
-			{t('common.search')}
-		</Button>
-	</form>
+	<ListToolbar
+		bind:value={search}
+		placeholder={t('shares.search')}
+		{searching}
+		onsubmit={submitSearch}
+	/>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="shares.empty" />
 	{:else}
@@ -179,7 +181,7 @@
 								</TableCell>
 								<TableCell>
 									{@const badge = statusBadge(item.status)}
-									<Badge variant={badge.variant}>{t(badge.label)}</Badge>
+									<StatusBadge label={t(badge.label)} tone={badge.tone} />
 								</TableCell>
 							</TableRow>
 						{/each}
@@ -188,19 +190,13 @@
 			</CardContent>
 		</Card>
 
-		<div class="flex items-center justify-between">
-			<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-				{t('pagination.previous')}
-			</Button>
-			<span class="text-sm text-muted-foreground">
-				{t('pagination.pageInfo')
-					.replace('{page}', String(page))
-					.replace('{pages}', String(pages))
-					.replace('{total}', String(data.totalCount))}
-			</span>
-			<Button variant="outline" size="sm" disabled={page >= pages} onclick={() => goPage(page + 1)}>
-				{t('pagination.next')}
-			</Button>
-		</div>
+		<Pager
+			{page}
+			{pages}
+			total={data.totalCount}
+			{pageSize}
+			onPage={goPage}
+			onPageSize={setPageSize}
+		/>
 	{/if}
 </section>

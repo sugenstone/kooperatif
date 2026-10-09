@@ -1,8 +1,11 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { resolve } from '$app/paths';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -19,6 +22,8 @@
 		TableHeader,
 		TableRow
 	} from '$lib/components/ui/table';
+	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
@@ -31,7 +36,7 @@
 		type Paginated
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let page = $state(1);
 	let data = $state<Paginated<GovernanceBodyListItem> | null>(null);
@@ -43,7 +48,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (status) params.set('status', status);
 			data = await apiFetch<Paginated<GovernanceBodyListItem>>(
@@ -56,6 +61,12 @@
 
 	function goPage(next: number): void {
 		page = next;
+		void refresh();
+	}
+
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
 		void refresh();
 	}
 
@@ -79,25 +90,37 @@
 		{/snippet}
 	</PageHeader>
 
-	<div class="flex flex-wrap items-end gap-3">
-		<select
-			class="w-40 rounded-md border bg-background px-3 py-2 text-sm"
-			bind:value={status}
-			onchange={() => {
-				page = 1;
-				void refresh();
-			}}
-		>
-			<option value="">{t('incomeExpense.all')}</option>
-			<option value="active">{t('governance.bodies.statusActive')}</option>
-			<option value="closed">{t('governance.bodies.statusClosed')}</option>
-		</select>
+	<div class="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3">
+		<div class="flex flex-col gap-1">
+			<Label id="bodies-status-label">{t('governance.bodies.status')}</Label>
+			<Select.Root
+				type="single"
+				bind:value={status}
+				onValueChange={() => {
+					page = 1;
+					void refresh();
+				}}
+			>
+				<Select.Trigger class="w-40" aria-labelledby="bodies-status-label">
+					{status === 'active'
+						? t('governance.bodies.statusActive')
+						: status === 'closed'
+							? t('governance.bodies.statusClosed')
+							: t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					<Select.Item value="active">{t('governance.bodies.statusActive')}</Select.Item>
+					<Select.Item value="closed">{t('governance.bodies.statusClosed')}</Select.Item>
+				</Select.Content>
+			</Select.Root>
+		</div>
 	</div>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="governance.bodies.empty" />
 	{:else}
@@ -138,35 +161,27 @@
 								</TableCell>
 								<TableCell>{item.bodyType}</TableCell>
 								<TableCell>
-									<Badge variant={item.status === 'active' ? 'default' : 'secondary'}>
-										{item.status === 'active'
+									<StatusBadge
+										label={item.status === 'active'
 											? t('governance.bodies.statusActive')
 											: t('governance.bodies.statusClosed')}
-									</Badge>
+										tone={item.status === 'active' ? 'success' : 'neutral'}
+									/>
 								</TableCell>
 								<TableCell>{item.activeMembers}</TableCell>
 							</TableRow>
 						{/each}
 					</TableBody>
 				</Table>
-				<div class="mt-3 flex items-center justify-between">
-					<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-						{t('pagination.previous')}
-					</Button>
-					<span class="text-sm text-muted-foreground">
-						{t('pagination.pageInfo')
-							.replace('{page}', String(page))
-							.replace('{pages}', String(pages))
-							.replace('{total}', String(data.totalCount))}
-					</span>
-					<Button
-						variant="outline"
-						size="sm"
-						disabled={page >= pages}
-						onclick={() => goPage(page + 1)}
-					>
-						{t('pagination.next')}
-					</Button>
+				<div class="mt-3">
+					<Pager
+						{page}
+						{pages}
+						total={data.totalCount}
+						{pageSize}
+						onPage={goPage}
+						onPageSize={setPageSize}
+					/>
 				</div>
 			</CardContent>
 		</Card>

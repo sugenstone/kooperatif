@@ -12,6 +12,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import Pager from '$lib/components/pager.svelte';
 	import {
 		Table,
 		TableBody,
@@ -536,36 +537,15 @@
 								{/each}
 							</TableBody>
 						</Table>
-						<div class="flex items-center justify-between">
-							<Button
-								variant="outline"
-								size="sm"
-								disabled={assessmentPage <= 1}
-								onclick={() => {
-									assessmentPage -= 1;
-									void refreshAssessments();
-								}}
-							>
-								{t('pagination.previous')}
-							</Button>
-							<span class="text-sm text-muted-foreground">
-								{t('pagination.pageInfo')
-									.replace('{page}', String(assessmentPage))
-									.replace('{pages}', String(assessmentPages))
-									.replace('{total}', String(assessments.totalCount))}
-							</span>
-							<Button
-								variant="outline"
-								size="sm"
-								disabled={assessmentPage >= assessmentPages}
-								onclick={() => {
-									assessmentPage += 1;
-									void refreshAssessments();
-								}}
-							>
-								{t('pagination.next')}
-							</Button>
-						</div>
+						<Pager
+							page={assessmentPage}
+							pages={assessmentPages}
+							total={assessments.totalCount}
+							onPage={(next) => {
+								assessmentPage = next;
+								void refreshAssessments();
+							}}
+						/>
 					{/if}
 				</CardContent>
 			</Card>

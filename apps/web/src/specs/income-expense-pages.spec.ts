@@ -17,6 +17,7 @@ import ExpenseDetailPage from '../routes/(app)/giderler/[id]/+page.svelte';
 import SummaryPage from '../routes/(app)/gelir-gider/+page.svelte';
 import CategoriesPage from '../routes/(app)/kategoriler/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOption, pickSelectOptionByLabel } from './select-helper';
 import { canonicalToTryInput, parseTryInput } from '$lib/money';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
@@ -154,10 +155,8 @@ describe('Income create (/gelirler/yeni)', () => {
 		});
 		render(IncomeNewPage);
 
-		await screen.findByRole('option', { name: /E2E Kasa/ });
-		await screen.findByRole('option', { name: 'Diğer Gelir' });
-		await userEvent.selectOptions(screen.getByLabelText('Finansal Hesap'), ACCOUNT_ID);
-		await userEvent.selectOptions(screen.getByLabelText('Kategori'), INCOME_CATEGORY_ID);
+		await pickSelectOptionByLabel('Finansal Hesap', /E2E Kasa/);
+		await pickSelectOptionByLabel('Kategori', 'Diğer Gelir');
 		await userEvent.type(screen.getByLabelText('Tutar'), '5.000,00');
 		await userEvent.type(screen.getByLabelText('Açıklama'), 'Stant kirası geliri');
 		await userEvent.click(screen.getByRole('button', { name: 'Geliri Kaydet' }));
@@ -223,10 +222,8 @@ describe('Expense create (/giderler/yeni)', () => {
 		});
 		render(ExpenseNewPage);
 
-		await screen.findByRole('option', { name: /E2E Kasa/ });
-		await screen.findByRole('option', { name: 'Genel Gider' });
-		await userEvent.selectOptions(screen.getByLabelText('Finansal Hesap'), ACCOUNT_ID);
-		await userEvent.selectOptions(screen.getByLabelText('Kategori'), EXPENSE_CATEGORY_ID);
+		await pickSelectOptionByLabel('Finansal Hesap', /E2E Kasa/);
+		await pickSelectOptionByLabel('Kategori', 'Genel Gider');
 		await userEvent.type(screen.getByLabelText('Tutar'), '999.999,99');
 		await userEvent.type(screen.getByLabelText('Açıklama'), 'Elektrik faturası Ocak');
 		await userEvent.click(screen.getByRole('button', { name: 'Gideri Kaydet' }));
@@ -302,10 +299,7 @@ describe('Category management (/kategoriler)', () => {
 		await screen.findByRole('heading', { name: 'Gelir/Gider Kategorileri' });
 		await screen.findByText('Diğer Gelir');
 
-		await userEvent.selectOptions(
-			screen.getByLabelText('Tip', { selector: '#new-type' }),
-			'income'
-		);
+		await pickSelectOption('new-type', 'Gelir');
 		await userEvent.type(screen.getByLabelText('Kategori Adı'), 'Bağış Geliri');
 		const createButtons = screen.getAllByRole('button', { name: 'Yeni Kategori' });
 		await userEvent.click(createButtons[createButtons.length - 1]);

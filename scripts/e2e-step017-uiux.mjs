@@ -221,13 +221,24 @@ try {
 		['tahsilatlar', '/tahsilatlar'],
 		['tahsilat-yeni', '/tahsilatlar/yeni'],
 		['finansal-hesaplar', '/finansal-hesaplar'],
+		['transferler', '/transferler'],
+		['gelirler', '/gelirler'],
+		['giderler', '/giderler'],
+		['kategoriler', '/kategoriler'],
+		['hisse-iadeleri', '/hisse-iadeleri'],
+		['yatirimlar', '/yatirimlar'],
+		['sosyal-yardim', '/sosyal-yardim'],
+		['yonetim', '/yonetim'],
+		['kullanicilar', '/kullanicilar'],
 		['raporlar', '/raporlar']
 	];
 	const viewports = [
 		[360, 800],
 		[390, 844],
 		[768, 1024],
-		[1440, 900]
+		[1024, 768],
+		[1440, 900],
+		[1920, 1080]
 	];
 
 	for (const [vw, vh] of viewports) {

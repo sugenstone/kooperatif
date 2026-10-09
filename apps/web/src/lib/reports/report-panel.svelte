@@ -3,6 +3,8 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
+	import Pager from '$lib/components/pager.svelte';
 	import {
 		Table,
 		TableBody,
@@ -148,19 +150,22 @@
 	<div class="flex flex-wrap items-end gap-3">
 		{#each def.filters as filter (filter.param)}
 			<div class="flex flex-col gap-1">
-				<Label for={`rf-${filter.param}`}>{t(filter.labelKey)}</Label>
 				{#if filter.kind === 'select'}
-					<select
-						id={`rf-${filter.param}`}
-						class="w-56 rounded-md border bg-background px-3 py-2 text-sm"
-						bind:value={filterValues[filter.param]}
-					>
-						<option value="">{t('reports.filter.all')}</option>
-						{#each filter.options ?? [] as option (option.value)}
-							<option value={option.value}>{t(option.labelKey)}</option>
-						{/each}
-					</select>
+					<Label id={`rf-${filter.param}-label`}>{t(filter.labelKey)}</Label>
+					<Select.Root type="single" bind:value={filterValues[filter.param]}>
+						<Select.Trigger class="w-56" aria-labelledby={`rf-${filter.param}-label`}>
+							{@const chosen = filter.options?.find((o) => o.value === filterValues[filter.param])}
+							{chosen ? t(chosen.labelKey) : t('reports.filter.all')}
+						</Select.Trigger>
+						<Select.Content>
+							<Select.Item value="">{t('reports.filter.all')}</Select.Item>
+							{#each filter.options ?? [] as option (option.value)}
+								<Select.Item value={option.value}>{t(option.labelKey)}</Select.Item>
+							{/each}
+						</Select.Content>
+					</Select.Root>
 				{:else if filter.kind === 'date'}
+					<Label for={`rf-${filter.param}`}>{t(filter.labelKey)}</Label>
 					<Input
 						id={`rf-${filter.param}`}
 						type="date"
@@ -168,6 +173,7 @@
 						bind:value={filterValues[filter.param]}
 					/>
 				{:else}
+					<Label for={`rf-${filter.param}`}>{t(filter.labelKey)}</Label>
 					<Input
 						id={`rf-${filter.param}`}
 						type="text"
@@ -247,20 +253,5 @@
 		</div>
 	{/if}
 
-	<div class="flex items-center justify-between text-sm">
-		<span class="text-muted-foreground">
-			{t('pagination.pageInfo')
-				.replace('{page}', String(page))
-				.replace('{pages}', String(pages))
-				.replace('{total}', String(data.totalCount))}
-		</span>
-		<div class="flex gap-2">
-			<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-				{t('pagination.previous')}
-			</Button>
-			<Button variant="outline" size="sm" disabled={page >= pages} onclick={() => goPage(page + 1)}>
-				{t('pagination.next')}
-			</Button>
-		</div>
-	</div>
+	<Pager {page} {pages} total={data.totalCount} pageSize={PAGE_SIZE} onPage={goPage} />
 {/if}

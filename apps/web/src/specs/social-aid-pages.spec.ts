@@ -12,6 +12,7 @@ import SocialAidListPage from '../routes/(app)/sosyal-yardim/+page.svelte';
 import SocialAidNewPage from '../routes/(app)/sosyal-yardim/yeni/+page.svelte';
 import SocialAidDetailPage from '../routes/(app)/sosyal-yardim/[id]/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOption } from './select-helper';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
 	const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) =>
@@ -252,10 +253,7 @@ describe('social aid fund detail page', () => {
 		const donorInput = document.getElementById('don-display') as HTMLInputElement;
 		donorInput.value = 'Dış Bağışçı Ltd.';
 		donorInput.dispatchEvent(new Event('input', { bubbles: true }));
-		const accountSelect = document.getElementById('don-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('don-account', /Yardım Kasası/);
 		const amount = document.getElementById('don-amount') as HTMLInputElement;
 		amount.value = '2.500,50';
 		amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -278,10 +276,7 @@ describe('social aid fund detail page', () => {
 		await screen.findByText(/Eğitim Yardımı/);
 		await userEvent.click(screen.getByRole('button', { name: 'Bağış Kaydet' }));
 
-		const accountSelect = document.getElementById('don-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('don-account', /Yardım Kasası/);
 		const amount = document.getElementById('don-amount') as HTMLInputElement;
 		amount.value = '100,00';
 		amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -307,10 +302,7 @@ describe('social aid fund detail page', () => {
 		const beneficiaryInput = document.getElementById('dis-display') as HTMLInputElement;
 		beneficiaryInput.value = 'Öğrenci Ailesi';
 		beneficiaryInput.dispatchEvent(new Event('input', { bubbles: true }));
-		const accountSelect = document.getElementById('dis-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('dis-account', /Yardım Kasası/);
 		await tick();
 		// The restricted availability of THIS fund in this account is
 		// shown — never the raw account balance alone.

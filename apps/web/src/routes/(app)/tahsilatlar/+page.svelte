@@ -1,7 +1,12 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
+	import ListToolbar from '$lib/components/list-toolbar.svelte';
+	import MoneyText from '$lib/components/money-text.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
-	import { Badge } from '$lib/components/ui/badge';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -10,7 +15,6 @@
 		CardHeader,
 		CardTitle
 	} from '$lib/components/ui/card';
-	import { Input } from '$lib/components/ui/input';
 	import {
 		Table,
 		TableBody,
@@ -25,7 +29,6 @@
 	import { can } from '$lib/auth/auth.svelte';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
-	import { formatTry } from '$lib/money';
 	import {
 		PAYMENTS_PATH,
 		type Paginated,
@@ -34,7 +37,7 @@
 		type PaymentStatus
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let search = $state('');
 	let appliedSearch = $state('');
@@ -57,7 +60,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (appliedSearch.trim()) params.set('search', appliedSearch.trim());
 			data = await apiFetch<Paginated<PaymentListItem>>(`${PAYMENTS_PATH}?${params}`);
@@ -68,8 +71,7 @@
 		}
 	}
 
-	function submitSearch(event: SubmitEvent): void {
-		event.preventDefault();
+	function submitSearch(): void {
 		page = 1;
 		appliedSearch = search;
 		searching = true;
@@ -81,15 +83,28 @@
 		void refresh();
 	}
 
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
+		void refresh();
+	}
+
+	function resetFilters(): void {
+		search = '';
+		appliedSearch = '';
+		page = 1;
+		void refresh();
+	}
+
 	const pages = $derived(data ? Math.max(1, Math.ceil(data.totalCount / data.pageSize)) : 1);
 
 	function statusBadge(status: PaymentStatus): {
 		label: MessageKey;
-		variant: 'default' | 'outline';
+		tone: 'success' | 'neutral';
 	} {
 		return status === 'posted'
-			? { label: 'payments.statusPosted', variant: 'default' }
-			: { label: 'payments.statusReversed', variant: 'outline' };
+			? { label: 'payments.statusPosted', tone: 'success' }
+			: { label: 'payments.statusReversed', tone: 'neutral' };
 	}
 
 	function methodLabel(method: PaymentMethod): string {
@@ -120,23 +135,18 @@
 		{/snippet}
 	</PageHeader>
 
-	<form class="flex max-w-md gap-2" onsubmit={submitSearch}>
-		<Input
-			type="search"
-			bind:value={search}
-			placeholder={t('payments.search')}
-			aria-label={t('payments.search')}
-			disabled={searching}
-		/>
-		<Button type="submit" variant="outline" disabled={searching}>
-			{t('common.search')}
-		</Button>
-	</form>
+	<ListToolbar
+		bind:value={search}
+		placeholder={t('payments.search')}
+		{searching}
+		onsubmit={submitSearch}
+		onreset={resetFilters}
+	/>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="payments.empty" />
 	{:else}
@@ -151,9 +161,9 @@
 						<TableRow>
 							<TableHead>{t('payments.number')}</TableHead>
 							<TableHead>{t('payments.payer')}</TableHead>
-							<TableHead>{t('payments.amount')}</TableHead>
-							<TableHead>{t('payments.allocated')}</TableHead>
-							<TableHead>{t('payments.unallocated')}</TableHead>
+							<TableHead class="text-right">{t('payments.amount')}</TableHead>
+							<TableHead class="text-right">{t('payments.allocated')}</TableHead>
+							<TableHead class="text-right">{t('payments.unallocated')}</TableHead>
 							<TableHead>{t('payments.method')}</TableHead>
 							<TableHead>{t('payments.receivedAt')}</TableHead>
 							<TableHead>{t('payments.status')}</TableHead>
@@ -171,14 +181,20 @@
 									</a>
 								</TableCell>
 								<TableCell>{item.payer.fullName}</TableCell>
-								<TableCell>{formatTry(item.amount)}</TableCell>
-								<TableCell>{formatTry(item.allocatedAmount)}</TableCell>
-								<TableCell>{formatTry(item.unallocatedAmount)}</TableCell>
+								<TableCell class="text-right">
+									<MoneyText value={item.amount} class="font-medium" />
+								</TableCell>
+								<TableCell class="text-right">
+									<MoneyText value={item.allocatedAmount} />
+								</TableCell>
+								<TableCell class="text-right">
+									<MoneyText value={item.unallocatedAmount} />
+								</TableCell>
 								<TableCell>{methodLabel(item.method)}</TableCell>
 								<TableCell>{formatTimestamp(item.receivedAt)}</TableCell>
 								<TableCell>
 									{@const badge = statusBadge(item.status)}
-									<Badge variant={badge.variant}>{t(badge.label)}</Badge>
+									<StatusBadge label={t(badge.label)} tone={badge.tone} />
 								</TableCell>
 							</TableRow>
 						{/each}
@@ -187,19 +203,13 @@
 			</CardContent>
 		</Card>
 
-		<div class="flex items-center justify-between">
-			<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-				{t('pagination.previous')}
-			</Button>
-			<span class="text-sm text-muted-foreground">
-				{t('pagination.pageInfo')
-					.replace('{page}', String(page))
-					.replace('{pages}', String(pages))
-					.replace('{total}', String(data.totalCount))}
-			</span>
-			<Button variant="outline" size="sm" disabled={page >= pages} onclick={() => goPage(page + 1)}>
-				{t('pagination.next')}
-			</Button>
-		</div>
+		<Pager
+			{page}
+			{pages}
+			total={data.totalCount}
+			{pageSize}
+			onPage={goPage}
+			onPageSize={setPageSize}
+		/>
 	{/if}
 </section>

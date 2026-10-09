@@ -12,6 +12,7 @@ import ReturnListPage from '../routes/(app)/hisse-iadeleri/+page.svelte';
 import ReturnNewPage from '../routes/(app)/hisse-iadeleri/yeni/+page.svelte';
 import ReturnDetailPage from '../routes/(app)/hisse-iadeleri/[id]/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOption } from './select-helper';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
 	const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) =>
@@ -324,10 +325,7 @@ describe('share return detail page', () => {
 		await screen.findByText('Kısmen Ödendi');
 
 		await userEvent.click(screen.getByRole('button', { name: 'Ödeme Yap' }));
-		const accountSelect = document.getElementById('st-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('st-account', /Yedek Kasa/);
 		const amount = document.getElementById('st-amount') as HTMLInputElement;
 		amount.value = '700,00';
 		amount.dispatchEvent(new Event('input', { bubbles: true }));
@@ -348,10 +346,7 @@ describe('share return detail page', () => {
 		await screen.findByText('Kısmen Ödendi');
 
 		await userEvent.click(screen.getByRole('button', { name: 'Ödeme Yap' }));
-		const accountSelect = document.getElementById('st-account') as HTMLSelectElement;
-		await waitFor(() => expect(accountSelect.options.length).toBeGreaterThan(1));
-		accountSelect.value = ACCOUNT_ID;
-		accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await pickSelectOption('st-account', /Yedek Kasa/);
 		const amount = document.getElementById('st-amount') as HTMLInputElement;
 		amount.value = '701,00'; // remaining is 700.00
 		amount.dispatchEvent(new Event('input', { bubbles: true }));

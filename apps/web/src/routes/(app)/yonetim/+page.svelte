@@ -1,8 +1,11 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/empty-state.svelte';
+	import ErrorState from '$lib/components/error-state.svelte';
+	import ListSkeleton from '$lib/components/list-skeleton.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import Pager from '$lib/components/pager.svelte';
+	import StatusBadge from '$lib/components/status-badge.svelte';
 	import { resolve } from '$app/paths';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -13,6 +16,7 @@
 	} from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		Table,
 		TableBody,
@@ -35,7 +39,7 @@
 		type Paginated
 	} from '@kooperatif/contracts';
 
-	const PAGE_SIZE = 20;
+	let pageSize = $state(20);
 
 	let page = $state(1);
 	let data = $state<Paginated<GovernanceDecisionListItem> | null>(null);
@@ -62,7 +66,7 @@
 		try {
 			const params = new SvelteURLSearchParams({
 				page: String(page),
-				pageSize: String(PAGE_SIZE)
+				pageSize: String(pageSize)
 			});
 			if (search.trim()) params.set('search', search.trim());
 			if (status) params.set('status', status);
@@ -93,17 +97,23 @@
 		void refresh();
 	}
 
+	function setPageSize(size: number): void {
+		pageSize = size;
+		page = 1;
+		void refresh();
+	}
+
 	const pages = $derived(data ? Math.max(1, Math.ceil(data.totalCount / data.pageSize)) : 1);
 
 	function statusBadge(s: GovernanceDecisionStatus): {
 		label: MessageKey;
-		variant: 'default' | 'outline' | 'secondary' | 'destructive';
+		tone: 'neutral' | 'info' | 'success' | 'danger';
 	} {
-		if (s === 'draft') return { label: 'decisions.statusDraft', variant: 'outline' };
-		if (s === 'open') return { label: 'decisions.statusOpen', variant: 'default' };
-		if (s === 'approved') return { label: 'decisions.statusApproved', variant: 'secondary' };
-		if (s === 'rejected') return { label: 'decisions.statusRejected', variant: 'destructive' };
-		return { label: 'decisions.statusCancelled', variant: 'outline' };
+		if (s === 'draft') return { label: 'decisions.statusDraft', tone: 'neutral' };
+		if (s === 'open') return { label: 'decisions.statusOpen', tone: 'info' };
+		if (s === 'approved') return { label: 'decisions.statusApproved', tone: 'success' };
+		if (s === 'rejected') return { label: 'decisions.statusRejected', tone: 'danger' };
+		return { label: 'decisions.statusCancelled', tone: 'neutral' };
 	}
 
 	$effect(() => {
@@ -128,56 +138,63 @@
 		{/snippet}
 	</PageHeader>
 
-	<div class="flex flex-wrap items-end gap-3">
-		<div class="flex flex-col gap-1">
+	<form
+		class="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3"
+		onsubmit={(e) => {
+			e.preventDefault();
+			applyFilters();
+		}}
+	>
+		<div class="flex min-w-44 flex-1 flex-col gap-1">
 			<Label for="gov-search">{t('common.search')}</Label>
-			<Input
-				id="gov-search"
-				class="w-64"
-				bind:value={search}
-				placeholder={t('governance.search')}
-			/>
+			<Input id="gov-search" bind:value={search} placeholder={t('governance.search')} />
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="gov-body">{t('decisions.body')}</Label>
-			<select
-				id="gov-body"
-				class="w-56 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={bodyId}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				{#each bodies?.items ?? [] as body (body.id)}
-					<option value={body.id}>{body.name}</option>
-				{/each}
-			</select>
+			<Label id="gov-body-label">{t('decisions.body')}</Label>
+			<Select.Root type="single" bind:value={bodyId}>
+				<Select.Trigger class="w-56" aria-labelledby="gov-body-label">
+					{bodies?.items?.find((b) => b.id === bodyId)?.name ?? t('incomeExpense.all')}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					{#each bodies?.items ?? [] as body (body.id)}
+						<Select.Item value={body.id}>{body.name}</Select.Item>
+					{/each}
+				</Select.Content>
+			</Select.Root>
 		</div>
 		<div class="flex flex-col gap-1">
-			<Label for="gov-status">{t('decisions.status')}</Label>
-			<select
-				id="gov-status"
-				class="w-40 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={status}
-			>
-				<option value="">{t('incomeExpense.all')}</option>
-				<option value="draft">{t('decisions.statusDraft')}</option>
-				<option value="open">{t('decisions.statusOpen')}</option>
-				<option value="approved">{t('decisions.statusApproved')}</option>
-				<option value="rejected">{t('decisions.statusRejected')}</option>
-				<option value="cancelled">{t('decisions.statusCancelled')}</option>
-			</select>
+			<Label id="gov-status-label">{t('decisions.status')}</Label>
+			<Select.Root type="single" bind:value={status}>
+				<Select.Trigger class="w-44" aria-labelledby="gov-status-label">
+					{#if status === ''}
+						{t('incomeExpense.all')}
+					{:else}
+						{t(statusBadge(status).label)}
+					{/if}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">{t('incomeExpense.all')}</Select.Item>
+					<Select.Item value="draft">{t('decisions.statusDraft')}</Select.Item>
+					<Select.Item value="open">{t('decisions.statusOpen')}</Select.Item>
+					<Select.Item value="approved">{t('decisions.statusApproved')}</Select.Item>
+					<Select.Item value="rejected">{t('decisions.statusRejected')}</Select.Item>
+					<Select.Item value="cancelled">{t('decisions.statusCancelled')}</Select.Item>
+				</Select.Content>
+			</Select.Root>
 		</div>
-		<Button variant="outline" size="sm" onclick={applyFilters}>
+		<Button type="submit" variant="outline" size="sm">
 			{t('incomeExpense.filters.apply')}
 		</Button>
-		<Button variant="ghost" size="sm" onclick={clearFilters}>
+		<Button type="button" variant="ghost" size="sm" onclick={clearFilters}>
 			{t('incomeExpense.filters.clear')}
 		</Button>
-	</div>
+	</form>
 
 	{#if loadError}
-		<p class="text-sm text-destructive">{t(loadError)}</p>
+		<ErrorState messageKey={loadError} onretry={() => void refresh()} />
 	{:else if data === null}
-		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+		<ListSkeleton />
 	{:else if data.items.length === 0}
 		<EmptyState messageKey="decisions.empty" />
 	{:else}
@@ -220,7 +237,7 @@
 								<TableCell>{item.bodyName}</TableCell>
 								<TableCell>
 									{@const badge = statusBadge(item.status)}
-									<Badge variant={badge.variant}>{t(badge.label)}</Badge>
+									<StatusBadge label={t(badge.label)} tone={badge.tone} />
 								</TableCell>
 								<TableCell>{item.decisionOn}</TableCell>
 								<TableCell>{item.effectiveOn ?? '—'}</TableCell>
@@ -228,24 +245,15 @@
 						{/each}
 					</TableBody>
 				</Table>
-				<div class="mt-3 flex items-center justify-between">
-					<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => goPage(page - 1)}>
-						{t('pagination.previous')}
-					</Button>
-					<span class="text-sm text-muted-foreground">
-						{t('pagination.pageInfo')
-							.replace('{page}', String(page))
-							.replace('{pages}', String(pages))
-							.replace('{total}', String(data.totalCount))}
-					</span>
-					<Button
-						variant="outline"
-						size="sm"
-						disabled={page >= pages}
-						onclick={() => goPage(page + 1)}
-					>
-						{t('pagination.next')}
-					</Button>
+				<div class="mt-3">
+					<Pager
+						{page}
+						{pages}
+						total={data.totalCount}
+						{pageSize}
+						onPage={goPage}
+						onPageSize={setPageSize}
+					/>
 				</div>
 			</CardContent>
 		</Card>

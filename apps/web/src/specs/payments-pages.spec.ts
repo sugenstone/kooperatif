@@ -10,6 +10,7 @@ vi.mock('$app/paths', () => ({ resolve: (path: string) => path }));
 
 import PaymentDetailPage from '../routes/(app)/tahsilatlar/[id]/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
+import { pickSelectOptionByLabel } from './select-helper';
 import { canonicalToTryInput, parseTryInput } from '$lib/money';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unknown>) {
@@ -172,10 +173,7 @@ describe('HOTFIX-001 — canonical money never enters the tr-TR input raw', () =
 		const amountInput = (await screen.findByLabelText('Dağıtılacak Tutar')) as HTMLInputElement;
 		expect(amountInput.value).toBe('300,00');
 
-		await userEvent.selectOptions(
-			screen.getByLabelText('Aidat Borcu'),
-			'88888888-8888-4888-8888-888888888888'
-		);
+		await pickSelectOptionByLabel('Aidat Borcu', /Şubat Dönemi/);
 		// Canonical "1234.56" → editable "1234,56" (never "123456").
 		expect(amountInput.value).toBe('1234,56');
 	});
