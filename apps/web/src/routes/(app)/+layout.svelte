@@ -20,10 +20,17 @@
 			return;
 		}
 		live.connect(scopes);
+		// Recovery triggers (STEP-017C): `online` resumes an exhausted
+		// sequence; returning to a suspended tab wakes a stale socket.
 		const online = () => live.resume();
+		const visible = () => {
+			if (document.visibilityState === 'visible') live.wake();
+		};
 		window.addEventListener('online', online);
+		document.addEventListener('visibilitychange', visible);
 		return () => {
 			window.removeEventListener('online', online);
+			document.removeEventListener('visibilitychange', visible);
 			live.disconnect();
 		};
 	});

@@ -324,6 +324,7 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'tv.status.connecting': 'Connecting…',
 	'tv.status.reconnecting': 'Reconnecting…',
 	'tv.status.disconnected': 'Disconnected',
+	'tv.retry': 'Reconnect',
 	'tv.stale': 'Data is stale — last successful sync:',
 	'tv.lastSync': 'Last sync',
 	'tv.fullscreen': 'Fullscreen',

@@ -28,5 +28,11 @@
 		"backup:failure-test": "node scripts/backup/failure-test.mjs",
 		"backup:test": "node --test \"scripts/backup/tests/*.test.mjs\"",
 		"verify": "bash scripts/verify.sh"
+	},
+	"pnpm": {
+		"overrides": {
+			"source-map-js": "1.2.2",
+			"cookie": "0.7.2"
+		}
 	}
 }

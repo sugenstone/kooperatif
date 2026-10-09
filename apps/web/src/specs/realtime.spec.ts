@@ -33,6 +33,7 @@ class FakeWebSocket {
 
 	close() {
 		this.readyState = FakeWebSocket.CLOSED;
+		this.onclose?.();
 	}
 
 	open() {
@@ -196,6 +197,43 @@ describe('realtime client', () => {
 		vi.advanceTimersByTime(2_000);
 		lastSocket().open();
 		expect(handler).toHaveBeenLastCalledWith('*'); // reconnect resync
+	});
+
+	it('wake() resumes an exhausted reconnect sequence (post-sleep recovery)', () => {
+		live.connect(['reports.read']);
+		lastSocket().open();
+		lastSocket().fail();
+		for (let i = 0; i < 12 && live.status !== 'disconnected'; i++) {
+			vi.advanceTimersByTime(60_000);
+			lastSocket().fail();
+		}
+		expect(live.status).toBe('disconnected');
+		// e.g. laptop slept overnight, network is back, tab becomes visible.
+		live.wake();
+		expect(live.status).toBe('connecting');
+		lastSocket().open();
+		expect(live.status).toBe('connected');
+	});
+
+	it('wake() force-cycles a half-open socket silent past the stall threshold', () => {
+		live.connect(['reports.read']);
+		lastSocket().open();
+		vi.advanceTimersByTime(91_000); // silent >90s (server pings invisible to us)
+		live.wake();
+		// Force-closed → onclose → bounded reconnect → fresh resync.
+		expect(live.status).toBe('reconnecting');
+		vi.advanceTimersByTime(1_000);
+		lastSocket().open();
+		expect(live.status).toBe('connected');
+	});
+
+	it('wake() leaves a fresh, healthy socket alone', () => {
+		live.connect(['reports.read']);
+		lastSocket().open();
+		vi.advanceTimersByTime(5_000);
+		live.wake();
+		expect(live.status).toBe('connected');
+		expect(FakeWebSocket.instances).toHaveLength(1);
 	});
 });
 

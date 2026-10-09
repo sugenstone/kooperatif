@@ -140,3 +140,35 @@ async fn auth_endpoints_fail_closed_when_the_database_is_missing() {
     let json: Value = serde_json::from_slice(&body).expect("JSON body");
     assert_eq!(json["error"]["code"], "dependency_unavailable");
 }
+
+#[tokio::test]
+async fn every_response_carries_baseline_security_headers() {
+    // STEP-017 §27: hardening headers on API responses, including errors.
+    let app = app_without_database();
+    for path in ["/health", "/api/auth/me", "/nonexistent"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("infallible");
+        assert_eq!(
+            response.headers().get("x-content-type-options").unwrap(),
+            "nosniff",
+            "{path} missing nosniff"
+        );
+        assert_eq!(
+            response.headers().get("x-frame-options").unwrap(),
+            "DENY",
+            "{path} missing frame denial"
+        );
+        assert_eq!(
+            response.headers().get("referrer-policy").unwrap(),
+            "no-referrer",
+            "{path} missing referrer policy"
+        );
+    }
+}

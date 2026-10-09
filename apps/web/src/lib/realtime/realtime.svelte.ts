@@ -31,6 +31,10 @@ const COALESCE_MS = 150;
 const MAX_ATTEMPTS = 10;
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
+/** A socket silent for this long after a tab/wake event is treated as
+ * dead — browsers cannot observe protocol-level pings, so the client
+ * force-cycles the connection instead of trusting a half-open TCP. */
+const STALL_MS = 90_000;
 
 function wsUrl(): string {
 	const url = new SvelteURL(REALTIME_PATH, API_BASE_URL);
@@ -51,6 +55,7 @@ class RealtimeClient {
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private attempts = 0;
 	private running = false;
+	private lastActivity = 0;
 
 	/** Connect (idempotent). `scopes` are permission keys the caller may
 	 * read; the server intersects with live effective permissions. */
@@ -80,6 +85,21 @@ class RealtimeClient {
 		this.open();
 	}
 
+	/** Called when the tab regains visibility/focus. After an exhausted
+	 * reconnect sequence this restarts delivery; a socket that looks open
+	 * but has been silent past the stall threshold is force-cycled, which
+	 * covers laptop sleep where the server already dropped the peer. */
+	wake(): void {
+		if (!this.running) return;
+		if (this.status === 'disconnected') {
+			this.resume();
+			return;
+		}
+		if (this.ws && Date.now() - this.lastActivity > STALL_MS) {
+			this.ws.close();
+		}
+	}
+
 	/** Close the current socket while staying `running` — the bounded
 	 * reconnect path then applies (diagnostics/E2E hook). */
 	drop(): void {
@@ -95,6 +115,7 @@ class RealtimeClient {
 		if (!this.running || typeof WebSocket === 'undefined') return;
 		this.clearTimers();
 		this.status = this.attempts > 0 ? 'reconnecting' : 'connecting';
+		this.lastActivity = Date.now();
 		const socket = new WebSocket(wsUrl());
 		this.ws = socket;
 		socket.onopen = () => {
@@ -124,6 +145,7 @@ class RealtimeClient {
 
 	private handle(event: RealtimeServerEvent): void {
 		this.lastMessageAt = new Date();
+		this.lastActivity = Date.now();
 		switch (event.type) {
 			case 'data-changed':
 				this.pending.add(event.domain);

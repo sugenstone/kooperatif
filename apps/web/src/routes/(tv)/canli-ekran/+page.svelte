@@ -80,10 +80,21 @@
 		const offInvalidate = live.onInvalidate(() => void refresh());
 		const onFullscreen = () => (fullscreen = !!document.fullscreenElement);
 		const clock = setInterval(() => (now = new Date()), 1_000);
+		// STEP-017C: a projector must recover by itself — network return
+		// resumes an exhausted sequence; a visible-again tab wakes a stale
+		// socket; the operator also gets a manual retry button below.
+		const online = () => live.resume();
+		const visible = () => {
+			if (document.visibilityState === 'visible') live.wake();
+		};
+		window.addEventListener('online', online);
+		document.addEventListener('visibilitychange', visible);
 		document.addEventListener('fullscreenchange', onFullscreen);
 		void refresh();
 		return () => {
 			offInvalidate();
+			window.removeEventListener('online', online);
+			document.removeEventListener('visibilitychange', visible);
 			document.removeEventListener('fullscreenchange', onFullscreen);
 			clearInterval(clock);
 			live.disconnect();
@@ -141,10 +152,20 @@
 
 	{#if stale}
 		<div
-			class="mt-4 rounded-lg border border-amber-700/60 bg-amber-900/40 px-6 py-3 text-xl text-amber-200"
+			class="mt-4 flex items-center justify-between gap-4 rounded-lg border border-amber-700/60 bg-amber-900/40 px-6 py-3 text-xl text-amber-200"
 			data-testid="tv-stale"
 		>
-			{t('tv.stale')}{lastSyncAt ? ` ${timeFmt.format(lastSyncAt)}` : ''}
+			<span>{t('tv.stale')}{lastSyncAt ? ` ${timeFmt.format(lastSyncAt)}` : ''}</span>
+			{#if live.status === 'disconnected'}
+				<button
+					type="button"
+					class="rounded-md border border-amber-500 px-4 py-2 text-base font-medium text-amber-100 hover:bg-amber-800"
+					data-testid="tv-retry"
+					onclick={() => live.resume()}
+				>
+					{t('tv.retry')}
+				</button>
+			{/if}
 		</div>
 	{/if}
 

@@ -1337,6 +1337,7 @@ export const trTR = {
 	'tv.status.connecting': 'Bağlanıyor…',
 	'tv.status.reconnecting': 'Yeniden bağlanıyor…',
 	'tv.status.disconnected': 'Bağlantı yok',
+	'tv.retry': 'Yeniden Bağlan',
 	'tv.stale': 'Veri güncel değil — son başarılı senkronizasyon:',
 	'tv.lastSync': 'Son senkronizasyon',
 	'tv.fullscreen': 'Tam ekran',

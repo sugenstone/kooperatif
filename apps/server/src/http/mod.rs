@@ -5,6 +5,11 @@ pub mod health;
 
 use std::sync::Arc;
 
+use axum::extract::Request;
+use axum::http::header;
+use axum::http::HeaderValue;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use health::{health, ready};
@@ -70,6 +75,25 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
         ])
 }
 
+/// Baseline hardening headers applied to every response (STEP-017 §27):
+/// the API must never be framed, sniffed as a different content type or
+/// leak URLs through the Referer header. `no-store` for authenticated
+/// routes is applied per-router (`auth::routes::no_store_cache_control`).
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
 /// Build the application router with observability middleware.
 pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
     let trace = TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
@@ -105,6 +129,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(crate::reports::routes::reports_router())
         .merge(crate::realtime::routes::realtime_router())
         .fallback(fallback)
+        .layer(middleware::from_fn(security_headers))
         .layer(trace)
         .layer(cors)
         .layer(PropagateRequestIdLayer::x_request_id())
