@@ -59,8 +59,13 @@ jobs:
       - name: Clippy (warnings denied)
         run: cargo clippy --manifest-path apps/server/Cargo.toml --all-targets -- -D warnings
 
-      - name: Tests
-        run: cargo test --manifest-path apps/server/Cargo.toml
+      # Dependency-free tests only: DB-gated suites panic intentionally
+      # when KOOPERATIF_TEST_DATABASE_URL is absent (PILOT-FIX-001/F5) and
+      # run in the `database` job below, which provides PostgreSQL.
+      - name: Tests (unit + non-DB integration + doc)
+        run: |
+          cargo test --manifest-path apps/server/Cargo.toml --lib --test http
+          cargo test --manifest-path apps/server/Cargo.toml --doc
 
   database:
     name: Database (clean-database migration + readiness)
@@ -129,8 +134,23 @@ jobs:
       - name: Backup unit tests (pure logic)
         run: node --test "scripts/backup/tests/*.test.mjs"
 
+      # The drill provisions its own PostgreSQL via docker/compose.yaml
+      # (docker exec/inspect + pg tools inside containers), so a services
+      # container is not needed; diagnostics make the remote environment
+      # self-describing if the job fails.
+      - name: Docker environment diagnostics
+        run: |
+          docker version
+          docker compose version
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}}'
+          df -h "$RUNNER_TEMP"
+
       - name: Recovery drill on real PostgreSQL
         run: node scripts/backup/drill.mjs
+
+      - name: Postgres logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yaml logs --no-color postgres || true
 
       - name: Failure-injection tests
         run: node scripts/backup/failure-test.mjs

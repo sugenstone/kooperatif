@@ -79,6 +79,7 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'shareholders.title': 'Shareholders',
 	'shares.title': 'Shares',
 	'common.cancel': 'Cancel',
+	'common.confirm': 'Confirm',
 	'common.reset': 'Clear filters',
 	'common.retry': 'Try again',
 	'common.all': 'All',

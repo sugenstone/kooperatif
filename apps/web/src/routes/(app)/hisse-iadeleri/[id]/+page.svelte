@@ -21,6 +21,7 @@
 		TableHeader,
 		TableRow
 	} from '$lib/components/ui/table';
+	import ConfirmActionDialog from '$lib/components/confirm-action-dialog.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
@@ -55,6 +56,26 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
+
+	// REQ-027: application-level confirmation for destructive actions.
+	type PendingAction = {
+		title: MessageKey;
+		description: MessageKey;
+		run: () => Promise<void>;
+	};
+	let pendingAction = $state<PendingAction | null>(null);
+
+	function ask(action: PendingAction): void {
+		if (!detail || busy) return;
+		pendingAction = action;
+	}
+
+	function confirmPending(): void {
+		const action = pendingAction;
+		if (!action || busy) return;
+		pendingAction = null;
+		void action.run();
+	}
 
 	// Panel state — only one panel open at a time.
 	let panel = $state<
@@ -180,7 +201,6 @@
 
 	async function doCancelReturn(): Promise<void> {
 		if (!detail || busy || reasonInput.trim() === '') return;
-		if (!confirm(t('shareReturns.cancelConfirm'))) return;
 		busy = true;
 		try {
 			await apiFetch(shareReturnCancelPath(detail.id), {
@@ -197,8 +217,8 @@
 		}
 	}
 
-	async function doFinalize(): Promise<void> {
-		if (!detail || busy) return;
+	// Validation runs BEFORE the confirmation dialog opens (unchanged order).
+	function buildFinalizeSpecs(): EntitlementSpecInput[] | null {
 		const specs: EntitlementSpecInput[] = [];
 		if (finIncludePrincipal) {
 			specs.push({
@@ -224,9 +244,24 @@
 			)
 		) {
 			actionError = 'shares.invalidAmount';
-			return;
+			return null;
 		}
-		if (specs.length === 0 || !confirm(t('shareReturns.finalize.confirm'))) return;
+		return specs.length === 0 ? null : specs;
+	}
+
+	function askFinalize(): void {
+		if (!detail || busy) return;
+		const specs = buildFinalizeSpecs();
+		if (!specs) return;
+		ask({
+			title: 'shareReturns.finalize.title',
+			description: 'shareReturns.finalize.confirm',
+			run: () => doFinalize(specs)
+		});
+	}
+
+	async function doFinalize(specs: EntitlementSpecInput[]): Promise<void> {
+		if (!detail || busy) return;
 		busy = true;
 		try {
 			await apiFetch(shareReturnFinalizePath(detail.id), {
@@ -282,7 +317,6 @@
 
 	async function doCancelEntitlement(entitlement: ShareReturnEntitlement): Promise<void> {
 		if (busy || reasonInput.trim() === '') return;
-		if (!confirm(t('entitlements.cancelConfirm'))) return;
 		busy = true;
 		try {
 			await apiFetch(entitlementCancelPath(entitlement.id), {
@@ -342,7 +376,6 @@
 
 	async function doReverse(settlement: ShareReturnSettlement): Promise<void> {
 		if (busy || reasonInput.trim() === '') return;
-		if (!confirm(t('settlements.reverseConfirm'))) return;
 		busy = true;
 		try {
 			await apiFetch(settlementReversePath(settlement.id), {
@@ -473,7 +506,12 @@
 						<Button
 							size="sm"
 							disabled={busy || reasonInput.trim() === ''}
-							onclick={() => void doCancelReturn()}
+							onclick={() =>
+								ask({
+									title: 'shareReturns.cancel',
+									description: 'shareReturns.cancelConfirm',
+									run: doCancelReturn
+								})}
 						>
 							{t('shareReturns.cancel')}
 						</Button>
@@ -549,7 +587,7 @@
 						<Button
 							size="sm"
 							disabled={busy || (!finIncludePrincipal && !finIncludeProfit)}
-							onclick={() => void doFinalize()}
+							onclick={() => askFinalize()}
 						>
 							{t('shareReturns.finalize.submit')}
 						</Button>
@@ -760,7 +798,12 @@
 												<Button
 													size="sm"
 													disabled={busy || reasonInput.trim() === ''}
-													onclick={() => void doCancelEntitlement(ent)}
+													onclick={() =>
+														ask({
+															title: 'entitlements.cancel',
+															description: 'entitlements.cancelConfirm',
+															run: () => doCancelEntitlement(ent)
+														})}
 												>
 													{t('entitlements.cancel')}
 												</Button>
@@ -831,7 +874,12 @@
 														<Button
 															size="sm"
 															disabled={busy || reasonInput.trim() === ''}
-															onclick={() => void doReverse(st)}
+															onclick={() =>
+																ask({
+																	title: 'settlements.reverse',
+																	description: 'settlements.reverseConfirm',
+																	run: () => doReverse(st)
+																})}
 														>
 															{t('settlements.reverse')}
 														</Button>
@@ -858,5 +906,17 @@
 				{/if}
 			</CardContent>
 		</Card>
+	{/if}
+
+	{#if pendingAction}
+		<ConfirmActionDialog
+			title={pendingAction.title}
+			description={pendingAction.description}
+			{busy}
+			onConfirm={confirmPending}
+			onDismiss={() => {
+				if (!busy) pendingAction = null;
+			}}
+		/>
 	{/if}
 </section>

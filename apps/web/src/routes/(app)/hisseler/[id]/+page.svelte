@@ -19,6 +19,7 @@
 		TableHeader,
 		TableRow
 	} from '$lib/components/ui/table';
+	import ConfirmActionDialog from '$lib/components/confirm-action-dialog.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
@@ -49,6 +50,26 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
+
+	// REQ-027: application-level confirmation for destructive actions.
+	type PendingAction = {
+		title: MessageKey;
+		description: MessageKey;
+		run: () => Promise<void>;
+	};
+	let pendingAction = $state<PendingAction | null>(null);
+
+	function ask(action: PendingAction): void {
+		if (!detail || busy) return;
+		pendingAction = action;
+	}
+
+	function confirmPending(): void {
+		const action = pendingAction;
+		if (!action || busy) return;
+		pendingAction = null;
+		void action.run();
+	}
 	let actionMode = $state<ActionMode>('none');
 	let ownerSearch = $state('');
 	let ownerResults = $state<ShareholderListItem[]>([]);
@@ -106,10 +127,22 @@
 		void searchOwners();
 	}
 
+	function askOwnerChange(): void {
+		if (!detail || busy || !toShareholderId || actionMode === 'none') return;
+		// Amount validation precedes confirmation (unchanged behavior).
+		if (actionMode === 'sale' && saleAmount.trim() && parseTryInput(saleAmount) === null) {
+			actionError = 'shares.invalidAmount';
+			return;
+		}
+		ask({
+			title: actionMode === 'transfer' ? 'shares.transfer' : 'shares.sale',
+			description: actionMode === 'transfer' ? 'shares.confirmTransfer' : 'shares.confirmSale',
+			run: submitOwnerChange
+		});
+	}
+
 	async function submitOwnerChange(): Promise<void> {
 		if (!detail || busy || !toShareholderId || actionMode === 'none') return;
-		const confirmKey = actionMode === 'transfer' ? 'shares.confirmTransfer' : 'shares.confirmSale';
-		if (!confirm(t(confirmKey))) return;
 		let amount: string | null = null;
 		if (actionMode === 'sale' && saleAmount.trim()) {
 			amount = parseTryInput(saleAmount);
@@ -145,9 +178,21 @@
 		}
 	}
 
-	async function changeStatus(to: ShareStatus, confirmKey: MessageKey | null): Promise<void> {
+	function askStatusChange(
+		to: ShareStatus,
+		title: MessageKey,
+		confirmKey: MessageKey | null
+	): void {
 		if (!detail || busy) return;
-		if (confirmKey && !confirm(t(confirmKey))) return;
+		if (!confirmKey) {
+			void changeStatus(to);
+			return;
+		}
+		ask({ title, description: confirmKey, run: () => changeStatus(to) });
+	}
+
+	async function changeStatus(to: ShareStatus): Promise<void> {
+		if (!detail || busy) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -246,7 +291,7 @@
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onclick={() => void changeStatus('suspended', null)}
+							onclick={() => void changeStatus('suspended')}
 						>
 							{t('shares.suspend')}
 						</Button>
@@ -265,7 +310,7 @@
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onclick={() => void changeStatus('active', null)}
+							onclick={() => void changeStatus('active')}
 						>
 							{t('shares.reactivate')}
 						</Button>
@@ -274,7 +319,7 @@
 						variant="outline"
 						size="sm"
 						disabled={busy}
-						onclick={() => void changeStatus('voided', 'shares.confirmVoid')}
+						onclick={() => askStatusChange('voided', 'shares.void', 'shares.confirmVoid')}
 					>
 						{t('shares.void')}
 					</Button>
@@ -393,11 +438,7 @@
 						<Input id="action-reason" bind:value={reason} />
 					</div>
 					<div class="flex gap-2">
-						<Button
-							size="sm"
-							disabled={busy || !toShareholderId}
-							onclick={() => void submitOwnerChange()}
-						>
+						<Button size="sm" disabled={busy || !toShareholderId} onclick={() => askOwnerChange()}>
 							{actionMode === 'transfer' ? t('shares.transfer') : t('shares.sale')}
 						</Button>
 						<Button variant="outline" size="sm" onclick={() => (actionMode = 'none')}>
@@ -458,5 +499,17 @@
 				</Table>
 			</CardContent>
 		</Card>
+	{/if}
+
+	{#if pendingAction}
+		<ConfirmActionDialog
+			title={pendingAction.title}
+			description={pendingAction.description}
+			{busy}
+			onConfirm={confirmPending}
+			onDismiss={() => {
+				if (!busy) pendingAction = null;
+			}}
+		/>
 	{/if}
 </section>

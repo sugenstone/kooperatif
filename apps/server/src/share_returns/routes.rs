@@ -454,6 +454,7 @@ pub async fn get_return(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct InitiateReturnRequest {
     pub share_id: Uuid,
     /// Business DATE `YYYY-MM-DD` — the economic cutoff; ownership ends
@@ -535,6 +536,7 @@ pub async fn initiate_return(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct EntitlementSpecRequest {
     pub entitlement_type: String,
     /// Crystallized amount — decimal string; NULL = right exists but
@@ -574,6 +576,7 @@ fn parse_entitlement_spec(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct FinalizeReturnRequest {
     /// Rights to crystallize — at most one per type; each may carry a
     /// NULL amount (undetermined right).
@@ -631,6 +634,7 @@ pub async fn finalize_return(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CancelReturnRequest {
     /// Required non-empty reason (docs/19).
     pub reason: String,
@@ -767,6 +771,7 @@ pub async fn list_entitlements(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct DetermineEntitlementRequest {
     /// The cooperative-approved amount — REQUIRED here (a determined
     /// right must have a number; use cancel for a mistaken row).
@@ -837,6 +842,7 @@ pub async fn determine_entitlement(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CancelEntitlementRequest {
     /// Required non-empty reason (docs/19).
     pub reason: String,
@@ -880,6 +886,7 @@ pub async fn cancel_entitlement(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostSettlementRequest {
     pub financial_account_id: Uuid,
     /// Positive decimal string; <= entitlement remaining.
@@ -971,6 +978,7 @@ pub async fn post_settlement(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseSettlementRequest {
     /// Required non-empty reason (docs/19 reversal contract).
     pub reason: String,

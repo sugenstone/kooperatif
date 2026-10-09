@@ -104,6 +104,7 @@ pub struct ShareDetailDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateShareRequest {
     pub shareholder_id: Uuid,
     pub acquisition_type: String, // "founder" | "later_acquisition"
@@ -114,6 +115,7 @@ pub struct CreateShareRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct OwnershipChangeRequest {
     pub to_shareholder_id: Uuid,
     pub effective_at: Option<String>,
@@ -124,6 +126,7 @@ pub struct OwnershipChangeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct SaleRequest {
     pub to_shareholder_id: Uuid,
     pub sale_amount: Option<String>,
@@ -135,6 +138,7 @@ pub struct SaleRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ShareStatusChangeRequest {
     pub to: String,
     pub reason: Option<String>,

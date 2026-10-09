@@ -327,6 +327,9 @@ async fn api_open_period(
     base_amount: &str,
     key: &str,
 ) -> Value {
+    // REQ-006: period creation/generation never accepted an idempotency
+    // key — strict validation now rejects the previously ignored field.
+    let _ = key;
     let body = json!({
         "name": "Ocak 2026",
         "collectionStartDate": "2026-01-01",
@@ -334,7 +337,6 @@ async fn api_open_period(
         "ruleType": "per_shareholder",
         "baseAmount": base_amount,
         "assessmentEffectiveDate": "2026-01-01",
-        "idempotencyKey": key,
     });
     let (status, period) = send(
         &test.app,
@@ -352,7 +354,7 @@ async fn api_open_period(
             ),
             cookie,
             Some(csrf),
-            Some(json!({ "idempotencyKey": format!("{key}-gen") })),
+            None,
         ),
     )
     .await;
@@ -635,11 +637,19 @@ async fn api_investment_event(
             "valuationDate": "2026-01-14", "amount": amount,
             "method": "Ekspertiz", "idempotencyKey": key,
         }),
-        _ => json!({
+        // REQ-006: `description` is incomes-only — fundings take `note`.
+        "incomes" => json!({
             "financialAccountId": account.unwrap().to_string(),
             "amount": amount,
             "occurredAt": "2026-01-12T10:00:00Z",
             "description": "yatırım olayı",
+            "idempotencyKey": key,
+        }),
+        _ => json!({
+            "financialAccountId": account.unwrap().to_string(),
+            "amount": amount,
+            "occurredAt": "2026-01-12T10:00:00Z",
+            "note": "yatırım olayı",
             "idempotencyKey": key,
         }),
     };

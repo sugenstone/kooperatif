@@ -441,6 +441,7 @@ pub async fn list_movements(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateAccountRequest {
     pub name: String,
     pub account_type: String,
@@ -503,6 +504,7 @@ pub async fn create_account(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAccountRequest {
     pub name: String,
     pub description: Option<String>,
@@ -574,6 +576,7 @@ pub async fn update_account(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct StatusChangeRequest {
     pub status: String,
 }
@@ -614,6 +617,7 @@ pub async fn change_status(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostTransferRequest {
     pub source_account_id: Uuid,
     pub destination_account_id: Uuid,
@@ -752,6 +756,7 @@ pub async fn get_transfer(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseTransferRequest {
     pub reason: String,
 }

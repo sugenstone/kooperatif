@@ -571,6 +571,7 @@ pub async fn get_investment(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateInvestmentRequest {
     pub name: String,
     pub investment_type: String,
@@ -675,6 +676,7 @@ pub async fn create_investment(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CancelInvestmentRequest {
     pub reason: String,
 }
@@ -714,6 +716,7 @@ pub async fn cancel_investment(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostFundingRequest {
     pub financial_account_id: Uuid,
     /// Exact decimal string (ADR-004).
@@ -802,6 +805,7 @@ pub async fn post_funding(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseRequest {
     pub reason: String,
 }
@@ -860,6 +864,7 @@ pub async fn reverse_funding(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct RecordValuationRequest {
     /// Business DATE `YYYY-MM-DD`; may be backdated, never future.
     pub valuation_date: String,
@@ -946,6 +951,7 @@ pub async fn record_valuation(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CancelValuationRequest {
     pub reason: String,
 }
@@ -1004,6 +1010,7 @@ pub async fn cancel_valuation(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostIncomeRequest {
     pub financial_account_id: Uuid,
     /// Exact decimal string (ADR-004); strictly positive.
@@ -1147,6 +1154,7 @@ pub async fn reverse_income(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ProceedsLegRequest {
     pub financial_account_id: Uuid,
     /// Exact decimal string (ADR-004); strictly positive.
@@ -1157,6 +1165,7 @@ pub struct ProceedsLegRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct DisposeInvestmentRequest {
     /// Business DATE `YYYY-MM-DD`; may be backdated, never future.
     pub disposed_at: String,

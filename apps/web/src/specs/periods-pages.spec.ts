@@ -143,6 +143,10 @@ beforeEach(() => {
 	auth.user = { id: 'u-1', username: 'ali', displayName: 'Ali Yılmaz' };
 	auth.csrfToken = 'csrf-raw';
 	auth.permissions = ['periods.read', 'periods.manage', 'assessments.read', 'assessments.manage'];
+	// jsdom: a previous test's AlertDialog can leave bits-ui's body
+	// scroll-lock styles behind; reset before each interaction.
+	document.body.style.pointerEvents = '';
+	document.body.style.overflow = '';
 });
 
 afterEach(() => {
@@ -278,8 +282,7 @@ describe('Dönem detail page', () => {
 		expect(screen.getByText('Ali Veli · Vasi: Belirtilmemiş · Aile No 410')).toBeInTheDocument();
 	});
 
-	it('posts the finalize command with confirmation', async () => {
-		const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+	it('posts the finalize command only after the in-app confirmation', async () => {
 		const fetchMock = stubFetch(async (url, init) => {
 			if (url.includes('/generate-assessments') && init?.method === 'POST') {
 				return jsonResponse({ ...draftDetail, status: 'open' }, 201);
@@ -291,14 +294,42 @@ describe('Dönem detail page', () => {
 
 		await screen.findByText('Önizlemeyi Çalıştır');
 		await userEvent.click(screen.getByRole('button', { name: 'Aidat Borçlarını Oluştur' }));
+		// REQ-027: AlertDialog, not window.confirm — no request before confirm.
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) =>
+					!(String(input).includes('/generate-assessments') && init?.method === 'POST')
+			)
+		).toBe(true);
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Onayla' }));
 		await tick();
 
 		const call = fetchMock.mock.calls.find(([input]) =>
 			String(input).includes('/generate-assessments')
 		);
 		expect(call?.[1]?.method).toBe('POST');
-		expect(confirmSpy).toHaveBeenCalled();
-		confirmSpy.mockRestore();
+	});
+
+	it('a cancelled finalize dialog never reaches the API', async () => {
+		const fetchMock = stubFetch(async (url) => {
+			if (url.includes('/api/periods/')) return jsonResponse(draftDetail);
+			return jsonResponse({});
+		});
+		render(PeriodDetail, { data: { id: draftDetail.id } });
+
+		await screen.findByText('Önizlemeyi Çalıştır');
+		await userEvent.click(screen.getByRole('button', { name: 'Aidat Borçlarını Oluştur' }));
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await tick();
+
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) =>
+					!(String(input).includes('/generate-assessments') && init?.method === 'POST')
+			)
+		).toBe(true);
 	});
 
 	it('hides finalize for read-only operators', async () => {

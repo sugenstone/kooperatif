@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -345,6 +345,9 @@ describe('social aid fund detail page', () => {
 		await tick();
 		const buttons = screen.getAllByRole('button', { name: 'Bağışı Geri Al' });
 		await userEvent.click(buttons[buttons.length - 1]);
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dlg = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dlg).getByRole('button', { name: 'Onayla' }));
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ reason: 'yanlış tutar' });
 	});

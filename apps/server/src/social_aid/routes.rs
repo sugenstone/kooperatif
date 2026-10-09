@@ -633,6 +633,7 @@ pub async fn get_disbursement(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateFundRequest {
     pub name: String,
     pub description: Option<String>,
@@ -743,6 +744,7 @@ pub async fn close_fund(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CancelFundRequest {
     pub reason: String,
 }
@@ -782,6 +784,7 @@ pub async fn cancel_fund(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostDonationRequest {
     pub fund_id: Uuid,
     /// Canonical Person link (shareholder/guardian/any person) — XOR
@@ -888,6 +891,7 @@ pub async fn post_donation(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseRequest {
     pub reason: String,
 }
@@ -932,6 +936,7 @@ pub async fn reverse_donation(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostDisbursementRequest {
     pub fund_id: Uuid,
     pub beneficiary_person_id: Option<Uuid>,

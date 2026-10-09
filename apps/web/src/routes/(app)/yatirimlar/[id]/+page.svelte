@@ -20,6 +20,7 @@
 		TableHeader,
 		TableRow
 	} from '$lib/components/ui/table';
+	import ConfirmActionDialog from '$lib/components/confirm-action-dialog.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
@@ -55,6 +56,26 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
+
+	// REQ-027: application-level confirmation for destructive actions.
+	type PendingAction = {
+		title: MessageKey;
+		description: MessageKey;
+		run: () => Promise<void>;
+	};
+	let pendingAction = $state<PendingAction | null>(null);
+
+	function ask(action: PendingAction): void {
+		if (!detail || busy) return;
+		pendingAction = action;
+	}
+
+	function confirmPending(): void {
+		const action = pendingAction;
+		if (!action || busy) return;
+		pendingAction = null;
+		void action.run();
+	}
 
 	// Panel state — only one action panel open at a time.
 	let panel = $state<
@@ -161,7 +182,6 @@
 
 	async function doCancel(): Promise<void> {
 		if (!detail || busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('investments.cancelConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -216,7 +236,6 @@
 
 	async function doReverseFunding(funding: InvestmentFunding): Promise<void> {
 		if (!detail || busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('fundings.reverseConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -269,7 +288,6 @@
 
 	async function doCancelValuation(valuation: InvestmentValuation): Promise<void> {
 		if (!detail || busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('valuations.cancelConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -323,7 +341,6 @@
 
 	async function doReverseIncome(income: InvestmentIncome): Promise<void> {
 		if (!detail || busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('investmentIncomes.reverseConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -365,7 +382,6 @@
 
 	async function doDispose(): Promise<void> {
 		if (!detail || busy || !disposeReady) return;
-		if (!window.confirm(t('disposals.confirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -540,7 +556,12 @@
 						<Button
 							size="sm"
 							disabled={busy || !reasonInput.trim()}
-							onclick={() => void doCancel()}
+							onclick={() =>
+								ask({
+									title: 'investments.cancel',
+									description: 'investments.cancelConfirm',
+									run: doCancel
+								})}
 						>
 							{t('investments.cancel')}
 						</Button>
@@ -824,7 +845,16 @@
 					</div>
 
 					<div class="flex gap-2">
-						<Button size="sm" disabled={busy || !disposeReady} onclick={() => void doDispose()}>
+						<Button
+							size="sm"
+							disabled={busy || !disposeReady}
+							onclick={() =>
+								ask({
+									title: 'disposals.title',
+									description: 'disposals.confirm',
+									run: doDispose
+								})}
+						>
 							{busy ? t('disposals.submitting') : t('disposals.submit')}
 						</Button>
 						<Button variant="outline" size="sm" onclick={() => (panel = null)}>
@@ -885,7 +915,12 @@
 														<Button
 															size="sm"
 															disabled={busy || !reasonInput.trim()}
-															onclick={() => void doReverseFunding(funding)}
+															onclick={() =>
+																ask({
+																	title: 'fundings.reverse',
+																	description: 'fundings.reverseConfirm',
+																	run: () => doReverseFunding(funding)
+																})}
 														>
 															{t('fundings.reverse')}
 														</Button>
@@ -969,7 +1004,12 @@
 														<Button
 															size="sm"
 															disabled={busy || !reasonInput.trim()}
-															onclick={() => void doCancelValuation(valuation)}
+															onclick={() =>
+																ask({
+																	title: 'valuations.cancel',
+																	description: 'valuations.cancelConfirm',
+																	run: () => doCancelValuation(valuation)
+																})}
 														>
 															{t('valuations.cancel')}
 														</Button>
@@ -1050,7 +1090,12 @@
 														<Button
 															size="sm"
 															disabled={busy || !reasonInput.trim()}
-															onclick={() => void doReverseIncome(income)}
+															onclick={() =>
+																ask({
+																	title: 'investmentIncomes.reverse',
+																	description: 'investmentIncomes.reverseConfirm',
+																	run: () => doReverseIncome(income)
+																})}
 														>
 															{t('investmentIncomes.reverse')}
 														</Button>
@@ -1143,5 +1188,17 @@
 				</CardContent>
 			</Card>
 		{/if}
+	{/if}
+
+	{#if pendingAction}
+		<ConfirmActionDialog
+			title={pendingAction.title}
+			description={pendingAction.description}
+			{busy}
+			onConfirm={confirmPending}
+			onDismiss={() => {
+				if (!busy) pendingAction = null;
+			}}
+		/>
 	{/if}
 </section>

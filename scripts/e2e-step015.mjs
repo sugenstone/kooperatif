@@ -272,8 +272,7 @@ try {
 	const mkShareholder = async (first, last, seq) => {
 		const r = await apiPost('/api/shareholders', {
 			person: { mode: 'new', firstName: first, lastName: last },
-			family: { mode: 'new', sequenceNumber: seq },
-			idempotencyKey: `e2e-015-sh-${seq}`
+			family: { mode: 'new', sequenceNumber: seq }
 		});
 		if (!r.ok()) fail(`shareholder: ${await r.text()}`);
 		return r.json();
@@ -289,13 +288,10 @@ try {
 			dueDate: '2026-01-31',
 			ruleType: 'per_shareholder',
 			baseAmount: '1000.00',
-			assessmentEffectiveDate: '2026-01-01',
-			idempotencyKey: 'e2e-015-period'
+			assessmentEffectiveDate: '2026-01-01'
 		})
 	).json();
-	const gen = await apiPost(`/api/periods/${period.id}/generate-assessments`, {
-		idempotencyKey: 'e2e-015-gen'
-	});
+	const gen = await apiPost(`/api/periods/${period.id}/generate-assessments`);
 	if (!gen.ok()) fail(`generate: ${await gen.text()}`);
 	const assessments = (await apiGet(`/api/periods/${period.id}/assessments?pageSize=100`)).items;
 	const bySh = (id) => assessments.find((a) => a.shareholder.shareholderId === id);

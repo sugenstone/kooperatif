@@ -36,6 +36,7 @@ use crate::http::error::ApiError;
 use crate::http::AppState;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,

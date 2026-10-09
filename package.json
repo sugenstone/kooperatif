@@ -27,6 +27,8 @@
 		"backup:drill": "node scripts/backup/drill.mjs",
 		"backup:failure-test": "node scripts/backup/failure-test.mjs",
 		"backup:test": "node --test \"scripts/backup/tests/*.test.mjs\"",
+		"e2e:ff002": "node scripts/e2e-funcfix002.mjs",
+		"e2e:dialogs": "node scripts/e2e-confirm-dialogs.mjs",
 		"verify": "bash scripts/verify.sh"
 	},
 	"pnpm": {

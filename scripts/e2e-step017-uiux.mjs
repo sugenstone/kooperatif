@@ -173,8 +173,7 @@ try {
 	for (let i = 1; i <= 8; i++) {
 		const r = await apiPost('/api/shareholders', {
 			person: { mode: 'new', firstName: `E2E Üye${i}`, lastName: 'Soyadı' },
-			family: { mode: 'new', sequenceNumber: 800 + i },
-			idempotencyKey: `e2e-017-sh-${i}`
+			family: { mode: 'new', sequenceNumber: 800 + i }
 		});
 		if (!r.ok()) fail(`shareholder ${i}: ${await r.text()}`);
 	}
@@ -185,13 +184,10 @@ try {
 			dueDate: '2026-03-31',
 			ruleType: 'per_shareholder',
 			baseAmount: '250.00',
-			assessmentEffectiveDate: '2026-03-01',
-			idempotencyKey: 'e2e-017-period'
+			assessmentEffectiveDate: '2026-03-01'
 		})
 	).json();
-	const gen = await apiPost(`/api/periods/${period.id}/generate-assessments`, {
-		idempotencyKey: 'e2e-017-gen'
-	});
+	const gen = await apiPost(`/api/periods/${period.id}/generate-assessments`);
 	if (!gen.ok()) fail(`generate: ${await gen.text()}`);
 	const assessments = (
 		await (

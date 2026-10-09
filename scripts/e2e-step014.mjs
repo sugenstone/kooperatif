@@ -235,8 +235,7 @@ try {
 	const mkShareholder = async (first, last, seq) => {
 		const r = await apiPost('/api/shareholders', {
 			person: { mode: 'new', firstName: first, lastName: last },
-			family: { mode: 'new', sequenceNumber: seq },
-			idempotencyKey: `e2e-014-sh-${seq}`
+			family: { mode: 'new', sequenceNumber: seq }
 		});
 		if (!r.ok()) fail(`shareholder fixture: ${await r.text()}`);
 		return r.json();

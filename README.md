@@ -1239,8 +1239,10 @@ procedure: [docs/30-BACKUP-OPERATIONS-RUNBOOK.md](docs/30-BACKUP-OPERATIONS-RUNB
 verification database and runs the entire Rust suite against it,
 including the HTTP-level auth security matrix (login failures, session
 lifecycle/expiry/revocation, CSRF, rate limiting, ownership, database
-constraints). Without `KOOPERATIF_TEST_DATABASE_URL` the DB-gated tests
-skip with an explicit notice.
+constraints). `KOOPERATIF_TEST_DATABASE_URL` is **required** for the
+DB-gated suites: they intentionally fail fast when it is absent
+(PILOT-FIX-001/F5) — a missing database must never silently look like
+a passing test. `scripts/db-verify.sh` sets it automatically.
 
 ## Quality gates
 
@@ -1268,8 +1270,23 @@ pnpm backup:drill      # full recovery drill on real PostgreSQL (Docker)
 pnpm backup:failure-test  # backup failure-injection tests (Docker)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the frontend, backend and database
-gates on every push/PR.
+Maintained browser-E2E regression scripts (each prepares its own
+disposable database; requires the dev Docker postgres service):
+
+```bash
+pnpm e2e:ff002       # FUNC-FIX-002 shareholder default collection account
+pnpm e2e:dialogs     # REQ-027 application confirmation dialogs (real browser + DB)
+node scripts/e2e-step017-rc.mjs      # STEP-017 release-candidate journeys
+node scripts/e2e-step017-uiux.mjs    # STEP-017 UI/UX hardening checks
+```
+
+Older `scripts/e2e-step004…016*.mjs` and `e2e-hotfix001.mjs` are
+preserved as historical milestone evidence; the active/historical
+classification is tracked in `implementation/TEST-INVENTORY.md`.
+
+CI (`.github/workflows/ci.yml`) runs the frontend, backend (dependency-
+free tests), database (all DB-gated suites against a PostgreSQL service)
+and backup/restore gates on every push/PR.
 
 ## Configuration
 
@@ -1284,7 +1301,8 @@ is missing — no insecure silent defaults.
   (`docker compose -f docker/compose.yaml down` keeps it; add `-v` to
   discard).
 - The `migrate` subcommand is the only supported way to apply migrations.
-- Obligation + money-received + financial-account + income/expense
-  schema now exists (STEP-006/007/008/010); Ledger/Receipt/Collection
-  Session and the investment surfaces intentionally do not — they belong
-  to later reviewed STEPs (ADR-003/ADR-004).
+- Obligation + money-received + financial-account + income/expense +
+  share-return + investment + social-aid + governance schema exists
+  (STEP-006/007/008/010/011/012/013/014); Ledger, Receipt numbering
+  and the dedicated Collection Session surface remain deferred to
+  later reviewed STEPs (ADR-003/ADR-004, FUNC-AUDIT-001).

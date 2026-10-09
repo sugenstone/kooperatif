@@ -21,6 +21,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as Select from '$lib/components/ui/select';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
+	import ConfirmActionDialog from '$lib/components/confirm-action-dialog.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
@@ -74,6 +75,26 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
+
+	// REQ-027: application-level confirmation for destructive actions.
+	type PendingAction = {
+		title: MessageKey;
+		description: MessageKey;
+		run: () => Promise<void>;
+	};
+	let pendingAction = $state<PendingAction | null>(null);
+
+	function ask(action: PendingAction): void {
+		if (!detail || busy) return;
+		pendingAction = action;
+	}
+
+	function confirmPending(): void {
+		const action = pendingAction;
+		if (!action || busy) return;
+		pendingAction = null;
+		void action.run();
+	}
 	let familyChangeOpen = $state(false);
 	let familyMode = $state<'existing' | 'new'>('new');
 	let familySequence = $state<number | ''>('');
@@ -224,7 +245,6 @@
 
 	async function changeFamily(): Promise<void> {
 		if (!detail || busy) return;
-		if (!confirm(t('shareholders.familyChangeConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -251,12 +271,21 @@
 		}
 	}
 
-	async function changeStatus(
+	function askStatusChange(
 		to: 'active' | 'inactive' | 'voided',
+		title: MessageKey,
 		confirmKey: MessageKey | null
-	): Promise<void> {
+	): void {
 		if (!detail || busy) return;
-		if (confirmKey && !confirm(t(confirmKey))) return;
+		if (!confirmKey) {
+			void changeStatus(to);
+			return;
+		}
+		ask({ title, description: confirmKey, run: () => changeStatus(to) });
+	}
+
+	async function changeStatus(to: 'active' | 'inactive' | 'voided'): Promise<void> {
+		if (!detail || busy) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -346,7 +375,7 @@
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onclick={() => void changeStatus('inactive', null)}
+							onclick={() => void changeStatus('inactive')}
 						>
 							{t('shareholders.deactivate')}
 						</Button>
@@ -354,7 +383,8 @@
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onclick={() => void changeStatus('voided', 'shareholders.confirmVoid')}
+							onclick={() =>
+								askStatusChange('voided', 'shareholders.void', 'shareholders.confirmVoid')}
 						>
 							{t('shareholders.void')}
 						</Button>
@@ -363,7 +393,7 @@
 							variant="outline"
 							size="sm"
 							disabled={busy}
-							onclick={() => void changeStatus('active', null)}
+							onclick={() => void changeStatus('active')}
 						>
 							{t('shareholders.activate')}
 						</Button>
@@ -1061,7 +1091,16 @@
 							<Input id="change-reason" type="text" bind:value={reason} />
 						</div>
 						<div class="flex gap-2">
-							<Button size="sm" disabled={busy} onclick={() => void changeFamily()}>
+							<Button
+								size="sm"
+								disabled={busy}
+								onclick={() =>
+									ask({
+										title: 'shareholders.changeFamily',
+										description: 'shareholders.familyChangeConfirm',
+										run: changeFamily
+									})}
+							>
 								{t('shareholders.changeFamily')}
 							</Button>
 							<Button variant="outline" size="sm" onclick={() => (familyChangeOpen = false)}>
@@ -1072,5 +1111,17 @@
 				</CardContent>
 			</Card>
 		{/if}
+	{/if}
+
+	{#if pendingAction}
+		<ConfirmActionDialog
+			title={pendingAction.title}
+			description={pendingAction.description}
+			{busy}
+			onConfirm={confirmPending}
+			onDismiss={() => {
+				if (!busy) pendingAction = null;
+			}}
+		/>
 	{/if}
 </section>

@@ -463,6 +463,7 @@ pub async fn get_body(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateBodyRequest {
     pub name: String,
     pub body_type: String,
@@ -574,6 +575,7 @@ pub async fn close_body(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateMembershipRequest {
     pub person_id: Uuid,
     pub title: Option<String>,
@@ -650,6 +652,7 @@ pub async fn create_membership(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct EndMembershipRequest {
     pub ended_at: String,
     pub reason: String,
@@ -782,6 +785,7 @@ pub async fn get_decision(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateDecisionRequest {
     pub body_id: Uuid,
     pub title: String,
@@ -860,6 +864,7 @@ pub async fn create_decision(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct UpdateDecisionRequest {
     pub title: String,
     pub decision_text: String,
@@ -924,6 +929,7 @@ pub async fn open_decision(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CancelDecisionRequest {
     pub reason: String,
 }
@@ -959,6 +965,7 @@ pub async fn cancel_decision(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CastVoteRequest {
     /// The voting Person — eligibility is verified server-side against
     /// the body's ACTIVE memberships; this field alone grants nothing.
@@ -1032,6 +1039,7 @@ pub async fn cast_vote(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct FinalizeDecisionRequest {
     /// The formally decided outcome — recorded, never computed.
     /// Quorum/majority rules are open decisions (docs/09) and are NOT

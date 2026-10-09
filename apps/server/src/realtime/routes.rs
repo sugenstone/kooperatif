@@ -39,6 +39,8 @@ use crate::realtime::{hub, known_scopes, HubSignal};
 /// Client → server subscription request. `scopes` are permission keys
 /// (`payments.read`, `reports.read`, …); the server intersects the
 /// request with the caller's effective permissions.
+// Intentionally not `deny_unknown_fields`: the client envelope carries a
+// `type` discriminator ("subscribe") left open for future message kinds.
 #[derive(Debug, Deserialize)]
 struct SubscribeRequest {
     scopes: Vec<String>,

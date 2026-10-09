@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -282,6 +282,8 @@ describe('share return detail page', () => {
 
 		const buttons = screen.getAllByRole('button', { name: 'Kesinleştir' });
 		await userEvent.click(buttons[buttons.length - 1]);
+		const dlg = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dlg).getByRole('button', { name: 'Onayla' }));
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(fetchMock).toHaveBeenCalledWith(
 			expect.stringContaining('/finalize'),
@@ -377,6 +379,8 @@ describe('share return detail page', () => {
 		await tick();
 		const buttons = screen.getAllByRole('button', { name: 'Ödemeyi Geri Al' });
 		await userEvent.click(buttons[buttons.length - 1]);
+		const dlg = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dlg).getByRole('button', { name: 'Onayla' }));
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ reason: 'yanlış hesap' });
 	});

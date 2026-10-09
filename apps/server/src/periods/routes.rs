@@ -305,6 +305,7 @@ pub struct PreviewResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PeriodRequest {
     pub name: String,
     pub collection_start_date: String,

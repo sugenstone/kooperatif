@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -139,6 +139,10 @@ beforeEach(() => {
 		'shares.read',
 		'shares.manage'
 	];
+	// jsdom: a previous test's AlertDialog can leave bits-ui's body
+	// scroll-lock styles behind; reset before each interaction.
+	document.body.style.pointerEvents = '';
+	document.body.style.overflow = '';
 });
 
 afterEach(() => {
@@ -283,7 +287,6 @@ describe('Hisse detail page', () => {
 	});
 
 	it('posts a sale with expectedUpdatedAt optimistic concurrency', async () => {
-		const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
 		const fetchMock = stubFetch(async (url, init) => {
 			if (init?.method === 'POST' && url.includes('/sale')) {
 				return jsonResponse({}, 204);
@@ -303,6 +306,9 @@ describe('Hisse detail page', () => {
 		// Two "Satış Yap" controls exist: the opener and the submitter.
 		const submitButtons = screen.getAllByRole('button', { name: 'Satış Yap' });
 		await userEvent.click(submitButtons[submitButtons.length - 1]);
+		// REQ-027: the in-app AlertDialog replaces window.confirm.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Onayla' }));
 		await tick();
 
 		const saleCall = fetchMock.mock.calls.find(
@@ -316,6 +322,31 @@ describe('Hisse detail page', () => {
 		expect(body.toShareholderId).toBe(OWNER_A.shareholderId);
 		expect(body.saleAmount).toBe('150000.50');
 		expect(body.expectedUpdatedAt).toBe('2026-01-05T00:00:00Z');
-		confirmSpy.mockRestore();
+	});
+
+	it('a cancelled sale confirmation never reaches the API', async () => {
+		const fetchMock = stubFetch(async (url) => {
+			if (url.includes('/api/shareholders?')) return jsonResponse(shareholdersPayload);
+			if (url.includes('/api/shares/')) return jsonResponse(shareDetailPayload);
+			return jsonResponse({});
+		});
+		render(ShareDetail, { data: { id: shareDetailPayload.id } });
+
+		await screen.findAllByText('Ali Veli · Vasi: Belirtilmemiş · Aile No 410');
+		await userEvent.click(screen.getByRole('button', { name: 'Satış Yap' }));
+		await userEvent.click(
+			await screen.findByRole('button', { name: /Ali Veli · Vasi: Belirtilmemiş/ })
+		);
+		const submitButtons = screen.getAllByRole('button', { name: 'Satış Yap' });
+		await userEvent.click(submitButtons[submitButtons.length - 1]);
+
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await tick();
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) => !(String(input).includes('/sale') && init?.method === 'POST')
+			)
+		).toBe(true);
 	});
 });

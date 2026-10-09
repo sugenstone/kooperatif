@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -357,6 +357,8 @@ describe('investment detail page', () => {
 		await tick();
 		const buttons = screen.getAllByRole('button', { name: 'Finansmanı Geri Al' });
 		await userEvent.click(buttons[buttons.length - 1]);
+		const dlg = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dlg).getByRole('button', { name: 'Onayla' }));
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({ reason: 'yanlış tutar' });
 	});
@@ -388,6 +390,8 @@ describe('investment detail page', () => {
 		await tick();
 
 		await userEvent.click(screen.getByRole('button', { name: 'Tasfiyeyi Kaydet' }));
+		const dlg = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dlg).getByRole('button', { name: 'Onayla' }));
 		await waitFor(() => expect(posted).not.toBeNull());
 		expect(posted).toMatchObject({
 			disposedAt: '2026-05-01',

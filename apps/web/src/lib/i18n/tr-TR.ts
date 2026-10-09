@@ -180,6 +180,7 @@ export const trTR = {
 		'Kayıt başka biri tarafından güncellendi. Sayfayı yenileyip tekrar deneyin.',
 	'common.search': 'Ara',
 	'common.cancel': 'Vazgeç',
+	'common.confirm': 'Onayla',
 	'common.reset': 'Filtreleri Temizle',
 	'common.retry': 'Tekrar Dene',
 	'common.all': 'Tümü',

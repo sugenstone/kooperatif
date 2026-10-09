@@ -21,6 +21,7 @@
 		TableHeader,
 		TableRow
 	} from '$lib/components/ui/table';
+	import ConfirmActionDialog from '$lib/components/confirm-action-dialog.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
@@ -51,6 +52,26 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
+
+	// REQ-027: application-level confirmation for destructive actions.
+	type PendingAction = {
+		title: MessageKey;
+		description: MessageKey;
+		run: () => Promise<void>;
+	};
+	let pendingAction = $state<PendingAction | null>(null);
+
+	function ask(action: PendingAction): void {
+		if (!detail || busy) return;
+		pendingAction = action;
+	}
+
+	function confirmPending(): void {
+		const action = pendingAction;
+		if (!action || busy) return;
+		pendingAction = null;
+		void action.run();
+	}
 
 	let editOpen = $state(false);
 	let editName = $state('');
@@ -197,7 +218,6 @@
 
 	async function generate(): Promise<void> {
 		if (!detail || busy) return;
-		if (!confirm(t('periods.confirmGenerate'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -217,7 +237,6 @@
 
 	async function closePeriod(): Promise<void> {
 		if (!detail || busy) return;
-		if (!confirm(t('periods.confirmClose'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -235,7 +254,6 @@
 
 	async function deletePeriod(): Promise<void> {
 		if (!detail || busy) return;
-		if (!confirm(t('periods.confirmDelete'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -297,12 +315,32 @@
 						<Button variant="outline" size="sm" disabled={busy} onclick={openEdit}>
 							{t('periods.edit')}
 						</Button>
-						<Button variant="outline" size="sm" disabled={busy} onclick={() => void deletePeriod()}>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={busy}
+							onclick={() =>
+								ask({
+									title: 'periods.delete',
+									description: 'periods.confirmDelete',
+									run: deletePeriod
+								})}
+						>
 							{t('periods.delete')}
 						</Button>
 					{/if}
 					{#if detail.status === 'open' && can('periods.manage')}
-						<Button variant="outline" size="sm" disabled={busy} onclick={() => void closePeriod()}>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={busy}
+							onclick={() =>
+								ask({
+									title: 'periods.close',
+									description: 'periods.confirmClose',
+									run: closePeriod
+								})}
+						>
 							{t('periods.close')}
 						</Button>
 					{/if}
@@ -362,7 +400,16 @@
 								{t('periods.previewRun')}
 							</Button>
 							{#if can('assessments.manage')}
-								<Button size="sm" disabled={busy} onclick={() => void generate()}>
+								<Button
+									size="sm"
+									disabled={busy}
+									onclick={() =>
+										ask({
+											title: 'periods.generate',
+											description: 'periods.confirmGenerate',
+											run: generate
+										})}
+								>
 									{t('periods.generate')}
 								</Button>
 							{/if}
@@ -552,5 +599,17 @@
 		{/if}
 	{:else}
 		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
+	{/if}
+
+	{#if pendingAction}
+		<ConfirmActionDialog
+			title={pendingAction.title}
+			description={pendingAction.description}
+			{busy}
+			onConfirm={confirmPending}
+			onDismiss={() => {
+				if (!busy) pendingAction = null;
+			}}
+		/>
 	{/if}
 </section>

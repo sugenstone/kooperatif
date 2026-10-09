@@ -421,6 +421,7 @@ fn allocation_dto(row: &payment_repo::AllocationRow) -> AllocationDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct AllocationRequest {
     pub assessment_id: Uuid,
     pub amount: String,
@@ -428,6 +429,7 @@ pub struct AllocationRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreatePaymentRequest {
     /// Payer: an existing Person id XOR a new (firstName + lastName).
     pub payer_person_id: Option<Uuid>,
@@ -450,12 +452,14 @@ pub struct CreatePaymentRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct AddAllocationsRequest {
     pub allocations: Vec<AllocationRequest>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseRequest {
     /// Required non-empty reason (docs/19).
     pub reason: String,

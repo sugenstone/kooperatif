@@ -153,8 +153,7 @@ try {
 	const mkShareholder = async (first, last, seq, key) =>
 		post('/api/shareholders', {
 			person: { mode: 'new', firstName: first, lastName: last },
-			family: { mode: 'new', sequenceNumber: seq },
-			idempotencyKey: key
+			family: { mode: 'new', sequenceNumber: seq }
 		}, `shareholder ${key}`);
 	// Duplicate person names must coexist (realistic pilot data).
 	const sh1 = await mkShareholder('Ayşe', 'Yılmaz', 9001, 'rc-sh-1');
@@ -175,9 +174,9 @@ try {
 	const period = await post('/api/periods', {
 		name: 'RC Dönem 1', collectionStartDate: '2026-03-01', dueDate: '2026-03-31',
 		ruleType: 'per_shareholder', baseAmount: '1000.00',
-		assessmentEffectiveDate: '2026-03-01', idempotencyKey: 'rc-period-1'
+		assessmentEffectiveDate: '2026-03-01'
 	}, 'period');
-	const gen = await apiPost(`/api/periods/${period.id}/generate-assessments`, { idempotencyKey: 'rc-gen-1' });
+	const gen = await apiPost(`/api/periods/${period.id}/generate-assessments`);
 	if (!gen.ok()) fail(`generate: ${await gen.text()}`);
 	const assessments = (await apiGet(`/api/periods/${period.id}/assessments?pageSize=100`)).items;
 	const a1 = assessments.find((a) => a.shareholder.shareholderId === sh1.id);
@@ -221,9 +220,9 @@ try {
 	const period2 = await post('/api/periods', {
 		name: 'RC Dönem 2', collectionStartDate: '2026-04-01', dueDate: '2026-04-30',
 		ruleType: 'per_shareholder', baseAmount: '100.00',
-		assessmentEffectiveDate: '2026-04-01', idempotencyKey: 'rc-period-2'
+		assessmentEffectiveDate: '2026-04-01'
 	}, 'period2');
-	const gen2 = await apiPost(`/api/periods/${period2.id}/generate-assessments`, { idempotencyKey: 'rc-gen-2' });
+	const gen2 = await apiPost(`/api/periods/${period2.id}/generate-assessments`);
 	if (!gen2.ok()) fail(`generate2: ${await gen2.text()}`);
 	const assessments2 = (await apiGet(`/api/periods/${period2.id}/assessments?pageSize=100`)).items;
 	const a1b = assessments2.find((a) => a.shareholder.shareholderId === sh1.id);

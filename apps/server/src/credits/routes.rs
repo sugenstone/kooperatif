@@ -245,6 +245,7 @@ pub struct ApplyCreditResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct AssignCreditRequest {
     /// Explicit beneficiary Shareholder — NEVER implied by payer,
     /// guardian or family (docs/06 §"New excess").
@@ -258,6 +259,7 @@ pub struct AssignCreditRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ApplyCreditRequest {
     /// Decimal string ≤ the assessment's remaining AND the
     /// beneficiary's available credit.
@@ -267,6 +269,7 @@ pub struct ApplyCreditRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseRequest {
     /// Required — docs/19 reversal contract: actor + time + reason.
     pub reversal_reason: String,

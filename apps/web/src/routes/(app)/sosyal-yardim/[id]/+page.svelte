@@ -20,6 +20,7 @@
 		TableHeader,
 		TableRow
 	} from '$lib/components/ui/table';
+	import ConfirmActionDialog from '$lib/components/confirm-action-dialog.svelte';
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
@@ -51,6 +52,26 @@
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let busy = $state(false);
+
+	// REQ-027: application-level confirmation for destructive actions.
+	type PendingAction = {
+		title: MessageKey;
+		description: MessageKey;
+		run: () => Promise<void>;
+	};
+	let pendingAction = $state<PendingAction | null>(null);
+
+	function ask(action: PendingAction): void {
+		if (!detail || busy) return;
+		pendingAction = action;
+	}
+
+	function confirmPending(): void {
+		const action = pendingAction;
+		if (!action || busy) return;
+		pendingAction = null;
+		void action.run();
+	}
 
 	// Panel state — only one action panel open at a time.
 	let panel = $state<
@@ -163,7 +184,6 @@
 
 	async function doClose(): Promise<void> {
 		if (!detail || busy) return;
-		if (!window.confirm(t('socialAid.closeConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -185,7 +205,6 @@
 
 	async function doCancel(): Promise<void> {
 		if (!detail || busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('socialAid.cancelConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -302,7 +321,6 @@
 
 	async function doReverseDonation(donation: SocialAidDonation): Promise<void> {
 		if (busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('donations.reverseConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -326,7 +344,6 @@
 
 	async function doReverseDisbursement(disbursement: SocialAidDisbursement): Promise<void> {
 		if (busy || !reasonInput.trim()) return;
-		if (!window.confirm(t('aidDisbursements.reverseConfirm'))) return;
 		busy = true;
 		actionError = null;
 		try {
@@ -504,7 +521,16 @@
 				<CardContent class="flex flex-col gap-3">
 					<p class="text-sm text-muted-foreground">{t('socialAid.closeConfirm')}</p>
 					<div class="flex gap-2">
-						<Button size="sm" disabled={busy} onclick={() => void doClose()}>
+						<Button
+							size="sm"
+							disabled={busy}
+							onclick={() =>
+								ask({
+									title: 'socialAid.close',
+									description: 'socialAid.closeConfirm',
+									run: doClose
+								})}
+						>
 							{t('socialAid.close')}
 						</Button>
 						<Button variant="outline" size="sm" onclick={() => (panel = null)}>
@@ -527,7 +553,12 @@
 						<Button
 							size="sm"
 							disabled={busy || !reasonInput.trim()}
-							onclick={() => void doCancel()}
+							onclick={() =>
+								ask({
+									title: 'socialAid.cancel',
+									description: 'socialAid.cancelConfirm',
+									run: doCancel
+								})}
 						>
 							{t('socialAid.cancel')}
 						</Button>
@@ -883,8 +914,15 @@
 						<Button
 							size="sm"
 							disabled={busy || !reasonInput.trim()}
-							onclick={() =>
-								panel?.kind === 'reverseDonation' && void doReverseDonation(panel.donation)}
+							onclick={() => {
+								if (panel?.kind !== 'reverseDonation') return;
+								const donation = panel.donation;
+								ask({
+									title: 'donations.reverse',
+									description: 'donations.reverseConfirm',
+									run: () => doReverseDonation(donation)
+								});
+							}}
 						>
 							{t('donations.reverse')}
 						</Button>
@@ -908,9 +946,15 @@
 						<Button
 							size="sm"
 							disabled={busy || !reasonInput.trim()}
-							onclick={() =>
-								panel?.kind === 'reverseDisbursement' &&
-								void doReverseDisbursement(panel.disbursement)}
+							onclick={() => {
+								if (panel?.kind !== 'reverseDisbursement') return;
+								const disbursement = panel.disbursement;
+								ask({
+									title: 'aidDisbursements.reverse',
+									description: 'aidDisbursements.reverseConfirm',
+									run: () => doReverseDisbursement(disbursement)
+								});
+							}}
 						>
 							{t('aidDisbursements.reverse')}
 						</Button>
@@ -921,5 +965,17 @@
 				</CardContent>
 			</Card>
 		{/if}
+	{/if}
+
+	{#if pendingAction}
+		<ConfirmActionDialog
+			title={pendingAction.title}
+			description={pendingAction.description}
+			{busy}
+			onConfirm={confirmPending}
+			onDismiss={() => {
+				if (!busy) pendingAction = null;
+			}}
+		/>
 	{/if}
 </section>

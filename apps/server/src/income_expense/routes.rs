@@ -315,6 +315,7 @@ pub async fn category_options(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateCategoryRequest {
     pub category_type: String,
     pub name: String,
@@ -365,6 +366,7 @@ pub async fn create_category(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct UpdateCategoryRequest {
     pub name: String,
     pub description: Option<String>,
@@ -409,6 +411,7 @@ pub async fn update_category(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CategoryStatusChangeRequest {
     pub status: String,
 }
@@ -587,6 +590,7 @@ pub async fn get_expense(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PostEntryRequest {
     pub financial_account_id: Uuid,
     pub category_id: Uuid,
@@ -722,6 +726,7 @@ pub async fn post_expense(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ReverseEntryRequest {
     /// Required non-empty reason (docs/19 reversal contract).
     pub reason: String,

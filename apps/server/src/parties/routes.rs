@@ -129,6 +129,7 @@ pub struct PersonDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PersonRefRequest {
     pub mode: String, // "existing" | "new"
     pub person_id: Option<Uuid>,
@@ -138,6 +139,7 @@ pub struct PersonRefRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct FamilyRefRequest {
     pub mode: String, // "existing" | "new"
     pub family_id: Option<Uuid>,
@@ -146,6 +148,7 @@ pub struct FamilyRefRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateShareholderRequest {
     pub person: PersonRefRequest,
     pub guardian: Option<PersonRefRequest>,
@@ -157,6 +160,7 @@ pub struct CreateShareholderRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct UpdateShareholderRequest {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
@@ -176,6 +180,7 @@ pub struct UpdateShareholderRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct StatusChangeRequest {
     pub to: String,
     pub reason: Option<String>,
@@ -183,6 +188,7 @@ pub struct StatusChangeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct FamilyChangeRequest {
     pub family: FamilyRefRequest,
     pub reason: Option<String>,
@@ -192,6 +198,7 @@ pub struct FamilyChangeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateFamilyRequest {
     pub sequence_number: i64,
 }

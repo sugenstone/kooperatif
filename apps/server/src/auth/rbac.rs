@@ -100,6 +100,7 @@ pub struct UserRoleDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct CreateRoleRequest {
     pub name: String,
     pub description: Option<String>,
@@ -107,6 +108,7 @@ pub struct CreateRoleRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -114,12 +116,14 @@ pub struct UpdateRoleRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct PermissionSetRequest {
     pub permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct UserRoleSetRequest {
     pub role_ids: Vec<Uuid>,
 }
