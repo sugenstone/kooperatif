@@ -8,10 +8,11 @@ import type { MessageKey } from './tr-TR';
 export const en: Partial<Record<MessageKey, string>> = {
 	'a11y.skipToContent': 'Skip to content',
 	'app.title': 'Kooperatif',
-	'app.subtitle': 'Cooperative Management System — infrastructure shell',
+	'app.subtitle': 'Cooperative Management System',
 	'nav.label': 'Main navigation',
 	'nav.placeholder': 'Navigation menu will be added in later implementation steps.',
 	'home.welcome.title': 'Welcome',
+	'home.overview.error': 'Summary information could not be loaded.',
 	'health.title': 'System Status',
 	'health.refresh': 'Re-check',
 	'auth.login.title': 'Sign in',
@@ -328,5 +329,15 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'tv.fullscreen': 'Fullscreen',
 	'tv.exitFullscreen': 'Exit fullscreen',
 	'tv.readonly': 'Read-only live display — no transaction authority.',
-	'nav.liveDisplay': 'Live Display'
+	'nav.liveDisplay': 'Live Display',
+	'nav.home': 'Home',
+	'nav.categories': 'Categories',
+	'nav.menu': 'Menu',
+	'nav.close': 'Close',
+	'nav.group.main': 'General',
+	'nav.group.identity': 'Identity',
+	'nav.group.finance': 'Finance',
+	'nav.group.assets': 'Assets',
+	'nav.group.governance': 'Governance',
+	'nav.group.system': 'System'
 };

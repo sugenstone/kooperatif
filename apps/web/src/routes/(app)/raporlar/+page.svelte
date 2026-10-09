@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PageHeader from '$lib/components/page-header.svelte';
 	import {
 		Card,
 		CardContent,
@@ -191,28 +192,26 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div class="flex flex-wrap items-end justify-between gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">{t('reports.title')}</h1>
-			<p class="mt-1 max-w-2xl text-muted-foreground">{t('reports.description')}</p>
-		</div>
-		<div class="flex flex-col gap-1">
-			<Label for="report-type">{t('reports.type')}</Label>
-			<select
-				id="report-type"
-				class="w-72 rounded-md border bg-background px-3 py-2 text-sm"
-				bind:value={selectedType}
-			>
-				<option value="overview">{t('reports.type.overview')}</option>
-				{#each REPORT_DEFS as def (def.id)}
-					<option value={def.id}>{t(def.labelKey)}</option>
-				{/each}
-				<option value="socialAid">{t('reports.type.socialAid')}</option>
-				<option value="governance">{t('reports.type.governance')}</option>
-				<option value="incomeExpenseTrend">{t('reports.type.incomeExpenseTrend')}</option>
-			</select>
-		</div>
-	</div>
+	<PageHeader titleKey="reports.title" descriptionKey="reports.description">
+		{#snippet actions()}
+			<div class="flex flex-col gap-1">
+				<Label for="report-type">{t('reports.type')}</Label>
+				<select
+					id="report-type"
+					class="w-72 rounded-md border bg-background px-3 py-2 text-sm"
+					bind:value={selectedType}
+				>
+					<option value="overview">{t('reports.type.overview')}</option>
+					{#each REPORT_DEFS as def (def.id)}
+						<option value={def.id}>{t(def.labelKey)}</option>
+					{/each}
+					<option value="socialAid">{t('reports.type.socialAid')}</option>
+					<option value="governance">{t('reports.type.governance')}</option>
+					<option value="incomeExpenseTrend">{t('reports.type.incomeExpenseTrend')}</option>
+				</select>
+			</div>
+		{/snippet}
+	</PageHeader>
 
 	{#if selectedType === 'overview'}
 		{#if loadError}

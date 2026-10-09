@@ -8,8 +8,9 @@ import { auth, can } from '$lib/auth/auth.svelte';
 const gotoMock = vi.hoisted(() => vi.fn());
 vi.mock('$app/navigation', () => ({ goto: gotoMock }));
 vi.mock('$app/paths', () => ({ resolve: (path: string) => path }));
+vi.mock('$app/state', () => ({ page: { url: { pathname: '/' } } }));
 
-import AppUserBar from '$lib/components/app-user-bar.svelte';
+import AppNav from '$lib/components/app-nav.svelte';
 
 afterEach(() => {
 	auth.status = 'loading';
@@ -44,7 +45,7 @@ describe('permission-aware navigation', () => {
 		auth.user = { id: 'u-1', username: 'ali', displayName: 'Ali Yılmaz' };
 		auth.csrfToken = 'csrf';
 		auth.permissions = ['roles.read'];
-		render(AppUserBar);
+		render(AppNav);
 
 		expect(screen.getByRole('link', { name: 'Roller' })).toBeInTheDocument();
 		expect(screen.queryByRole('link', { name: 'Kullanıcılar' })).not.toBeInTheDocument();

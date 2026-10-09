@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { resolve } from '$app/paths';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
@@ -106,15 +107,13 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div class="flex flex-wrap items-end justify-between gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">{t('investments.title')}</h1>
-			<p class="mt-1 max-w-2xl text-muted-foreground">{t('investments.description')}</p>
-		</div>
-		{#if can('investments.manage')}
-			<Button href="/yatirimlar/yeni">{t('investments.create')}</Button>
-		{/if}
-	</div>
+	<PageHeader titleKey="investments.title" descriptionKey="investments.description">
+		{#snippet actions()}
+			{#if can('investments.manage')}
+				<Button href="/yatirimlar/yeni">{t('investments.create')}</Button>
+			{/if}
+		{/snippet}
+	</PageHeader>
 
 	<div class="flex flex-wrap items-end gap-3">
 		<div class="flex flex-col gap-1">

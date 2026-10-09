@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -86,23 +87,22 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div class="flex flex-wrap items-end justify-between gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">{t('incomeExpense.summary.title')}</h1>
-			<p class="mt-1 max-w-2xl text-muted-foreground">
-				{t('incomeExpense.summary.description')}
-			</p>
-		</div>
-		{#if can('income_expense.manage')}
-			<div class="flex gap-2">
-				<Button variant="outline" href="/kategoriler">
-					{t('incomeExpense.summary.manageCategories')}
-				</Button>
-				<Button href="/gelirler/yeni">{t('income.create')}</Button>
-				<Button href="/giderler/yeni">{t('expense.create')}</Button>
-			</div>
-		{/if}
-	</div>
+	<PageHeader
+		titleKey="incomeExpense.summary.title"
+		descriptionKey="incomeExpense.summary.description"
+	>
+		{#snippet actions()}
+			{#if can('income_expense.manage')}
+				<div class="flex gap-2">
+					<Button variant="outline" href="/kategoriler">
+						{t('incomeExpense.summary.manageCategories')}
+					</Button>
+					<Button href="/gelirler/yeni">{t('income.create')}</Button>
+					<Button href="/giderler/yeni">{t('expense.create')}</Button>
+				</div>
+			{/if}
+		{/snippet}
+	</PageHeader>
 
 	<div class="flex flex-wrap items-end gap-3">
 		<div class="flex flex-col gap-1">

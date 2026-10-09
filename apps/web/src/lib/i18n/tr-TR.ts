@@ -5,12 +5,13 @@
 export const trTR = {
 	'a11y.skipToContent': 'İçeriğe geç',
 	'app.title': 'Kooperatif',
-	'app.subtitle': 'Kooparatif Yönetim Sistemi — temel altyapı kabuğu',
+	'app.subtitle': 'Kooperatif Yönetim Sistemi',
 	'nav.label': 'Ana gezinti',
 	'nav.placeholder': 'Gezinti menüsü sonraki uygulama adımlarında eklenecek.',
 	'home.welcome.title': 'Hoş geldiniz',
 	'home.welcome.body':
 		'Bu ekran, STEP-001 kapsamında oluşturulan temel uygulama kabuğudur. Etki alanı ekranları (Hissedarlar, Dönemler, Tahsilat, Finans vb.) sonraki onaylanmış adımlarda uygulanacaktır.',
+	'home.overview.error': 'Özet bilgileri yüklenemedi.',
 	'health.title': 'Sistem Durumu',
 	'health.description': 'Arka uç servis ve altyapı bileşenlerinin durumu.',
 	'health.refresh': 'Yeniden Denetle',
@@ -1341,7 +1342,17 @@ export const trTR = {
 	'tv.fullscreen': 'Tam ekran',
 	'tv.exitFullscreen': 'Tam ekrandan çık',
 	'tv.readonly': 'Salt okunur canlı izleme — işlem yetkisi yoktur.',
-	'nav.liveDisplay': 'Canlı Ekran'
+	'nav.liveDisplay': 'Canlı Ekran',
+	'nav.home': 'Ana Sayfa',
+	'nav.categories': 'Kategoriler',
+	'nav.menu': 'Menü',
+	'nav.close': 'Kapat',
+	'nav.group.main': 'Genel',
+	'nav.group.identity': 'Kimlik',
+	'nav.group.finance': 'Finans',
+	'nav.group.assets': 'Varlıklar',
+	'nav.group.governance': 'Yönetişim',
+	'nav.group.system': 'Sistem'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

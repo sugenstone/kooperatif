@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { resolve } from '$app/paths';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
@@ -69,14 +70,13 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div class="flex flex-wrap items-end justify-between gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">{t('governance.bodies')}</h1>
-		</div>
-		{#if can('governance.manage')}
-			<Button href="/yonetim/kurullar/yeni">{t('governance.bodies.create')}</Button>
-		{/if}
-	</div>
+	<PageHeader titleKey="governance.bodies">
+		{#snippet actions()}
+			{#if can('governance.manage')}
+				<Button href="/yonetim/kurullar/yeni">{t('governance.bodies.create')}</Button>
+			{/if}
+		{/snippet}
+	</PageHeader>
 
 	<div class="flex flex-wrap items-end gap-3">
 		<select

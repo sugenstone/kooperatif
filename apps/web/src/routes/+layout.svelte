@@ -18,16 +18,4 @@
 	{t('a11y.skipToContent')}
 </a>
 
-<div class="flex min-h-svh flex-col">
-	<header class="border-b bg-sidebar">
-		<div class="mx-auto flex h-16 w-full max-w-5xl items-center gap-4 px-4">
-			<span class="text-lg font-semibold">{t('app.title')}</span>
-			<nav aria-label={t('nav.label')} class="text-sm text-muted-foreground">
-				{t('nav.placeholder')}
-			</nav>
-		</div>
-	</header>
-	<main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
-		{@render children()}
-	</main>
-</div>
+{@render children()}

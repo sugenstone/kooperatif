@@ -1,5 +1,5 @@
 <script lang="ts">
-	import AppUserBar from '$lib/components/app-user-bar.svelte';
+	import AppNav from '$lib/components/app-nav.svelte';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { live, REALTIME_SCOPES } from '$lib/realtime/realtime.svelte';
 
@@ -29,5 +29,7 @@
 	});
 </script>
 
-<AppUserBar />
-{@render children()}
+<AppNav />
+<main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6 md:ml-60 md:px-8 md:py-8">
+	{@render children()}
+</main>

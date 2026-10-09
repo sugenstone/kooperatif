@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 vi.mock('$app/paths', () => ({ resolve: (path: string) => path }));
+vi.mock('$app/state', () => ({ page: { url: { pathname: '/' } } }));
 
 import ReportsPage from '../routes/(app)/raporlar/+page.svelte';
 import ReportPanel from '$lib/reports/report-panel.svelte';
-import AppUserBar from '$lib/components/app-user-bar.svelte';
+import AppNav from '$lib/components/app-nav.svelte';
 import { auth } from '$lib/auth/auth.svelte';
 import { findReport } from '$lib/reports/catalog';
 
@@ -220,11 +221,11 @@ describe('report panel', () => {
 describe('reports navigation', () => {
 	it('shows the nav link only with reports.read (UX hint only)', async () => {
 		stubFetch(async () => jsonResponse({ status: 'ok' }));
-		const first = render(AppUserBar);
+		const first = render(AppNav);
 		expect(screen.getByRole('link', { name: 'Raporlar' })).toBeInTheDocument();
 		first.unmount();
 		auth.permissions = ['payments.read'];
-		render(AppUserBar);
+		render(AppNav);
 		expect(screen.queryByRole('link', { name: 'Raporlar' })).not.toBeInTheDocument();
 	});
 });

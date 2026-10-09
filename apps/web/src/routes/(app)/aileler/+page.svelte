@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
 		Card,
@@ -94,17 +95,15 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div class="flex flex-wrap items-end justify-between gap-3">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">{t('families.title')}</h1>
-			<p class="mt-1 max-w-2xl text-muted-foreground">{t('families.description')}</p>
-		</div>
-		{#if can('families.manage')}
-			<Button variant="outline" onclick={() => (createOpen = !createOpen)}>
-				{t('families.create')}
-			</Button>
-		{/if}
-	</div>
+	<PageHeader titleKey="families.title" descriptionKey="families.description">
+		{#snippet actions()}
+			{#if can('families.manage')}
+				<Button variant="outline" onclick={() => (createOpen = !createOpen)}>
+					{t('families.create')}
+				</Button>
+			{/if}
+		{/snippet}
+	</PageHeader>
 
 	{#if createOpen}
 		<Card class="w-full max-w-sm">
