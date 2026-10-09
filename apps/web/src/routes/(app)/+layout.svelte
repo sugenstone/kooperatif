@@ -1,5 +1,7 @@
 <script lang="ts">
-	import AppNav from '$lib/components/app-nav.svelte';
+	import AppHeader from '$lib/components/app-header.svelte';
+	import AppSidebar from '$lib/components/app-sidebar.svelte';
+	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { live, REALTIME_SCOPES } from '$lib/realtime/realtime.svelte';
 
@@ -36,9 +38,12 @@
 	});
 </script>
 
-<AppNav />
-<div class="md:pl-60">
-	<main id="main-content" class="mx-auto w-full max-w-6xl px-4 py-6 md:px-8 md:py-8">
-		{@render children()}
-	</main>
-</div>
+<Sidebar.Provider>
+	<AppSidebar />
+	<Sidebar.Inset>
+		<AppHeader />
+		<main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6 md:px-8 md:py-8">
+			{@render children()}
+		</main>
+	</Sidebar.Inset>
+</Sidebar.Provider>

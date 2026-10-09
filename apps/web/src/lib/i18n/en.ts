@@ -13,6 +13,10 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'nav.placeholder': 'Navigation menu will be added in later implementation steps.',
 	'home.welcome.title': 'Welcome',
 	'home.overview.error': 'Summary information could not be loaded.',
+	'home.title': 'Overview',
+	'home.quickActions': 'Quick actions',
+	'home.quickActionsHint': 'Jump to frequently used record screens.',
+	'home.secondary.title': 'Members and pending items',
 	'health.title': 'System Status',
 	'health.refresh': 'Re-check',
 	'auth.login.title': 'Sign in',
@@ -383,9 +387,13 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'nav.menu': 'Menu',
 	'nav.close': 'Close',
 	'nav.group.main': 'General',
-	'nav.group.identity': 'Identity',
+	'nav.group.members': 'Members and Shares',
+	'nav.group.collection': 'Dues and Collections',
 	'nav.group.finance': 'Finance',
-	'nav.group.assets': 'Assets',
-	'nav.group.governance': 'Governance',
-	'nav.group.system': 'System'
+	'nav.group.socialAid': 'Social Aid',
+	'nav.group.governance': 'Administration',
+	'common.detail': 'Detail',
+	'app.themeToggle': 'Toggle theme',
+	'realtime.connected': 'Live',
+	'realtime.disconnected': 'Offline'
 };

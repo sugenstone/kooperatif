@@ -9,7 +9,7 @@ vi.mock('$app/state', () => ({ page: { url: { pathname: '/' } } }));
 
 import ReportsPage from '../routes/(app)/raporlar/+page.svelte';
 import ReportPanel from '$lib/reports/report-panel.svelte';
-import AppNav from '$lib/components/app-nav.svelte';
+import AppNav from './app-shell-harness.svelte';
 import { auth } from '$lib/auth/auth.svelte';
 import { findReport } from '$lib/reports/catalog';
 

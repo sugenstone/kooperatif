@@ -265,15 +265,16 @@ try {
 		if (vw < 768) {
 			if (!(await menuButton.isVisible())) fail(`${vw}px: mobile menu button missing`);
 			await menuButton.click();
-			const nav = page.locator('nav[aria-label]').last();
+			// shadcn sidebar renders an off-canvas dialog on mobile.
+			const nav = page.getByRole('dialog');
 			if (!(await nav.isVisible())) fail(`${vw}px: mobile menu did not open`);
 			// Navigate via mobile menu.
 			await nav.getByRole('link', { name: 'Dönemler' }).click();
 			await page.waitForURL(`${WEB}/donemler`, { timeout: 15000 });
 		} else {
-			if (await menuButton.isVisible().catch(() => false))
-				fail(`${vw}px: mobile menu button should be hidden at desktop width`);
-			const aside = page.locator('aside nav[aria-label]');
+			// The trigger also collapses the desktop sidebar to icons —
+			// presence is expected; the sidebar itself must stay visible.
+			const aside = page.locator('[data-slot="sidebar-inner"]');
 			if (!(await aside.isVisible())) fail(`${vw}px: sidebar navigation missing`);
 		}
 

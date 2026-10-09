@@ -1,4 +1,5 @@
 <script lang="ts">
+	import EmptyState from '$lib/components/empty-state.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -142,7 +143,7 @@
 	{:else if data === null}
 		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
 	{:else if data.items.length === 0}
-		<p class="text-sm text-muted-foreground">{t('families.empty')}</p>
+		<EmptyState messageKey="families.empty" />
 	{:else}
 		<Card class="w-full">
 			<CardHeader>

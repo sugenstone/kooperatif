@@ -138,17 +138,21 @@
 {:else}
 	<div
 		bind:this={rootEl}
-		class="flex min-h-svh flex-col bg-neutral-950 px-10 py-8 text-neutral-100"
+		class="flex min-h-svh flex-col bg-neutral-950 px-4 py-4 text-neutral-100 sm:px-8 sm:py-6 lg:px-10 lg:py-8"
 		data-testid="tv-display"
 	>
-		<header class="flex items-center justify-between gap-6 border-b border-neutral-800 pb-6">
+		<header
+			class="flex flex-col gap-4 border-b border-neutral-800 pb-6 lg:flex-row lg:items-center lg:justify-between"
+		>
 			<div>
-				<h1 class="text-4xl font-bold tracking-tight">{t('app.title')}</h1>
-				<p class="mt-1 text-xl text-neutral-400">{dateFmt.format(now)}</p>
+				<h1 class="text-3xl font-bold tracking-tight lg:text-4xl">{t('app.title')}</h1>
+				<p class="mt-1 text-lg text-neutral-400 lg:text-xl">{dateFmt.format(now)}</p>
 			</div>
-			<div class="flex items-center gap-6">
+			<div class="flex items-center justify-between gap-4 lg:gap-6">
 				<div class="text-right">
-					<div class="text-5xl font-semibold tabular-nums">{timeFmt.format(now)}</div>
+					<div class="text-3xl font-semibold tabular-nums lg:text-5xl">
+						{timeFmt.format(now)}
+					</div>
 					<div
 						class="mt-1 inline-flex items-center gap-2 rounded-full px-4 py-1 text-lg {live.status ===
 						'connected'
@@ -211,35 +215,42 @@
 						>
 							{t('tv.group.aidat')}
 						</h2>
-						<div class="grid grid-cols-3 gap-6">
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.assessed')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-3 lg:gap-6">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">{t('reports.ov.assessed')}</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.assessed')}
 								</p>
-								<div class="mt-3 text-6xl font-bold tabular-nums" data-testid="tv-assessed">
+								<div
+									class="mt-3 text-4xl font-bold break-words tabular-nums lg:text-6xl"
+									data-testid="tv-assessed"
+								>
 									{metric(overview.assessmentsTotal)}
 								</div>
 							</div>
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.postedPayments')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.postedPayments')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.paid')}
 								</p>
 								<div
-									class="mt-3 text-6xl font-bold text-emerald-300 tabular-nums"
+									class="mt-3 text-4xl font-bold break-words text-emerald-300 tabular-nums lg:text-6xl"
 									data-testid="tv-collected"
 								>
 									{metric(overview.postedPaymentsTotal)}
 								</div>
 							</div>
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.outstandingDebt')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.outstandingDebt')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.outstanding')}
 								</p>
 								<div
-									class="mt-3 text-6xl font-bold text-rose-300 tabular-nums"
+									class="mt-3 text-4xl font-bold break-words text-rose-300 tabular-nums lg:text-6xl"
 									data-testid="tv-outstanding"
 								>
 									{metric(overview.outstandingAssessmentDebt)}
@@ -256,29 +267,38 @@
 						>
 							{t('tv.group.cash')}
 						</h2>
-						<div class="grid grid-cols-3 gap-6">
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.cash')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">{t('tv.help.cash')}</p>
-								<div class="mt-3 text-5xl font-bold tabular-nums" data-testid="tv-cash">
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-3 lg:gap-6">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">{t('reports.ov.cash')}</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
+									{t('tv.help.cash')}
+								</p>
+								<div
+									class="mt-3 text-3xl font-bold break-words tabular-nums lg:text-5xl"
+									data-testid="tv-cash"
+								>
 									{metric(overview.financialAccountsBalance)}
 								</div>
 							</div>
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.operationalIncome')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.operationalIncome')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.income')}
 								</p>
-								<div class="mt-3 text-5xl font-bold tabular-nums">
+								<div class="mt-3 text-3xl font-bold break-words tabular-nums lg:text-5xl">
 									{metric(overview.operationalIncomeTotal)}
 								</div>
 							</div>
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.operationalExpense')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.operationalExpense')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.expense')}
 								</p>
-								<div class="mt-3 text-5xl font-bold tabular-nums">
+								<div class="mt-3 text-3xl font-bold break-words tabular-nums lg:text-5xl">
 									{metric(overview.operationalExpenseTotal)}
 								</div>
 							</div>
@@ -293,31 +313,37 @@
 						>
 							{t('tv.group.aid')}
 						</h2>
-						<div class="grid grid-cols-3 gap-6">
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.aidDonations')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-3 lg:gap-6">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.aidDonations')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.donations')}
 								</p>
-								<div class="mt-3 text-5xl font-bold tabular-nums">
+								<div class="mt-3 text-3xl font-bold break-words tabular-nums lg:text-5xl">
 									{metric(overview.socialAidDonationsTotal)}
 								</div>
 							</div>
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.aidDisbursements')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.aidDisbursements')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.disbursements')}
 								</p>
-								<div class="mt-3 text-5xl font-bold tabular-nums">
+								<div class="mt-3 text-3xl font-bold break-words tabular-nums lg:text-5xl">
 									{metric(overview.socialAidDisbursementsTotal)}
 								</div>
 							</div>
-							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-8">
-								<div class="text-xl text-neutral-400">{t('reports.ov.aidRestricted')}</div>
-								<p class="mt-1 text-base leading-snug text-neutral-500">
+							<div class="rounded-2xl border border-neutral-800 bg-neutral-900 p-5 lg:p-8">
+								<div class="text-lg text-neutral-400 lg:text-xl">
+									{t('reports.ov.aidRestricted')}
+								</div>
+								<p class="mt-1 text-sm leading-snug text-neutral-500 lg:text-base">
 									{t('tv.help.restricted')}
 								</p>
-								<div class="mt-3 text-5xl font-bold tabular-nums">
+								<div class="mt-3 text-3xl font-bold break-words tabular-nums lg:text-5xl">
 									{metric(overview.socialAidRestrictedAvailable)}
 								</div>
 							</div>
@@ -328,7 +354,7 @@
 		</main>
 
 		<footer
-			class="flex items-center justify-between border-t border-neutral-800 pt-4 text-lg text-neutral-500"
+			class="flex items-center justify-between border-t border-neutral-800 pt-4 text-base text-neutral-500 lg:text-lg"
 		>
 			<span>{t('tv.readonly')}</span>
 			<span data-testid="tv-lastsync">

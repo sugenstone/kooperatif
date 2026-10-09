@@ -1,7 +1,9 @@
 <script lang="ts">
 	import './layout.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import { Toaster } from '$lib/components/ui/sonner/index.js';
 	import { t } from '$lib/i18n/i18n.svelte';
+	import { ModeWatcher } from 'mode-watcher';
 
 	let { children } = $props();
 </script>
@@ -10,6 +12,9 @@
 	<link rel="icon" href={favicon} />
 	<title>{t('app.title')}</title>
 </svelte:head>
+
+<ModeWatcher defaultMode="light" />
+<Toaster richColors closeButton position="bottom-right" />
 
 <a
 	href="#main-content"

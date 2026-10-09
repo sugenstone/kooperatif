@@ -10,7 +10,7 @@ vi.mock('$app/navigation', () => ({ goto: gotoMock }));
 vi.mock('$app/paths', () => ({ resolve: (path: string) => path }));
 vi.mock('$app/state', () => ({ page: { url: { pathname: '/' } } }));
 
-import AppNav from '$lib/components/app-nav.svelte';
+import AppNav from './app-shell-harness.svelte';
 
 afterEach(() => {
 	auth.status = 'loading';

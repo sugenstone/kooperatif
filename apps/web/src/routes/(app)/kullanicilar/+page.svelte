@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -72,10 +73,7 @@
 </svelte:head>
 
 <section class="flex flex-col gap-6">
-	<div>
-		<h1 class="text-2xl font-semibold tracking-tight">{t('users.title')}</h1>
-		<p class="mt-1 max-w-2xl text-muted-foreground">{t('users.description')}</p>
-	</div>
+	<PageHeader titleKey="users.title" descriptionKey="users.description" />
 
 	{#if actionError}
 		<p class="text-sm text-destructive">{t(actionError)}</p>

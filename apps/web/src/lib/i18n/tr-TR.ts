@@ -12,6 +12,10 @@ export const trTR = {
 	'home.welcome.body':
 		'Sol menüden hissedarlar, tahsilatlar, kasalar ve diğer bölümlere ulaşabilirsiniz.',
 	'home.overview.error': 'Özet bilgileri yüklenemedi.',
+	'home.title': 'Genel Bakış',
+	'home.quickActions': 'Hızlı İşlemler',
+	'home.quickActionsHint': 'Sık kullanılan kayıt ekranlarına buradan ulaşabilirsiniz.',
+	'home.secondary.title': 'Üyeler ve Bekleyen İşler',
 	'health.title': 'Sistem Durumu',
 	'health.description': 'Arka uç servis ve altyapı bileşenlerinin durumu.',
 	'health.refresh': 'Yeniden Denetle',
@@ -1397,11 +1401,15 @@ export const trTR = {
 	'nav.menu': 'Menü',
 	'nav.close': 'Kapat',
 	'nav.group.main': 'Genel',
-	'nav.group.identity': 'Kimlik',
+	'nav.group.members': 'Üyeler ve Hisseler',
+	'nav.group.collection': 'Aidat ve Tahsilat',
 	'nav.group.finance': 'Finans',
-	'nav.group.assets': 'Varlıklar',
-	'nav.group.governance': 'Yönetişim',
-	'nav.group.system': 'Sistem'
+	'nav.group.socialAid': 'Sosyal Yardım',
+	'nav.group.governance': 'Yönetim',
+	'common.detail': 'Detay',
+	'app.themeToggle': 'Tema değiştir',
+	'realtime.connected': 'Canlı',
+	'realtime.disconnected': 'Çevrimdışı'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

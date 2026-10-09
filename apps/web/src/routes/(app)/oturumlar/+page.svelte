@@ -1,4 +1,5 @@
 <script lang="ts">
+	import EmptyState from '$lib/components/empty-state.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -105,7 +106,7 @@
 			{#if loadError}
 				<p class="text-sm text-destructive">{t('auth.login.error.fallback')}</p>
 			{:else if sessions && sessions.sessions.length === 0}
-				<p class="text-sm text-muted-foreground">{t('auth.sessions.empty')}</p>
+				<EmptyState messageKey="auth.sessions.empty" />
 			{:else if sessions}
 				<Table>
 					<TableHeader>

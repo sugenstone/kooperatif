@@ -1,4 +1,5 @@
 <script lang="ts">
+	import EmptyState from '$lib/components/empty-state.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import {
@@ -87,7 +88,7 @@
 	{:else if roles === null}
 		<p class="text-sm text-muted-foreground">{t('roles.loading')}</p>
 	{:else if roles.length === 0}
-		<p class="text-sm text-muted-foreground">{t('roles.empty')}</p>
+		<EmptyState messageKey="roles.empty" />
 	{:else}
 		<Card class="w-full">
 			<CardHeader>

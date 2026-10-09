@@ -420,8 +420,16 @@ try {
 	const menuBtn = mp.getByRole('button', { name: 'Menü' });
 	if ((await menuBtn.getAttribute('aria-expanded')) !== 'false') fail('menu aria-expanded initial');
 	await menuBtn.click();
-	if ((await mp.getByRole('button', { name: 'Kapat' }).getAttribute('aria-expanded')) !== 'true')
+	// shadcn sidebar opens an off-canvas dialog on mobile.
+	const sheet = mp.getByRole('dialog');
+	await sheet.waitFor({ state: 'visible' });
+	if ((await menuBtn.getAttribute('aria-expanded')) !== 'true')
 		fail('menu aria-expanded after open');
+	// Sheet closes via Escape and the trigger reflects it again.
+	await mp.keyboard.press('Escape');
+	await sheet.waitFor({ state: 'hidden' });
+	if ((await menuBtn.getAttribute('aria-expanded')) !== 'false')
+		fail('menu aria-expanded after close');
 	// Active-route marking on desktop.
 	await mctx.close();
 	const dctx = await browser.newContext({ locale: 'tr-TR', viewport: { width: 1440, height: 900 } });
@@ -431,7 +439,7 @@ try {
 	await dp.getByLabel('Parola').fill('rc-parola-cok-gizli-1');
 	await dp.getByRole('button', { name: 'Giriş Yap' }).click();
 	await dp.waitForURL(`${WEB}/`, { timeout: 30000 });
-	const current = dp.locator('aside nav a[aria-current="page"]');
+	const current = dp.locator('[data-slot="sidebar"] a[aria-current="page"]');
 	if (!(await current.count())) fail('no aria-current nav link on desktop');
 	await dctx.close();
 
@@ -448,7 +456,8 @@ try {
 			await p.getByRole('button', { name: 'Giriş Yap' }).click();
 			await p.waitForURL(`${WEB}/`, { timeout: 30000 });
 			await p.goto(`${WEB}/hissedarlar`, { waitUntil: 'networkidle' });
-			if (!(await p.locator('aside nav').count())) fail(`${name}: sidebar nav missing`);
+			if (!(await p.locator('[data-slot="sidebar"]').count()))
+				fail(`${name}: sidebar nav missing`);
 			const rows = await p.locator('table tbody tr').count();
 			if (rows < 2) fail(`${name}: shareholder list rendered ${rows} rows`);
 			await b.close();
