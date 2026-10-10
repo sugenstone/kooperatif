@@ -14,6 +14,7 @@
 //! `cooperative_id` on business tables (P2), RLS policies (P4).
 
 pub mod extractor;
+pub mod gate;
 pub mod repo;
 pub mod routes;
 

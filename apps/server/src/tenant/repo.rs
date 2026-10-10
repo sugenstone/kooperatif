@@ -231,6 +231,37 @@ pub async fn list_user_cooperatives(
     .await
 }
 
+/// Whether the user holds any cooperative membership at all — the gate
+/// uses this to distinguish pre-tenant users (zero) from enrolled users
+/// whose every cooperative is not business-ready.
+pub async fn has_any_membership(pool: &sqlx::PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cooperative_memberships WHERE user_id = $1)")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// Whether the user holds an active membership in an active,
+/// business-enabled cooperative — the M1 §5 gate predicate for
+/// not-yet-tenant-scoped business modules.
+pub async fn has_enabled_business_membership(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(\
+            SELECT 1 FROM cooperative_memberships m \
+            JOIN cooperatives c ON c.id = m.cooperative_id \
+            WHERE m.user_id = $1 \
+              AND m.status = 'active' \
+              AND c.status = 'active' \
+              AND c.business_enabled)",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// Persist the UX-level default cooperative on the session row
 /// (M1-K1: convenience only — never a security decision on its own).
 pub async fn set_session_cooperative(

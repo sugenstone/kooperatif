@@ -168,10 +168,11 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         )
     });
 
-    Router::new()
-        .route(HEALTH_PATH, get(health))
-        .route(READY_PATH, get(ready))
-        .merge(auth_router())
+    // M1 §5: every business router sits behind the tenant-membership
+    // gate until the P2 retrofit scopes them per cooperative. Auth and
+    // tenant routers stay outside — a gated member must still be able
+    // to log in, inspect memberships and switch context.
+    let business = Router::new()
         .merge(rbac_router())
         .merge(parties_router())
         .merge(shares_router())
@@ -186,6 +187,16 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(governance_router())
         .merge(crate::reports::routes::reports_router())
         .merge(crate::realtime::routes::realtime_router())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::tenant::gate::business_membership_gate,
+        ));
+
+    Router::new()
+        .route(HEALTH_PATH, get(health))
+        .route(READY_PATH, get(ready))
+        .merge(auth_router())
+        .merge(business)
         .merge(crate::tenant::routes::tenant_router())
         .fallback(fallback)
         .layer(middleware::from_fn(sanitize_rejection_bodies))

@@ -68,11 +68,21 @@ impl TestApp {
     }
 }
 
+/// Bound concurrent per-test database provisioning. Each `setup()`
+/// opens an admin pool (up to 5) plus the app pool (up to 5) while the
+/// tests themselves hold their pools open; 16 unbounded parallel
+/// lifecycles against a `max_connections = 100` dev instance starved
+/// acquisitions into `PoolTimedOut` under combined runs (M1-P0-002 §3).
+/// Tests still run in parallel — only provisioning is throttled.
+/// Worst case: 16 app pools (80) + 2 admin pools (10) < 100.
+static SETUP_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 async fn setup() -> Option<TestApp> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("kooperatif_server=error")
         .try_init();
     let url = test_database_url()?;
+    let _setup_slot = SETUP_SLOTS.acquire().await.expect("setup slot");
     let suffix = Uuid::new_v4().simple();
     let database_name = format!("kooperatif_test_{suffix}");
     let admin_url = url
