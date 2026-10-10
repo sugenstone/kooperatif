@@ -13,12 +13,12 @@
 //!   - An explicit `x-cooperative-id` header is validated exactly like
 //!     `TenantCtx`: active membership + active cooperative +
 //!     `business_enabled`, or the request fails closed.
-//!   - Without a header, a user holding AT LEAST ONE membership must
-//!     hold an active membership in an active, business-enabled
-//!     cooperative — otherwise every business module is denied.
-//!   - Users with ZERO memberships pass through: the pre-tenant
-//!     single-cooperative model (M0 compatibility) until the bootstrap
-//!     CLI enrolls them.
+//!   - Without a header: before the initial cooperative has been
+//!     bootstrapped, pre-tenant single-cooperative access applies
+//!     (M0 compatibility). AFTER bootstrap, an active membership in an
+//!     active, business-enabled cooperative is mandatory — a user with
+//!     zero or only revoked/disabled memberships is denied, so global
+//!     RBAC can never serve as a fallback.
 //!
 //! This is intentionally not tenant scoping — it is a kill switch that
 //! keeps multi-cooperative business operations impossible until P1/P2
@@ -81,22 +81,24 @@ pub async fn business_membership_gate(
         return next.run(request).await;
     }
 
-    let has_membership = match repo::has_any_membership(pool, auth.user_id).await {
-        Ok(value) => value,
+    // No explicit context. The compatibility exception is exactly one:
+    // before the initial cooperative has been bootstrapped, the tenant
+    // model is not engaged and pre-tenant single-cooperative access
+    // applies. After bootstrap, zero membership means zero business
+    // access — a newly created or fully revoked user cannot fall back
+    // to global RBAC (M1-P0-003 §1).
+    match repo::bootstrap_completed(pool).await {
+        Ok(false) => next.run(request).await,
+        Ok(true) => match repo::has_enabled_business_membership(pool, auth.user_id).await {
+            Ok(true) => next.run(request).await,
+            Ok(false) => ApiError::CooperativeAccessDenied.into_response(),
+            Err(error) => {
+                tracing::error!(error = %error, "tenant gate membership lookup failed");
+                ApiError::Internal.into_response()
+            }
+        },
         Err(error) => {
-            tracing::error!(error = %error, "tenant gate membership lookup failed");
-            return ApiError::Internal.into_response();
-        }
-    };
-    if !has_membership {
-        // Zero memberships: pre-tenant single-cooperative operation.
-        return next.run(request).await;
-    }
-    match repo::has_enabled_business_membership(pool, auth.user_id).await {
-        Ok(true) => next.run(request).await,
-        Ok(false) => ApiError::CooperativeAccessDenied.into_response(),
-        Err(error) => {
-            tracing::error!(error = %error, "tenant gate membership lookup failed");
+            tracing::error!(error = %error, "tenant gate bootstrap lookup failed");
             ApiError::Internal.into_response()
         }
     }

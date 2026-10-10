@@ -231,12 +231,12 @@ pub async fn list_user_cooperatives(
     .await
 }
 
-/// Whether the user holds any cooperative membership at all — the gate
-/// uses this to distinguish pre-tenant users (zero) from enrolled users
-/// whose every cooperative is not business-ready.
-pub async fn has_any_membership(pool: &sqlx::PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cooperative_memberships WHERE user_id = $1)")
-        .bind(user_id)
+/// Whether the one-time bootstrap has been completed — the only moment
+/// the tenant model is "engaged". Before bootstrap, zero cooperatives
+/// exist and the pre-tenant single-cooperative access rules apply;
+/// afterwards, every business request must resolve through membership.
+pub async fn bootstrap_completed(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cooperatives WHERE is_bootstrap)")
         .fetch_one(pool)
         .await
 }

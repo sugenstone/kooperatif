@@ -478,20 +478,15 @@ async fn suspended_membership_denies_business_endpoints() {
     test.cleanup().await;
 }
 
+/// Pre-bootstrap compatibility: while no cooperative exists at all,
+/// the tenant model is not engaged and legacy access stays open. This
+/// is the ONLY documented exception and it disappears the moment the
+/// bootstrap CLI runs (M1-P0-003 §1).
 #[tokio::test]
-async fn membershipless_user_keeps_pre_tenant_access() {
+async fn membershipless_user_retains_access_only_before_bootstrap() {
     let Some(test) = setup().await else { return };
     let user = create_user(&test.pool, "uyesiz_admin").await;
     grant_full_business_role(&test.pool, user).await;
-    bootstrap_enabled(&test.pool).await;
-    // Deliberately remove this user's membership (a user that predates
-    // or was never enrolled into the tenant model).
-    sqlx::query("DELETE FROM cooperative_memberships WHERE user_id = $1")
-        .bind(user)
-        .execute(&test.pool)
-        .await
-        .expect("strip membership");
-
     let (cookie, csrf, _) = login(&test.app, test.peer(), "uyesiz_admin").await;
     let (status, _) = send(
         &test.app,
@@ -506,8 +501,233 @@ async fn membershipless_user_keeps_pre_tenant_access() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "zero-membership users keep single-cooperative compatibility"
+        "before bootstrap, legacy single-cooperative access applies"
     );
+
+    // Bootstrap enrolls every existing user — strip this user's row to
+    // model the boundary: bootstrap completed, membership absent.
+    bootstrap_enabled(&test.pool).await;
+    sqlx::query("DELETE FROM cooperative_memberships WHERE user_id = $1")
+        .bind(user)
+        .execute(&test.pool)
+        .await
+        .expect("strip membership");
+    assert_all_denied(&test, &cookie, &csrf, None, "post-bootstrap membershipless").await;
+    test.cleanup().await;
+}
+
+/// A user created AFTER bootstrap (e.g. `create-user` CLI) holds zero
+/// memberships — without the bootstrap-gated check this user rode
+/// global RBAC straight into every business module (P0-002 finding).
+#[tokio::test]
+async fn newly_created_user_without_membership_is_denied_after_bootstrap() {
+    let Some(test) = setup().await else { return };
+    bootstrap_enabled(&test.pool).await;
+    let user = create_user(&test.pool, "yeni_kullanici").await;
+    grant_full_business_role(&test.pool, user).await;
+
+    let (cookie, csrf, _) = login(&test.app, test.peer(), "yeni_kullanici").await;
+    assert_all_denied(&test, &cookie, &csrf, None, "new user, zero memberships").await;
+    test.cleanup().await;
+}
+
+/// Explicit-context rules (M1-P0-003 §2): an `x-cooperative-id` header
+/// is a per-request security claim — a foreign cooperative, a revoked
+/// membership, or a malformed value must never silently fall back to
+/// the bootstrap cooperative.
+#[tokio::test]
+async fn explicit_context_never_falls_back_to_bootstrap() {
+    let Some(test) = setup().await else { return };
+    bootstrap_enabled(&test.pool).await;
+    let second = create_disabled_business_coop(&test.pool, "Ikinci Koop").await;
+    let third = create_disabled_business_coop(&test.pool, "Ucuncu Koop").await;
+    let user = create_user(&test.pool, "context_u").await;
+    grant_full_business_role(&test.pool, user).await;
+    kooperatif_server::tenant::repo::add_member(&test.pool, "Ana Kooperatif", user, None)
+        .await
+        .expect("A membership");
+    kooperatif_server::tenant::repo::add_member(&test.pool, "Ikinci Koop", user, None)
+        .await
+        .expect("B membership (not enabled)");
+
+    let (cookie, csrf, _) = login(&test.app, test.peer(), "context_u").await;
+
+    // Enabled cooperative context → business endpoints reachable.
+    let bootstrap_id: Uuid = sqlx::query_scalar("SELECT id FROM cooperatives WHERE is_bootstrap")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&bootstrap_id.to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Member of a real but business-disabled cooperative → denied.
+    let (status, body) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&second.to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "cooperative_access_denied");
+
+    // Member of NO cooperative at all (third exists, user not enrolled)
+    // → denied; never served as bootstrap context.
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&third.to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Random UUID — indistinguishable from a real foreign coop.
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&Uuid::new_v4().to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Malformed header — 400, never reinterpreted as bootstrap.
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some("degistirilmis-deger"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Revoked membership: revoke A, then the explicit A header must be
+    // denied even though B membership rows still exist.
+    sqlx::query(
+        "UPDATE cooperative_memberships SET status = 'ended' \
+         WHERE user_id = $1 AND cooperative_id = $2",
+    )
+    .bind(user)
+    .bind(bootstrap_id)
+    .execute(&test.pool)
+    .await
+    .expect("revoke A");
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&bootstrap_id.to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a revoked membership must not inherit access from another membership"
+    );
+    test.cleanup().await;
+}
+
+/// Per-request context: two sequential requests on the SAME session
+/// with different headers behave like two browser tabs — each request
+/// is independently validated, no cross-contamination.
+#[tokio::test]
+async fn same_session_tabs_cannot_corrupt_each_others_context() {
+    let Some(test) = setup().await else { return };
+    bootstrap_enabled(&test.pool).await;
+    let second = create_disabled_business_coop(&test.pool, "Ikinci Koop").await;
+    let user = create_user(&test.pool, "tab_u").await;
+    grant_full_business_role(&test.pool, user).await;
+    kooperatif_server::tenant::repo::add_member(&test.pool, "Ana Kooperatif", user, None)
+        .await
+        .expect("A membership");
+    kooperatif_server::tenant::repo::add_member(&test.pool, "Ikinci Koop", user, None)
+        .await
+        .expect("B membership");
+    let bootstrap_id: Uuid = sqlx::query_scalar("SELECT id FROM cooperatives WHERE is_bootstrap")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+
+    let (cookie, csrf, _) = login(&test.app, test.peer(), "tab_u").await;
+    // "Tab A" selects the bootstrap cooperative.
+    let (status, _) = send(
+        &test.app,
+        "POST",
+        "/api/auth/cooperative",
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "cooperativeId": bootstrap_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // "Tab B" requests with its own header — denied for the disabled
+    // coop, and Tab A's session default is unaffected.
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&second.to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = send(
+        &test.app,
+        "GET",
+        "/api/auth/cooperative-context",
+        &cookie,
+        Some(&csrf),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["cooperativeId"].as_str().unwrap(),
+        bootstrap_id.to_string(),
+        "another tab's denied header must not move the session default"
+    );
+    // Tab A's own requests still pass with its explicit header.
+    let (status, _) = send(
+        &test.app,
+        "GET",
+        "/api/shareholders",
+        &cookie,
+        Some(&csrf),
+        Some(&bootstrap_id.to_string()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     test.cleanup().await;
 }
 
