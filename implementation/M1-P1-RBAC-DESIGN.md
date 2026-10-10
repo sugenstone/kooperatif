@@ -237,18 +237,33 @@ matrisine ertelenir.
 
 Bağımlılık: hepsi P0'a dayanır; P1-a → b → c/e → d → f.
 
-## 9. Sahip Kararları [OWNER]
+## 9. Sahip Kararları — HEPSİ **APPROVED** (M1-P1-001)
 
-- **P1-K1** (§3.1): Tablo yaklaşımı A (extend) öneriliyor — B istenirse
-  tasarım yeniden yapılır.
-- **P1-K2** (§5): `me`'de per-coop `permissions`/`roles` + üst-seviye
-  alanların bootstrap-compat korunması öneriliyor.
-- **P1-K3** (§6): Legacy yetki context'inin bootstrap-coop'a
-  sabitlenmesi onayı — P2'ye dek tek doğru semantik.
-- **P1-K4** (§3.3): `is_template` şablon-rol mekanizması + ilk şablon =
-  tohum `Sistem Yöneticisi`.
-- **P1-K5** (§3.4): Per-coop advisory lock (önerilen) vs global lock
-  koruma (daha basit).
+- **P1-K1 — APPROVED** (§3.1): Mevcut `roles`/`role_permissions`/
+  `user_role_assignments` üzerinden eklemeli geçiş (yaklaşım A).
+- **P1-K2 — APPROVED** (§5): `me`'de per-coop `permissions`/`roles`;
+  üst-seviye alanlar yalnızca bootstrap-compat için geçici kalır, başka
+  kooperatifte yetki üretmez.
+- **P1-K3 — APPROVED** (§6): Legacy iş yetkilendirmesi P2'ye dek
+  bootstrap kooperatifine sabitlendi; başka coop'a açık istek reddedilir;
+  P0 business gate aktif kalır.
+- **P1-K4 — APPROVED** (§3.3): Sistem rol şablonları gerçek coop
+  rollerinden **bağımsız** depolanır → P1-a'da `system_role_templates` +
+  `system_role_template_permissions` ayrı tabloları uygulandı
+  (`is_template` bayrağı yerine — onay metniyle birebir uyumlu). Şablon
+  kopyası asla kullanıcı atamaz; ilk admin yalnızca açık provisioning
+  eylemiyle.
+- **P1-K5 — APPROVED** (§3.4): Son-yönetici koruması kooperatif
+  kapsamlı olacak; coop-bazlı kilitleme + işlemsel kontrol.
+
+### P1-a uygulama durumu (M1-P1-001)
+
+`migrations/0019_cooperative_rbac_foundation.sql` + 9 DB testi
+(`tests/rbac_cooperative_schema.rs`) tamamlandı ve commit'lendi. Tek
+atomik migration: NULLABLE `cooperative_id` sütunları (contract NOT NULL
+P1-c'de), kompozit FK'ler, bootstrap backfill + admin-süreklilik assert'i,
+şablon tabloları. Davranış değişikliği yok — `effective_permissions`
+hâlâ global (P1-b).
 
 ## Açık Riskler [RISK]
 
