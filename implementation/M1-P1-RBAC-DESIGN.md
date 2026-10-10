@@ -262,8 +262,26 @@ Bağımlılık: hepsi P0'a dayanır; P1-a → b → c/e → d → f.
 (`tests/rbac_cooperative_schema.rs`) tamamlandı ve commit'lendi. Tek
 atomik migration: NULLABLE `cooperative_id` sütunları (contract NOT NULL
 P1-c'de), kompozit FK'ler, bootstrap backfill + admin-süreklilik assert'i,
-şablon tabloları. Davranış değişikliği yok — `effective_permissions`
-hâlâ global (P1-b).
+şablon tabloları.
+
+### P1-b uygulama durumu (M1-P1-002)
+
+`authz.rs`'ye ayrık scoped çekirdek eklendi — mevcut global yol
+dokunulmadı (§4 uyarınca çağrı noktası göçü P1-c'de):
+
+- `effective_permissions_in_cooperative(pool, user_id, coop_id)`:
+  üyelik JOIN'i (`m.status='active'` + aynı coop) + `ura.cooperative_id
+  = $2 AND r.cooperative_id = $2` + `r.status='active'`; NULL-coop
+  satırlar ve bilinmeyen coop boş küme üretir; global fallback yok;
+  cache yok (her çağrı taze DB).
+- `active_role_summaries_in_cooperative(...)`: aynı kurallarla rol
+  özetleri.
+- `require_in_cooperative(state, &TenantCtx, perm)`: yalnızca
+  sunucu-doğrulanmış `TenantCtx` kabul eder (ham header asla).
+
+Hâlâ global kalan yol (P1-c kapsamı): `require()` ~90 çağrı noktası,
+`me`'nin `permissions`/`roles` alanları, `administration_path_count`,
+`grant-role` CLI. Testler: `tests/authz_cooperative.rs` 7/7.
 
 ## Açık Riskler [RISK]
 

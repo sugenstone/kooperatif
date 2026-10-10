@@ -156,6 +156,114 @@ pub async fn effective_permissions(
     Ok(rows.into_iter().collect())
 }
 
+/// M1-P1-b — cooperative-scoped resolution (P1-K1/P1-K2/P1-K3).
+///
+/// Resolves permission keys against ONE explicit cooperative scope. The
+/// cooperative_id is a scope, not a credential: the membership join
+/// makes an unverified value harmless — a cooperative the user does not
+/// actively belong to yields an empty set (default DENY).
+///
+/// Guarantees over the global `effective_permissions`:
+/// - only assignments AND roles carrying THIS cooperative count;
+///   `cooperative_id IS NULL` rows (the temporary pre-tenant legacy lane
+///   from migration 0019) are excluded;
+/// - an `active` cooperative_memberships row in the same cooperative is
+///   required, so suspended/ended memberships resolve to nothing;
+/// - no global fallback — a role owned by another cooperative can never
+///   leak in (the composite FK already makes such a row uninsertable).
+///
+/// Per-request, per-scope resolution: no caching, so role or membership
+/// changes apply to the very next request.
+pub async fn effective_permissions_in_cooperative(
+    pool: &PgPool,
+    user_id: Uuid,
+    cooperative_id: Uuid,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT p.key \
+         FROM user_role_assignments ura \
+         JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+                      AND r.cooperative_id = $2 \
+         JOIN cooperative_memberships m \
+           ON m.cooperative_id = $2 AND m.user_id = ura.user_id \
+          AND m.status = 'active' \
+         JOIN role_permissions rp ON rp.role_id = r.id \
+         JOIN permissions p ON p.id = rp.permission_id \
+         WHERE ura.user_id = $1 AND ura.cooperative_id = $2",
+    )
+    .bind(user_id)
+    .bind(cooperative_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Cooperative-scoped role summaries (id + display name), safe for API
+/// responses — P1-b counterpart of `active_role_summaries`.
+pub async fn active_role_summaries_in_cooperative(
+    pool: &PgPool,
+    user_id: Uuid,
+    cooperative_id: Uuid,
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT r.id, r.name \
+         FROM user_role_assignments ura \
+         JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+                      AND r.cooperative_id = $2 \
+         JOIN cooperative_memberships m \
+           ON m.cooperative_id = $2 AND m.user_id = ura.user_id \
+          AND m.status = 'active' \
+         WHERE ura.user_id = $1 AND ura.cooperative_id = $2 \
+         ORDER BY r.name",
+    )
+    .bind(user_id)
+    .bind(cooperative_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Cooperative-scoped permission enforcement (P1-b, P1-K2).
+///
+/// Accepts a server-verified `TenantCtx` — never a raw request header —
+/// so the cooperative scope has already passed membership/status/
+/// business_enabled validation. Membership is additionally re-verified
+/// by the resolver join, keeping the check correct even if the session's
+/// cooperative data went stale between extraction and enforcement.
+///
+/// Introduced as a separate path (§4 of the P1-a task): legacy business
+/// endpoints still call global `require` until their call sites migrate
+/// in P1-c. No global permission fallback exists in this function.
+pub async fn require_in_cooperative(
+    state: &AppState,
+    ctx: &crate::tenant::TenantCtx,
+    permission: &str,
+) -> Result<(), ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+    let permissions =
+        effective_permissions_in_cooperative(pool, ctx.auth.user_id, ctx.cooperative_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    permission,
+                    "scoped permission resolution failed"
+                );
+                ApiError::Internal
+            })?;
+    if permissions.contains(permission) {
+        Ok(())
+    } else {
+        tracing::info!(
+            outcome = "permission_denied",
+            user_id = %ctx.auth.user_id,
+            cooperative_id = %ctx.cooperative_id,
+            permission,
+            "scoped authorization denied"
+        );
+        Err(ApiError::PermissionDenied)
+    }
+}
+
 /// Active role summaries of a user (id + display name), safe for API
 /// responses.
 pub async fn active_role_summaries(
