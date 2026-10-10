@@ -58,7 +58,7 @@ const node = (script, args, env = {}) =>
 		stdio: 'pipe'
 	});
 
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms);
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 function main() {
 	const dir = mkdtempSync(path.join(tmpdir(), 'kooperatif-failtest-'));

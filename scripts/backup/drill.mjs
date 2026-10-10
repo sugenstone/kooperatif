@@ -34,7 +34,7 @@ const RESTORE_DB = 'kooperatif_backup_drill_restore';
 const SOURCE_URL = `postgres://${PGUSER}:${PGPASS}@localhost:${PGPORT}/${SOURCE_DB}`;
 
 // Synchronous sleep without shelling out (cross-platform).
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms);
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 const compose = (args, { input, capture = false, allowFail = false } = {}) => {
 	// stdio 'inherit' would silently discard `input`; pipe stdin whenever
