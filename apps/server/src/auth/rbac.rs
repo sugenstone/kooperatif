@@ -18,6 +18,23 @@
 //! There is intentionally NO `POST /api/permissions`: the permission
 //! catalog is application-owned and changes only through migrations
 //! (§25/§7). No wildcard or restore permission exists (§16/§30).
+//!
+//! M1-P1-c2a — cooperative scoping: reads and the safe mutations
+//! (create/update/enable) run under `BusinessAuth` +
+//! `require_business`, resolving rows with verified bootstrap
+//! attribution: `cooperative_id IS NULL` rows count as
+//! bootstrap-attributed (same rule as `effective_permissions_in_bootstrap`),
+//! while another cooperative's rows are invisible (404, never 403 — no
+//! existence leak). New roles are written WITH `cooperative_id` — no
+//! new NULL role rows.
+//!
+//! Deferral (P1-c2b — M1-P1-006 §3): the four mutations that can remove
+//! the last administration path keep the UNCHANGED global `require` +
+//! global guarded transaction + global `administration_path_count`:
+//! `disable_role`, `PUT /roles/{id}/permissions`, `disable_user`,
+//! `PUT /users/{id}/roles`. Replacing the lock while scoped
+//! assignments are still half-migrated would weaken lockout safety;
+//! they migrate wholesale in P1-c2b (P1-K5).
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -35,6 +52,7 @@ use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
+use crate::tenant::BusinessAuth;
 
 const ROLE_NAME_MIN_LEN: usize = 2;
 const ROLE_NAME_MAX_LEN: usize = 100;
@@ -160,6 +178,10 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 /// All mutating RBAC handlers share this prologue: CSRF Origin check
 /// (layer 1) + synchronizer token check (layer 2) + the required
 /// permission (§47). $method is the literal HTTP method of the route.
+///
+/// This GLOBAL variant remains for the lockout-sensitive mutations
+/// deferred to P1-c2b (see module doc) — it intentionally still uses
+/// the global `require` so no guard semantics change mid-migration.
 macro_rules! guarded_mutation {
     ($state:expr, $headers:expr, $auth:expr, $permission:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
@@ -171,11 +193,26 @@ macro_rules! guarded_mutation {
     }};
 }
 
+/// M1-P1-c2a — scoped variant for migrated RBAC handlers: same CSRF
+/// layers, but authorization resolves through `require_business`
+/// (bootstrap-pinned `BusinessAuth`, verified legacy attribution — never
+/// a raw header and never a global-permission fallback).
+macro_rules! guarded_business_mutation {
+    ($state:expr, $headers:expr, $ctx:expr, $permission:expr, $method:expr) => {{
+        csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
+            .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
+            .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
+        authz::require_business($state, $ctx, $permission).await?;
+        pool_of($state)?
+    }};
+}
+
 pub async fn list_permissions(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Json<Vec<PermissionDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ROLES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ROLES_READ).await?;
     let pool = pool_of(&state)?;
     let rows = sqlx::query_as::<_, PermissionDto>(
         "SELECT key, name, description, category FROM permissions ORDER BY category, key",
@@ -189,14 +226,26 @@ pub async fn list_permissions(
     Ok(Json(rows))
 }
 
+/// Role visibility predicate (P1-c2a): `$scope` is
+/// `BusinessAuth::cooperative_id()`. In the bootstrap scope a role is
+/// visible iff it is bootstrap-owned OR NULL-attributed (legacy lane);
+/// in the never-bootstrapped lane scope is NULL and every (necessarily
+/// NULL) row matches — preserving the legacy global view. Deferred
+/// lockout-sensitive mutations pass `None` explicitly for the legacy
+/// unscoped view.
 async fn load_role_with_permissions(
     pool: &sqlx::PgPool,
     role_id: Uuid,
+    scope: Option<Uuid>,
 ) -> Result<Option<RoleDto>, sqlx::Error> {
     let Some(role) = sqlx::query_as::<_, RoleRow>(
-        "SELECT id, name, description, status, created_at, updated_at FROM roles WHERE id = $1",
+        "SELECT id, name, description, status, created_at, updated_at \
+         FROM roles \
+         WHERE id = $1 \
+           AND ($2::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $2)",
     )
     .bind(role_id)
+    .bind(scope)
     .fetch_optional(pool)
     .await?
     else {
@@ -223,20 +272,26 @@ async fn load_role_with_permissions(
 
 pub async fn list_roles(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Json<Vec<RoleDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ROLES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ROLES_READ).await?;
     let pool = pool_of(&state)?;
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM roles ORDER BY name")
-        .fetch_all(pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "role listing failed");
-            ApiError::Internal
-        })?;
+    let scope = ctx.cooperative_id();
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM roles \
+         WHERE $1::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $1 \
+         ORDER BY name",
+    )
+    .bind(scope)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "role listing failed");
+        ApiError::Internal
+    })?;
     let mut roles = Vec::with_capacity(ids.len());
     for id in ids {
-        if let Some(role) = load_role_with_permissions(pool, id)
+        if let Some(role) = load_role_with_permissions(pool, id, scope)
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "role load failed");
@@ -251,12 +306,12 @@ pub async fn list_roles(
 
 pub async fn get_role(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Json<RoleDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ROLES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ROLES_READ).await?;
     let pool = pool_of(&state)?;
-    let dto = load_role_with_permissions(pool, role_id)
+    let dto = load_role_with_permissions(pool, role_id, ctx.cooperative_id())
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "role load failed");
@@ -278,25 +333,30 @@ fn validate_role_name(name: &str) -> Result<(), ApiError> {
 pub async fn create_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateRoleRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::ROLES_MANAGE,
         &axum::http::Method::POST
     );
     let name = body.name.trim().to_string();
     validate_role_name(&name)?;
     let description = body.description.unwrap_or_default().trim().to_string();
+    let scope = ctx.cooperative_id();
 
+    // P1-c2a: new roles carry the verified cooperative — no new NULL
+    // role rows from this path (NULL only in the never-bootstrapped
+    // lane, where no cooperative exists yet).
     let role = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO roles (name, description) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO roles (name, description, cooperative_id) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(&name)
     .bind(&description)
+    .bind(scope)
     .fetch_one(pool)
     .await
     .map_err(|error| match error {
@@ -310,17 +370,18 @@ pub async fn create_role(
         }
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::RoleCreated,
-        Some(auth.user_id),
+        scope,
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "role_id": role, "name": name }),
     )
     .await;
-    tracing::info!(outcome = "role_created", role_id = %role, actor = %auth.user_id);
+    tracing::info!(outcome = "role_created", role_id = %role, actor = %ctx.auth.user_id);
 
-    let dto = load_role_with_permissions(pool, role)
+    let dto = load_role_with_permissions(pool, role, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "role reload failed");
@@ -333,21 +394,22 @@ pub async fn create_role(
 pub async fn update_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(role_id): Path<Uuid>,
     Json(body): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleDto>, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::ROLES_MANAGE,
         &axum::http::Method::PATCH
     );
+    let scope = ctx.cooperative_id();
     if let Some(name) = &body.name {
         validate_role_name(name)?;
     }
-    let existing = load_role_with_permissions(pool, role_id)
+    let existing = load_role_with_permissions(pool, role_id, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "role load failed");
@@ -362,14 +424,18 @@ pub async fn update_role(
             name = COALESCE($2, name), \
             description = COALESCE($3, description), \
             updated_at = now() \
-         WHERE id = $1 RETURNING id",
+         WHERE id = $1 \
+           AND ($4::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $4) \
+         RETURNING id",
     )
     .bind(role_id)
     .bind(&name)
     .bind(&description)
+    .bind(scope)
     .fetch_one(pool)
     .await
     .map_err(|error| match error {
+        sqlx::Error::RowNotFound => ApiError::NotFound,
         sqlx::Error::Database(db_err) if db_err.is_unique_violation() => ApiError::Conflict,
         other => {
             tracing::error!(error = %other, "role update failed");
@@ -377,10 +443,11 @@ pub async fn update_role(
         }
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::RoleUpdated,
-        Some(auth.user_id),
+        scope,
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "role_id": role_id,
@@ -389,9 +456,9 @@ pub async fn update_role(
         }),
     )
     .await;
-    tracing::info!(outcome = "role_updated", role_id = %role_id, actor = %auth.user_id);
+    tracing::info!(outcome = "role_updated", role_id = %role_id, actor = %ctx.auth.user_id);
 
-    let dto = load_role_with_permissions(pool, role_id)
+    let dto = load_role_with_permissions(pool, role_id, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "role reload failed");
@@ -401,6 +468,8 @@ pub async fn update_role(
     Ok(Json(dto))
 }
 
+/// P1-c2b deferred: disabling a role can remove the last
+/// administration path — the global lock stays untouched here.
 pub async fn disable_role(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -414,31 +483,38 @@ pub async fn disable_role(
         authz::catalog::ROLES_MANAGE,
         &axum::http::Method::POST
     );
-    set_role_status(&state, pool, &auth, role_id, "disabled").await
+    set_role_status(pool, &auth, role_id, "disabled", None, None).await
 }
 
 pub async fn enable_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::ROLES_MANAGE,
         &axum::http::Method::POST
     );
-    set_role_status(&state, pool, &auth, role_id, "active").await
+    let scope = ctx.cooperative_id();
+    set_role_status(pool, &ctx.auth, role_id, "active", scope, scope).await
 }
 
+/// `role_scope` limits which role rows the mutation may touch (the
+/// verified-attribution predicate); `audit_scope` attributes the audit
+/// event. Both are `None` for the deferred legacy-global path
+/// (P1-c2b) — `None` is NOT the never-bootstrapped scope here, it is
+/// the unchanged global view.
 async fn set_role_status(
-    _state: &AppState,
     pool: &sqlx::PgPool,
     auth: &CurrentAuth,
     role_id: Uuid,
     status: &str,
+    role_scope: Option<Uuid>,
+    audit_scope: Option<Uuid>,
 ) -> Result<Response, ApiError> {
     // Guarded transaction: disabling a role can remove the last
     // administration path (§28/§44).
@@ -450,10 +526,13 @@ async fn set_role_status(
         })?;
 
     let updated = sqlx::query(
-        "UPDATE roles SET status = $2, updated_at = now() WHERE id = $1 AND status <> $2",
+        "UPDATE roles SET status = $2, updated_at = now() \
+         WHERE id = $1 AND status <> $2 \
+           AND ($3::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $3)",
     )
     .bind(role_id)
     .bind(status)
+    .bind(role_scope)
     .execute(tx.as_mut())
     .await
     .map_err(|error| {
@@ -461,19 +540,24 @@ async fn set_role_status(
         ApiError::Internal
     })?;
     if updated.rows_affected() == 0 {
-        // Unknown role, or already in the target state (idempotent).
+        // Unknown/out-of-scope role, or already in the target state
+        // (idempotent).
         tx.rollback().await.map_err(|error| {
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        let exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM roles WHERE id = $1")
-            .bind(role_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "role existence check failed");
-                ApiError::Internal
-            })?;
+        let exists: Option<bool> = sqlx::query_scalar(
+            "SELECT TRUE FROM roles WHERE id = $1 \
+             AND ($2::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $2)",
+        )
+        .bind(role_id)
+        .bind(role_scope)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "role existence check failed");
+            ApiError::Internal
+        })?;
         if exists.is_none() {
             return Err(ApiError::NotFound);
         }
@@ -502,13 +586,14 @@ async fn set_role_status(
         ApiError::Internal
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         if status == "disabled" {
             SecurityEventType::RoleDisabled
         } else {
             SecurityEventType::RoleEnabled
         },
+        audit_scope,
         Some(auth.user_id),
         None,
         serde_json::json!({ "role_id": role_id }),
@@ -518,6 +603,8 @@ async fn set_role_status(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// P1-c2b deferred: disabling a user can remove the last
+/// administration path — the global lock stays untouched here.
 pub async fn disable_user(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -531,30 +618,38 @@ pub async fn disable_user(
         authz::catalog::USERS_MANAGE,
         &axum::http::Method::POST
     );
-    set_user_status(pool, &auth, user_id, "disabled").await
+    set_user_status(pool, &auth, user_id, "disabled", None, None).await
 }
 
 pub async fn enable_user(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(user_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::USERS_MANAGE,
         &axum::http::Method::POST
     );
-    set_user_status(pool, &auth, user_id, "active").await
+    let scope = ctx.cooperative_id();
+    set_user_status(pool, &ctx.auth, user_id, "active", scope, scope).await
 }
 
+/// `member_scope` limits which target users the mutation may touch to
+/// members of the verified cooperative; `audit_scope` attributes the
+/// audit event. Both are `None` for the deferred legacy-global path
+/// (P1-c2b) — unchanged global behavior, NOT the never-bootstrapped
+/// scope.
 async fn set_user_status(
     pool: &sqlx::PgPool,
     auth: &CurrentAuth,
     user_id: Uuid,
     status: &str,
+    member_scope: Option<Uuid>,
+    audit_scope: Option<Uuid>,
 ) -> Result<Response, ApiError> {
     // Guarded transaction: disabling a user can remove the last
     // administration path (§28/§44) — the count already excludes
@@ -568,10 +663,15 @@ async fn set_user_status(
         })?;
 
     let updated = sqlx::query(
-        "UPDATE users SET status = $2, updated_at = now() WHERE id = $1 AND status <> $2",
+        "UPDATE users SET status = $2, updated_at = now() \
+         WHERE id = $1 AND status <> $2 \
+           AND ($3::uuid IS NULL OR EXISTS( \
+               SELECT 1 FROM cooperative_memberships m \
+               WHERE m.user_id = $1 AND m.cooperative_id = $3))",
     )
     .bind(user_id)
     .bind(status)
+    .bind(member_scope)
     .execute(tx.as_mut())
     .await
     .map_err(|error| {
@@ -579,19 +679,26 @@ async fn set_user_status(
         ApiError::Internal
     })?;
     if updated.rows_affected() == 0 {
-        // Unknown user, or already in the target state (idempotent).
+        // Unknown/out-of-scope user, or already in the target state
+        // (idempotent).
         tx.rollback().await.map_err(|error| {
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        let exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "user existence check failed");
-                ApiError::Internal
-            })?;
+        let exists: Option<bool> = sqlx::query_scalar(
+            "SELECT TRUE FROM users WHERE id = $1 \
+             AND ($2::uuid IS NULL OR EXISTS( \
+                 SELECT 1 FROM cooperative_memberships m \
+                 WHERE m.user_id = $1 AND m.cooperative_id = $2))",
+        )
+        .bind(user_id)
+        .bind(member_scope)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "user existence check failed");
+            ApiError::Internal
+        })?;
         if exists.is_none() {
             return Err(ApiError::NotFound);
         }
@@ -637,13 +744,14 @@ async fn set_user_status(
         ApiError::Internal
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         if status == "disabled" {
             SecurityEventType::UserDisabled
         } else {
             SecurityEventType::UserEnabled
         },
+        audit_scope,
         Some(auth.user_id),
         None,
         serde_json::json!({ "user_id": user_id }),
@@ -655,38 +763,48 @@ async fn set_user_status(
 
 pub async fn get_role_permissions(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ROLES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ROLES_READ).await?;
     let pool = pool_of(&state)?;
-    let keys: Option<Vec<String>> = sqlx::query_scalar(
-        "SELECT array_agg(p.key ORDER BY p.key) FROM role_permissions rp \
+    let scope = ctx.cooperative_id();
+    // Scoped existence first — a foreign role must answer 404 without
+    // touching its permission rows.
+    let exists: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM roles WHERE id = $1 \
+         AND ($2::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $2)",
+    )
+    .bind(role_id)
+    .bind(scope)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "role existence check failed");
+        ApiError::Internal
+    })?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    // COALESCE: a role with zero permissions yields a NULL array_agg,
+    // not zero rows.
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT COALESCE(array_agg(p.key ORDER BY p.key), '{}'::text[]) \
+         FROM role_permissions rp \
          JOIN permissions p ON p.id = rp.permission_id WHERE rp.role_id = $1",
     )
     .bind(role_id)
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await
     .map_err(|error| {
         tracing::error!(error = %error, "role permission read failed");
         ApiError::Internal
     })?;
-    // Distinguishing "role exists with zero permissions" from "role
-    // unknown": both return keys via load check.
-    let exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM roles WHERE id = $1")
-        .bind(role_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "role existence check failed");
-            ApiError::Internal
-        })?;
-    if exists.is_none() {
-        return Err(ApiError::NotFound);
-    }
-    Ok(Json(keys.unwrap_or_default()))
+    Ok(Json(keys))
 }
 
+/// P1-c2b deferred: stripping the administration permission can remove
+/// the last administration path — the global lock stays untouched here.
 pub async fn set_role_permissions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -823,13 +941,22 @@ pub async fn set_role_permissions(
 
 pub async fn list_users(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Json<Vec<UserListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::USERS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::USERS_READ).await?;
     let pool = pool_of(&state)?;
+    let scope = ctx.cooperative_id();
+    // In a cooperative scope only members are administrable; the
+    // never-bootstrapped lane (scope NULL) keeps the legacy all-users
+    // view — no cooperative exists to check membership against.
     let rows = sqlx::query_as::<_, UserListRow>(
-        "SELECT id, username, display_name, status FROM users ORDER BY display_name, username",
+        "SELECT id, username, display_name, status FROM users u \
+         WHERE $1::uuid IS NULL OR EXISTS( \
+             SELECT 1 FROM cooperative_memberships m \
+             WHERE m.user_id = u.id AND m.cooperative_id = $1) \
+         ORDER BY u.display_name, u.username",
     )
+    .bind(scope)
     .fetch_all(pool)
     .await
     .map_err(|error| {
@@ -843,9 +970,13 @@ pub async fn list_users(
             "SELECT r.id, r.name, r.status \
              FROM user_role_assignments ura \
              JOIN roles r ON r.id = ura.role_id \
-             WHERE ura.user_id = $1 ORDER BY r.name",
+             WHERE ura.user_id = $1 \
+               AND ($2::uuid IS NULL OR r.cooperative_id IS NULL OR r.cooperative_id = $2) \
+               AND ($2::uuid IS NULL OR ura.cooperative_id IS NULL OR ura.cooperative_id = $2) \
+             ORDER BY r.name",
         )
         .bind(row.id)
+        .bind(scope)
         .fetch_all(pool)
         .await
         .map_err(|error| {
@@ -865,19 +996,26 @@ pub async fn list_users(
 
 pub async fn get_user_roles(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<Vec<UserRoleDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::USERS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::USERS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "user existence check failed");
-            ApiError::Internal
-        })?;
+    let scope = ctx.cooperative_id();
+    let exists: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM users WHERE id = $1 \
+         AND ($2::uuid IS NULL OR EXISTS( \
+             SELECT 1 FROM cooperative_memberships m \
+             WHERE m.user_id = $1 AND m.cooperative_id = $2))",
+    )
+    .bind(user_id)
+    .bind(scope)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "user existence check failed");
+        ApiError::Internal
+    })?;
     if exists.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -885,9 +1023,13 @@ pub async fn get_user_roles(
         "SELECT r.id, r.name, r.status \
          FROM user_role_assignments ura \
          JOIN roles r ON r.id = ura.role_id \
-         WHERE ura.user_id = $1 ORDER BY r.name",
+         WHERE ura.user_id = $1 \
+           AND ($2::uuid IS NULL OR r.cooperative_id IS NULL OR r.cooperative_id = $2) \
+           AND ($2::uuid IS NULL OR ura.cooperative_id IS NULL OR ura.cooperative_id = $2) \
+         ORDER BY r.name",
     )
     .bind(user_id)
+    .bind(scope)
     .fetch_all(pool)
     .await
     .map_err(|error| {
@@ -897,6 +1039,11 @@ pub async fn get_user_roles(
     Ok(Json(roles))
 }
 
+/// P1-c2b deferred: removing assignments can remove the last
+/// administration path — the global lock stays untouched here, and
+/// cooperative-scoped assignment writes additionally need the NULL-role
+/// question resolved (composite FK rejects coop-scoped assignments of
+/// NULL roles).
 pub async fn set_user_roles(
     State(state): State<AppState>,
     headers: HeaderMap,

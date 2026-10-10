@@ -107,7 +107,17 @@ fallback yalnızca `cooperatives` tamamen boşken (pre-tenant).
   davranışı; session-default B iken headerless→yine bootstrap.
 
 ### P1-c2 — RBAC Management API Scoping
-- `rbac.rs` 15 `require` → `require_business` + `BusinessAuth`.
+**P1-c2a uygulandı (M1-P1-006):** tüm okuma endpoint'leri
+(`list_permissions`, `list_roles`, `get_role`, `get_role_permissions`,
+`list_users`, `get_user_roles`) + güvenli mutasyonlar (`create_role`,
+`update_role`, `enable_role`, `enable_user`) `BusinessAuth` +
+`require_business`'e geçti; scoped görünürlük `(coop=$c OR coop IS NULL)`
+predicate'i, `create_role` artık `cooperative_id` yazar (API'den yeni NULL
+rol yazımı durdu), RBAC audit olayları `record_scoped` ile coop'a atfedilir.
+**P1-c2b'ye ertelenenler** (son-yönetici kilidi global iken dokunulmaz):
+`disable_role`, `PUT /roles/{id}/permissions`, `disable_user`,
+`PUT /users/{id}/roles` — global `require` + global guarded tx aynen.
+Kalan göç planı:
 - Rol listeleme/detay sorguları: `WHERE (cooperative_id = $c OR
   (cooperative_id IS NULL AND $c = bootstrap))` — NULL satırların
   bootstrap'a mantıksal atfedilmesi.
