@@ -134,8 +134,28 @@ pub mod catalog {
 pub const ADMINISTRATION_PERMISSION: &str = catalog::ROLES_MANAGE;
 
 /// Advisory-lock key for last-administration-path sensitive mutations.
-/// One fixed key serializes exactly these mutations database-wide.
+/// One fixed key serializes exactly these mutations database-wide —
+/// retained for the never-bootstrapped legacy lane only.
 const ADMIN_PATH_GUARD_LOCK_KEY: i64 = 0x4B_4F_4F_50_30_30_33; // "KOOP003"
+
+/// Advisory-lock namespace for cooperative-scoped administration-path
+/// guards (M1-P1-c2b, P1-K5, ADR-006 scoped locking).
+///
+/// The lock is taken in the two-int form
+/// `pg_advisory_xact_lock(NAMESPACE, hashtext(cooperative_id::text))`:
+/// each cooperative serializes its own administrator-continuity
+/// mutations while mutations in OTHER cooperatives are never blocked —
+/// Cooperative A's administrator changes can neither wait on nor affect
+/// Cooperative B's. The two-int form also cannot collide with the
+/// legacy bigint key above (PostgreSQL maps the two forms onto
+/// different lock spaces). A `hashtext` collision between two
+/// cooperative ids only adds serialization — it can never widen or
+/// narrow a scope's administrator count.
+///
+/// Public: the constant IS the locking contract — tests derive the
+/// same key to prove same-cooperative serialization and
+/// cross-cooperative independence.
+pub const ADMIN_PATH_GUARD_LOCK_NAMESPACE: i32 = 0x4B4F4F50; // "KOOP"
 
 /// Effective permission keys of a user: union over active roles only.
 pub async fn effective_permissions(
@@ -280,6 +300,15 @@ pub async fn require_in_cooperative(
 ///
 /// An `active` bootstrap membership is still mandatory — a NULL
 /// assignment cannot create access without it.
+///
+/// M1-P1-c2b hardening: the NULL-attribution arm is now ENCODED in the
+/// query itself — a `IS NULL` row only counts when `$2` resolves as the
+/// marker-consistent bootstrap cooperative at resolution time
+/// (installation_state + is_bootstrap flag agreement, same rule as
+/// `tenant::repo::resolve_bootstrap`). Even a bug that passed another
+/// cooperative's id here could never attribute legacy NULL rows to it:
+/// the database re-verifies the bootstrap claim instead of trusting the
+/// caller's parameter name.
 pub async fn effective_permissions_in_bootstrap(
     pool: &PgPool,
     user_id: Uuid,
@@ -289,14 +318,26 @@ pub async fn effective_permissions_in_bootstrap(
         "SELECT DISTINCT p.key \
          FROM user_role_assignments ura \
          JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
-                      AND (r.cooperative_id = $2 OR r.cooperative_id IS NULL) \
+                      AND (r.cooperative_id = $2 \
+                           OR (r.cooperative_id IS NULL AND EXISTS( \
+                               SELECT 1 FROM installation_state s \
+                               JOIN cooperatives c \
+                                 ON c.id = s.bootstrap_cooperative_id \
+                                AND c.is_bootstrap \
+                               WHERE s.bootstrap_cooperative_id = $2))) \
          JOIN cooperative_memberships m \
            ON m.cooperative_id = $2 AND m.user_id = ura.user_id \
           AND m.status = 'active' \
          JOIN role_permissions rp ON rp.role_id = r.id \
          JOIN permissions p ON p.id = rp.permission_id \
          WHERE ura.user_id = $1 \
-           AND (ura.cooperative_id = $2 OR ura.cooperative_id IS NULL)",
+           AND (ura.cooperative_id = $2 \
+                OR (ura.cooperative_id IS NULL AND EXISTS( \
+                    SELECT 1 FROM installation_state s \
+                    JOIN cooperatives c \
+                      ON c.id = s.bootstrap_cooperative_id \
+                     AND c.is_bootstrap \
+                    WHERE s.bootstrap_cooperative_id = $2)))",
     )
     .bind(user_id)
     .bind(bootstrap_id)
@@ -400,31 +441,90 @@ pub async fn require(
 /// hold an ACTIVE role containing ADMINISTRATION_PERMISSION. Used by
 /// the lockout guard AFTER applying the candidate mutation inside the
 /// transaction; a zero count aborts the mutation.
+///
+/// `cooperative_scope` selects the counting domain (M1-P1-c2b, P1-K5):
+///
+/// - `Some(coop)`: only paths EFFECTIVE in that cooperative count —
+///   scoped assignment + scoped role (plus NULL-attributed legacy rows,
+///   but ONLY when `coop` resolves as the marker-consistent bootstrap
+///   cooperative at count time — the restriction is encoded in the
+///   query, so a mistakenly supplied non-bootstrap scope can never
+///   inherit NULL paths), joined through an `active` membership in the
+///   same cooperative. Administrator continuity is therefore evaluated
+///   per cooperative: removing A's last path aborts while B's paths are
+///   neither counted nor disturbed. Identification is by the
+///   `roles.manage` permission key, never by role name (docs/26:
+///   "test scope, not only role names").
+/// - `None`: the legacy global count — reachable only in the
+///   never-bootstrapped lane where every row is necessarily
+///   NULL-attributed and global == scoped.
 pub async fn administration_path_count(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_scope: Option<Uuid>,
 ) -> Result<i64, sqlx::Error> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT ura.user_id) \
-         FROM user_role_assignments ura \
-         JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
-         JOIN role_permissions rp ON rp.role_id = r.id \
-         JOIN permissions p ON p.id = rp.permission_id AND p.key = $1 \
-         JOIN users u ON u.id = ura.user_id AND u.status = 'active'",
-    )
-    .bind(ADMINISTRATION_PERMISSION)
-    .fetch_one(tx.as_mut())
-    .await?;
+    // NULL-attribution arm shared by both sides of the scoped count:
+    // a NULL row only counts when $2 resolves as the bootstrap
+    // cooperative through the marker AND the flag (resolve_bootstrap
+    // semantics) — a non-bootstrap scope can never inherit it.
+    const BOOTSTRAP_ATTRIBUTION: &str = "\
+        EXISTS(SELECT 1 FROM installation_state s \
+               JOIN cooperatives c \
+                 ON c.id = s.bootstrap_cooperative_id AND c.is_bootstrap \
+               WHERE s.bootstrap_cooperative_id = $2)";
+    let count: i64 = match cooperative_scope {
+        Some(cooperative_id) => {
+            sqlx::query_scalar(&format!(
+                "SELECT count(DISTINCT ura.user_id) \
+             FROM user_role_assignments ura \
+             JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+                          AND (r.cooperative_id = $2 \
+                               OR (r.cooperative_id IS NULL AND {BOOTSTRAP_ATTRIBUTION})) \
+             JOIN role_permissions rp ON rp.role_id = r.id \
+             JOIN permissions p ON p.id = rp.permission_id AND p.key = $1 \
+             JOIN users u ON u.id = ura.user_id AND u.status = 'active' \
+             JOIN cooperative_memberships m \
+               ON m.user_id = ura.user_id AND m.cooperative_id = $2 \
+              AND m.status = 'active' \
+             WHERE ura.cooperative_id = $2 \
+                OR (ura.cooperative_id IS NULL AND {BOOTSTRAP_ATTRIBUTION})"
+            ))
+            .bind(ADMINISTRATION_PERMISSION)
+            .bind(cooperative_id)
+            .fetch_one(tx.as_mut())
+            .await?
+        }
+        None => {
+            sqlx::query_scalar(
+                "SELECT count(DISTINCT ura.user_id) \
+             FROM user_role_assignments ura \
+             JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+             JOIN role_permissions rp ON rp.role_id = r.id \
+             JOIN permissions p ON p.id = rp.permission_id AND p.key = $1 \
+             JOIN users u ON u.id = ura.user_id AND u.status = 'active'",
+            )
+            .bind(ADMINISTRATION_PERMISSION)
+            .fetch_one(tx.as_mut())
+            .await?
+        }
+    };
     Ok(count)
 }
 
 /// Serialize lockout-sensitive mutations: begin a transaction that
-/// holds the administration-path guard advisory lock until commit/rollback.
+/// holds the administration-path guard advisory lock until
+/// commit/rollback.
+///
+/// `cooperative_scope` selects the lock key (M1-P1-c2b):
+/// - `Some(coop)` → `pg_advisory_xact_lock("KOOP" namespace,
+///   hashtext(coop))` — mutations serialize per cooperative
+///   (ADR-006: scope locking to the affected resource);
+/// - `None` → the legacy single global key (never-bootstrapped lane).
 ///
 /// Caller pattern (STEP-003 §44 — database-enforced serialization):
 /// ```text
-/// let mut tx = begin_guarded_transaction(pool).await?;
+/// let mut tx = begin_guarded_transaction(pool, scope).await?;
 /// ...apply mutation via tx...
-/// if administration_path_count(&mut tx).await? == 0 {
+/// if administration_path_count(&mut tx, scope).await? == 0 {
 ///     tx.rollback().await?;
 ///     return Err(ApiError::LockoutPrevented);
 /// }
@@ -432,12 +532,24 @@ pub async fn administration_path_count(
 /// ```
 pub async fn begin_guarded_transaction(
     pool: &PgPool,
+    cooperative_scope: Option<Uuid>,
 ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(ADMIN_PATH_GUARD_LOCK_KEY)
-        .execute(tx.as_mut())
-        .await?;
+    match cooperative_scope {
+        Some(cooperative_id) => {
+            sqlx::query("SELECT pg_advisory_xact_lock($1::int4, hashtext($2::text))")
+                .bind(ADMIN_PATH_GUARD_LOCK_NAMESPACE)
+                .bind(cooperative_id.to_string())
+                .execute(tx.as_mut())
+                .await?;
+        }
+        None => {
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(ADMIN_PATH_GUARD_LOCK_KEY)
+                .execute(tx.as_mut())
+                .await?;
+        }
+    }
     Ok(tx)
 }
 

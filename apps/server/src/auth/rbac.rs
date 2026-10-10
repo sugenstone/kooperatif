@@ -22,19 +22,36 @@
 //! M1-P1-c2a — cooperative scoping: reads and the safe mutations
 //! (create/update/enable) run under `BusinessAuth` +
 //! `require_business`, resolving rows with verified bootstrap
-//! attribution: `cooperative_id IS NULL` rows count as
-//! bootstrap-attributed (same rule as `effective_permissions_in_bootstrap`),
-//! while another cooperative's rows are invisible (404, never 403 — no
-//! existence leak). New roles are written WITH `cooperative_id` — no
-//! new NULL role rows.
+//! attribution (see `scoped_visibility`), while another cooperative's
+//! rows are invisible (404, never 403 — no existence leak). New roles
+//! are written WITH `cooperative_id` — no new NULL role rows.
 //!
-//! Deferral (P1-c2b — M1-P1-006 §3): the four mutations that can remove
-//! the last administration path keep the UNCHANGED global `require` +
-//! global guarded transaction + global `administration_path_count`:
-//! `disable_role`, `PUT /roles/{id}/permissions`, `disable_user`,
-//! `PUT /users/{id}/roles`. Replacing the lock while scoped
-//! assignments are still half-migrated would weaken lockout safety;
-//! they migrate wholesale in P1-c2b (P1-K5).
+//! M1-P1-c2b — the four administration-path-sensitive mutations
+//! (`disable_role`, `PUT /roles/{id}/permissions`, `disable_user`,
+//! `PUT /users/{id}/roles`) are now migrated to the same verified
+//! context and additionally run inside a COOPERATIVE-SCOPED guarded
+//! transaction (P1-K5, ADR-006):
+//!
+//! - `authz::begin_guarded_transaction(pool, scope)` takes a
+//!   cooperative-keyed PostgreSQL advisory lock — administrator
+//!   continuity mutations serialize per cooperative; A never blocks or
+//!   counts B.
+//! - `authz::administration_path_count(tx, scope)` counts effective
+//!   `roles.manage` paths INSIDE the verified scope only (membership +
+//!   permission key, never role names), evaluated on the post-mutation
+//!   state in the same transaction.
+//! - `set_user_roles` writes `cooperative_id = scope` — the API no
+//!   longer creates NULL-cooperative assignments. NULL-attributed
+//!   legacy roles stay VISIBLE and manageable in the bootstrap scope
+//!   but are NOT assignable: the composite FK can only pair
+//!   scope-owned roles with scoped assignments. They become assignable
+//!   after the P1-c4 contract migration backfills them.
+//!
+//! Recovery procedure (documented, unchanged): if every administration
+//! path were ever lost, the CLI-only `grant-role` path (STEP-003 §14,
+//! audited as `bootstrap_role_granted`) restores one; its NULL-cooperative
+//! writes remain bootstrap-attributed and therefore effective in the
+//! bootstrap scope until the P1-d/--cooperative migration contracts it.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -175,28 +192,65 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::DependencyUnavailable)
 }
 
-/// All mutating RBAC handlers share this prologue: CSRF Origin check
-/// (layer 1) + synchronizer token check (layer 2) + the required
-/// permission (§47). $method is the literal HTTP method of the route.
+/// Verified-scope row visibility predicate (M1-P1-c2b mandatory audit).
 ///
-/// This GLOBAL variant remains for the lockout-sensitive mutations
-/// deferred to P1-c2b (see module doc) — it intentionally still uses
-/// the global `require` so no guard semantics change mid-migration.
-macro_rules! guarded_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $permission:expr, $method:expr) => {{
-        csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
-            .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
-            .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, $permission).await?;
-        pool_of($state)?
-    }};
+/// Produces the canonical SQL fragment for `col` — a `cooperative_id`
+/// column — against the verified scope bound at `$idx`. It encodes the
+/// bootstrap restriction INSIDE the query so even an incorrectly or
+/// maliciously supplied scope value can never widen visibility:
+///
+/// - `$idx` = bootstrap cooperative → the cooperative's own rows plus
+///   NULL-attributed legacy rows — NULL attribution fires only because
+///   the marker (`installation_state`) AND flag (`is_bootstrap`) agree
+///   that `$idx` IS the bootstrap cooperative at evaluation time;
+/// - `$idx` = any other cooperative → own rows only; a non-bootstrap
+///   scope can NEVER inherit NULL records;
+/// - `$idx` = NULL → unrestricted ONLY while the installation provably
+///   predates tenancy (zero cooperatives ⇒ every row is necessarily
+///   NULL anyway, so "unrestricted" ≡ the never-bootstrapped lane).
+///   After bootstrap a NULL scope matches nothing — a NULL scope can
+///   never mean unrestricted access once tenancy exists.
+///
+/// `col` is always a compile-time column reference from the call site;
+/// `idx` is the 1-based position of the scope bind. No user input ever
+/// enters the generated fragment.
+fn scoped_visibility(col: &str, idx: usize) -> String {
+    format!(
+        "({col} = ${i} \
+         OR ({col} IS NULL AND EXISTS(\
+             SELECT 1 FROM installation_state s \
+             JOIN cooperatives c \
+               ON c.id = s.bootstrap_cooperative_id AND c.is_bootstrap \
+             WHERE s.bootstrap_cooperative_id = ${i})) \
+         OR (${i}::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM cooperatives)))",
+        col = col,
+        i = idx
+    )
 }
 
-/// M1-P1-c2a — scoped variant for migrated RBAC handlers: same CSRF
-/// layers, but authorization resolves through `require_business`
-/// (bootstrap-pinned `BusinessAuth`, verified legacy attribution — never
-/// a raw header and never a global-permission fallback).
+/// Verified-scope USER visibility predicate (same audit rules as
+/// `scoped_visibility`). A user row is administrable in a cooperative
+/// scope iff it holds a membership row there — ownership evidence at
+/// any status; the ACTOR's active membership is enforced separately by
+/// `BusinessAuth` extraction and the resolver join. NULL scope ⇒ all
+/// users, but only while zero cooperatives exist (never-bootstrapped
+/// lane) — after bootstrap a NULL scope matches nothing.
+fn member_visibility(user_expr: &str, idx: usize) -> String {
+    format!(
+        "((${i}::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM cooperatives)) \
+         OR EXISTS(SELECT 1 FROM cooperative_memberships m \
+                   WHERE m.user_id = {u} AND m.cooperative_id = ${i}))",
+        u = user_expr,
+        i = idx
+    )
+}
+
+/// All mutating RBAC handlers share this prologue: CSRF Origin check
+/// (layer 1) + synchronizer token check (layer 2) + the required
+/// permission resolved through `require_business` (bootstrap-pinned
+/// `BusinessAuth`, verified legacy attribution — never a raw header and
+/// never a global-permission fallback). $method is the literal HTTP
+/// method of the route.
 macro_rules! guarded_business_mutation {
     ($state:expr, $headers:expr, $ctx:expr, $permission:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
@@ -226,24 +280,22 @@ pub async fn list_permissions(
     Ok(Json(rows))
 }
 
-/// Role visibility predicate (P1-c2a): `$scope` is
-/// `BusinessAuth::cooperative_id()`. In the bootstrap scope a role is
-/// visible iff it is bootstrap-owned OR NULL-attributed (legacy lane);
-/// in the never-bootstrapped lane scope is NULL and every (necessarily
-/// NULL) row matches — preserving the legacy global view. Deferred
-/// lockout-sensitive mutations pass `None` explicitly for the legacy
-/// unscoped view.
+/// Role load through the verified scope (`scoped_visibility`): in the
+/// bootstrap scope a role is visible iff it is bootstrap-owned OR
+/// NULL-attributed (legacy lane); in the never-bootstrapped lane scope
+/// is NULL and every (necessarily NULL) row matches — preserving the
+/// legacy global view.
 async fn load_role_with_permissions(
     pool: &sqlx::PgPool,
     role_id: Uuid,
     scope: Option<Uuid>,
 ) -> Result<Option<RoleDto>, sqlx::Error> {
-    let Some(role) = sqlx::query_as::<_, RoleRow>(
+    let Some(role) = sqlx::query_as::<_, RoleRow>(&format!(
         "SELECT id, name, description, status, created_at, updated_at \
          FROM roles \
-         WHERE id = $1 \
-           AND ($2::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $2)",
-    )
+         WHERE id = $1 AND {}",
+        scoped_visibility("cooperative_id", 2)
+    ))
     .bind(role_id)
     .bind(scope)
     .fetch_optional(pool)
@@ -277,11 +329,10 @@ pub async fn list_roles(
     authz::require_business(&state, &ctx, authz::catalog::ROLES_READ).await?;
     let pool = pool_of(&state)?;
     let scope = ctx.cooperative_id();
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM roles \
-         WHERE $1::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $1 \
-         ORDER BY name",
-    )
+    let ids: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT id FROM roles WHERE {} ORDER BY name",
+        scoped_visibility("cooperative_id", 1)
+    ))
     .bind(scope)
     .fetch_all(pool)
     .await
@@ -419,15 +470,15 @@ pub async fn update_role(
 
     let name = body.name.map(|n| n.trim().to_string());
     let description = body.description.map(|d| d.trim().to_string());
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar::<_, Uuid>(&format!(
         "UPDATE roles SET \
             name = COALESCE($2, name), \
             description = COALESCE($3, description), \
             updated_at = now() \
-         WHERE id = $1 \
-           AND ($4::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $4) \
+         WHERE id = $1 AND {} \
          RETURNING id",
-    )
+        scoped_visibility("cooperative_id", 4)
+    ))
     .bind(role_id)
     .bind(&name)
     .bind(&description)
@@ -468,22 +519,23 @@ pub async fn update_role(
     Ok(Json(dto))
 }
 
-/// P1-c2b deferred: disabling a role can remove the last
-/// administration path — the global lock stays untouched here.
+/// Disabling a role can remove the scope's last administration path —
+/// runs inside the cooperative-scoped guarded transaction (P1-c2b).
 pub async fn disable_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::ROLES_MANAGE,
         &axum::http::Method::POST
     );
-    set_role_status(pool, &auth, role_id, "disabled", None, None).await
+    let scope = ctx.cooperative_id();
+    set_role_status(pool, &ctx.auth, role_id, "disabled", scope).await
 }
 
 pub async fn enable_role(
@@ -500,39 +552,38 @@ pub async fn enable_role(
         &axum::http::Method::POST
     );
     let scope = ctx.cooperative_id();
-    set_role_status(pool, &ctx.auth, role_id, "active", scope, scope).await
+    set_role_status(pool, &ctx.auth, role_id, "active", scope).await
 }
 
-/// `role_scope` limits which role rows the mutation may touch (the
-/// verified-attribution predicate); `audit_scope` attributes the audit
-/// event. Both are `None` for the deferred legacy-global path
-/// (P1-c2b) — `None` is NOT the never-bootstrapped scope here, it is
-/// the unchanged global view.
+/// `scope` limits which role rows the mutation may touch (the verified
+/// visibility predicate), selects the cooperative-scoped advisory lock
+/// and administration-path count, and attributes the audit event. It is
+/// `None` only in the never-bootstrapped lane, where the legacy global
+/// lock/count/view apply unchanged.
 async fn set_role_status(
     pool: &sqlx::PgPool,
     auth: &CurrentAuth,
     role_id: Uuid,
     status: &str,
-    role_scope: Option<Uuid>,
-    audit_scope: Option<Uuid>,
+    scope: Option<Uuid>,
 ) -> Result<Response, ApiError> {
-    // Guarded transaction: disabling a role can remove the last
-    // administration path (§28/§44).
-    let mut tx = authz::begin_guarded_transaction(pool)
+    // Scoped guarded transaction: disabling a role can remove the
+    // cooperative's last administration path (§28/§44, P1-K5).
+    let mut tx = authz::begin_guarded_transaction(pool, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "guard tx failed");
             ApiError::Internal
         })?;
 
-    let updated = sqlx::query(
+    let updated = sqlx::query(&format!(
         "UPDATE roles SET status = $2, updated_at = now() \
-         WHERE id = $1 AND status <> $2 \
-           AND ($3::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $3)",
-    )
+         WHERE id = $1 AND status <> $2 AND {}",
+        scoped_visibility("cooperative_id", 3)
+    ))
     .bind(role_id)
     .bind(status)
-    .bind(role_scope)
+    .bind(scope)
     .execute(tx.as_mut())
     .await
     .map_err(|error| {
@@ -546,12 +597,12 @@ async fn set_role_status(
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        let exists: Option<bool> = sqlx::query_scalar(
-            "SELECT TRUE FROM roles WHERE id = $1 \
-             AND ($2::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $2)",
-        )
+        let exists: Option<bool> = sqlx::query_scalar(&format!(
+            "SELECT TRUE FROM roles WHERE id = $1 AND {}",
+            scoped_visibility("cooperative_id", 2)
+        ))
         .bind(role_id)
-        .bind(role_scope)
+        .bind(scope)
         .fetch_optional(pool)
         .await
         .map_err(|error| {
@@ -565,7 +616,7 @@ async fn set_role_status(
     }
 
     if status == "disabled"
-        && authz::administration_path_count(&mut tx)
+        && authz::administration_path_count(&mut tx, scope)
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "admin path count failed");
@@ -577,7 +628,7 @@ async fn set_role_status(
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        audit_lockout_prevention(pool, auth, "role_disable", role_id).await;
+        audit_lockout_prevention(pool, auth, "role_disable", role_id, scope).await;
         return Err(ApiError::LockoutPrevented);
     }
 
@@ -593,7 +644,7 @@ async fn set_role_status(
         } else {
             SecurityEventType::RoleEnabled
         },
-        audit_scope,
+        scope,
         Some(auth.user_id),
         None,
         serde_json::json!({ "role_id": role_id }),
@@ -603,22 +654,25 @@ async fn set_role_status(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// P1-c2b deferred: disabling a user can remove the last
-/// administration path — the global lock stays untouched here.
+/// Disabling a user can remove the scope's last administration path —
+/// runs inside the cooperative-scoped guarded transaction (P1-c2b).
+/// The target must hold a membership row in the verified scope — a
+/// user who only belongs to another cooperative answers 404.
 pub async fn disable_user(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(user_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::USERS_MANAGE,
         &axum::http::Method::POST
     );
-    set_user_status(pool, &auth, user_id, "disabled", None, None).await
+    let scope = ctx.cooperative_id();
+    set_user_status(pool, &ctx.auth, user_id, "disabled", scope).await
 }
 
 pub async fn enable_user(
@@ -635,43 +689,40 @@ pub async fn enable_user(
         &axum::http::Method::POST
     );
     let scope = ctx.cooperative_id();
-    set_user_status(pool, &ctx.auth, user_id, "active", scope, scope).await
+    set_user_status(pool, &ctx.auth, user_id, "active", scope).await
 }
 
-/// `member_scope` limits which target users the mutation may touch to
-/// members of the verified cooperative; `audit_scope` attributes the
-/// audit event. Both are `None` for the deferred legacy-global path
-/// (P1-c2b) — unchanged global behavior, NOT the never-bootstrapped
-/// scope.
+/// `scope` limits which target users the mutation may touch to
+/// membership-holders of the verified cooperative, selects the
+/// cooperative-scoped advisory lock and administration-path count, and
+/// attributes the audit event. `None` only in the never-bootstrapped
+/// lane (legacy global semantics).
 async fn set_user_status(
     pool: &sqlx::PgPool,
     auth: &CurrentAuth,
     user_id: Uuid,
     status: &str,
-    member_scope: Option<Uuid>,
-    audit_scope: Option<Uuid>,
+    scope: Option<Uuid>,
 ) -> Result<Response, ApiError> {
-    // Guarded transaction: disabling a user can remove the last
-    // administration path (§28/§44) — the count already excludes
-    // non-active users, so the check runs inside the same tx that
-    // performs the status change.
-    let mut tx = authz::begin_guarded_transaction(pool)
+    // Scoped guarded transaction: disabling a user can remove the
+    // cooperative's last administration path (§28/§44, P1-K5) — the
+    // count already excludes non-active users, so the check runs inside
+    // the same tx that performs the status change.
+    let mut tx = authz::begin_guarded_transaction(pool, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "guard tx failed");
             ApiError::Internal
         })?;
 
-    let updated = sqlx::query(
+    let updated = sqlx::query(&format!(
         "UPDATE users SET status = $2, updated_at = now() \
-         WHERE id = $1 AND status <> $2 \
-           AND ($3::uuid IS NULL OR EXISTS( \
-               SELECT 1 FROM cooperative_memberships m \
-               WHERE m.user_id = $1 AND m.cooperative_id = $3))",
-    )
+         WHERE id = $1 AND status <> $2 AND {}",
+        member_visibility("$1", 3)
+    ))
     .bind(user_id)
     .bind(status)
-    .bind(member_scope)
+    .bind(scope)
     .execute(tx.as_mut())
     .await
     .map_err(|error| {
@@ -685,14 +736,12 @@ async fn set_user_status(
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        let exists: Option<bool> = sqlx::query_scalar(
-            "SELECT TRUE FROM users WHERE id = $1 \
-             AND ($2::uuid IS NULL OR EXISTS( \
-                 SELECT 1 FROM cooperative_memberships m \
-                 WHERE m.user_id = $1 AND m.cooperative_id = $2))",
-        )
+        let exists: Option<bool> = sqlx::query_scalar(&format!(
+            "SELECT TRUE FROM users WHERE id = $1 AND {}",
+            member_visibility("$1", 2)
+        ))
         .bind(user_id)
-        .bind(member_scope)
+        .bind(scope)
         .fetch_optional(pool)
         .await
         .map_err(|error| {
@@ -723,7 +772,7 @@ async fn set_user_status(
     }
 
     if status == "disabled"
-        && authz::administration_path_count(&mut tx)
+        && authz::administration_path_count(&mut tx, scope)
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "admin path count failed");
@@ -735,7 +784,7 @@ async fn set_user_status(
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        audit_lockout_prevention(pool, auth, "user_disable", user_id).await;
+        audit_lockout_prevention(pool, auth, "user_disable", user_id, scope).await;
         return Err(ApiError::LockoutPrevented);
     }
 
@@ -751,7 +800,7 @@ async fn set_user_status(
         } else {
             SecurityEventType::UserEnabled
         },
-        audit_scope,
+        scope,
         Some(auth.user_id),
         None,
         serde_json::json!({ "user_id": user_id }),
@@ -771,10 +820,10 @@ pub async fn get_role_permissions(
     let scope = ctx.cooperative_id();
     // Scoped existence first — a foreign role must answer 404 without
     // touching its permission rows.
-    let exists: Option<bool> = sqlx::query_scalar(
-        "SELECT TRUE FROM roles WHERE id = $1 \
-         AND ($2::uuid IS NULL OR cooperative_id IS NULL OR cooperative_id = $2)",
-    )
+    let exists: Option<bool> = sqlx::query_scalar(&format!(
+        "SELECT TRUE FROM roles WHERE id = $1 AND {}",
+        scoped_visibility("cooperative_id", 2)
+    ))
     .bind(role_id)
     .bind(scope)
     .fetch_optional(pool)
@@ -803,22 +852,25 @@ pub async fn get_role_permissions(
     Ok(Json(keys))
 }
 
-/// P1-c2b deferred: stripping the administration permission can remove
-/// the last administration path — the global lock stays untouched here.
+/// Stripping the administration permission can remove the scope's last
+/// administration path — cooperative-scoped guarded transaction
+/// (P1-c2b). The role must be visible in the verified scope (404 for
+/// foreign rows — never a cross-cooperative mutation target).
 pub async fn set_role_permissions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(role_id): Path<Uuid>,
     Json(body): Json<PermissionSetRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::ROLES_MANAGE,
         &axum::http::Method::PUT
     );
+    let scope = ctx.cooperative_id();
 
     // Only known catalog keys are accepted: application owns the
     // permission namespace (§7/§26). Duplicates in the request collapse
@@ -831,21 +883,25 @@ pub async fn set_role_permissions(
         }
     }
 
-    let mut tx = authz::begin_guarded_transaction(pool)
+    let mut tx = authz::begin_guarded_transaction(pool, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "guard tx failed");
             ApiError::Internal
         })?;
 
-    let exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM roles WHERE id = $1")
-        .bind(role_id)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "role existence check failed");
-            ApiError::Internal
-        })?;
+    let exists: Option<bool> = sqlx::query_scalar(&format!(
+        "SELECT TRUE FROM roles WHERE id = $1 AND {}",
+        scoped_visibility("cooperative_id", 2)
+    ))
+    .bind(role_id)
+    .bind(scope)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "role existence check failed");
+        ApiError::Internal
+    })?;
     if exists.is_none() {
         tx.rollback().await.map_err(|error| {
             tracing::error!(error = %error, "rollback failed");
@@ -901,8 +957,8 @@ pub async fn set_role_permissions(
     }
 
     // Lockout guard: stripping the administration permission from the
-    // last administrative role must not be possible (§28).
-    if authz::administration_path_count(&mut tx)
+    // scope's last administrative role must not be possible (§28, P1-K5).
+    if authz::administration_path_count(&mut tx, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "admin path count failed");
@@ -914,7 +970,7 @@ pub async fn set_role_permissions(
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        audit_lockout_prevention(pool, &auth, "role_permissions_change", role_id).await;
+        audit_lockout_prevention(pool, &ctx.auth, "role_permissions_change", role_id, scope).await;
         return Err(ApiError::LockoutPrevented);
     }
 
@@ -923,10 +979,11 @@ pub async fn set_role_permissions(
         ApiError::Internal
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::RolePermissionsChanged,
-        Some(auth.user_id),
+        scope,
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "role_id": role_id,
@@ -935,7 +992,7 @@ pub async fn set_role_permissions(
         }),
     )
     .await;
-    tracing::info!(outcome = "role_permissions_changed", role_id = %role_id, count = requested.len(), actor = %auth.user_id);
+    tracing::info!(outcome = "role_permissions_changed", role_id = %role_id, count = requested.len(), actor = %ctx.auth.user_id);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -949,13 +1006,12 @@ pub async fn list_users(
     // In a cooperative scope only members are administrable; the
     // never-bootstrapped lane (scope NULL) keeps the legacy all-users
     // view — no cooperative exists to check membership against.
-    let rows = sqlx::query_as::<_, UserListRow>(
+    let rows = sqlx::query_as::<_, UserListRow>(&format!(
         "SELECT id, username, display_name, status FROM users u \
-         WHERE $1::uuid IS NULL OR EXISTS( \
-             SELECT 1 FROM cooperative_memberships m \
-             WHERE m.user_id = u.id AND m.cooperative_id = $1) \
+         WHERE {} \
          ORDER BY u.display_name, u.username",
-    )
+        member_visibility("u.id", 1)
+    ))
     .bind(scope)
     .fetch_all(pool)
     .await
@@ -966,15 +1022,17 @@ pub async fn list_users(
 
     let mut users = Vec::with_capacity(rows.len());
     for row in rows {
-        let roles = sqlx::query_as::<_, UserRoleDto>(
+        let roles = sqlx::query_as::<_, UserRoleDto>(&format!(
             "SELECT r.id, r.name, r.status \
              FROM user_role_assignments ura \
              JOIN roles r ON r.id = ura.role_id \
              WHERE ura.user_id = $1 \
-               AND ($2::uuid IS NULL OR r.cooperative_id IS NULL OR r.cooperative_id = $2) \
-               AND ($2::uuid IS NULL OR ura.cooperative_id IS NULL OR ura.cooperative_id = $2) \
+               AND {} \
+               AND {} \
              ORDER BY r.name",
-        )
+            scoped_visibility("r.cooperative_id", 2),
+            scoped_visibility("ura.cooperative_id", 2)
+        ))
         .bind(row.id)
         .bind(scope)
         .fetch_all(pool)
@@ -1002,12 +1060,10 @@ pub async fn get_user_roles(
     authz::require_business(&state, &ctx, authz::catalog::USERS_READ).await?;
     let pool = pool_of(&state)?;
     let scope = ctx.cooperative_id();
-    let exists: Option<bool> = sqlx::query_scalar(
-        "SELECT TRUE FROM users WHERE id = $1 \
-         AND ($2::uuid IS NULL OR EXISTS( \
-             SELECT 1 FROM cooperative_memberships m \
-             WHERE m.user_id = $1 AND m.cooperative_id = $2))",
-    )
+    let exists: Option<bool> = sqlx::query_scalar(&format!(
+        "SELECT TRUE FROM users WHERE id = $1 AND {}",
+        member_visibility("$1", 2)
+    ))
     .bind(user_id)
     .bind(scope)
     .fetch_optional(pool)
@@ -1019,15 +1075,17 @@ pub async fn get_user_roles(
     if exists.is_none() {
         return Err(ApiError::NotFound);
     }
-    let roles = sqlx::query_as::<_, UserRoleDto>(
+    let roles = sqlx::query_as::<_, UserRoleDto>(&format!(
         "SELECT r.id, r.name, r.status \
          FROM user_role_assignments ura \
          JOIN roles r ON r.id = ura.role_id \
          WHERE ura.user_id = $1 \
-           AND ($2::uuid IS NULL OR r.cooperative_id IS NULL OR r.cooperative_id = $2) \
-           AND ($2::uuid IS NULL OR ura.cooperative_id IS NULL OR ura.cooperative_id = $2) \
+           AND {} \
+           AND {} \
          ORDER BY r.name",
-    )
+        scoped_visibility("r.cooperative_id", 2),
+        scoped_visibility("ura.cooperative_id", 2)
+    ))
     .bind(user_id)
     .bind(scope)
     .fetch_all(pool)
@@ -1039,42 +1097,53 @@ pub async fn get_user_roles(
     Ok(Json(roles))
 }
 
-/// P1-c2b deferred: removing assignments can remove the last
-/// administration path — the global lock stays untouched here, and
-/// cooperative-scoped assignment writes additionally need the NULL-role
-/// question resolved (composite FK rejects coop-scoped assignments of
-/// NULL roles).
+/// Replacing a user's role set can remove the scope's last
+/// administration path — cooperative-scoped guarded transaction
+/// (P1-c2b). The target must hold a membership row in the verified
+/// scope (404 otherwise — cross-cooperative users are invisible); new
+/// assignments are written WITH `cooperative_id = scope`, so the API
+/// never creates NULL-cooperative assignments.
 pub async fn set_user_roles(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(user_id): Path<Uuid>,
     Json(body): Json<UserRoleSetRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = guarded_mutation!(
+    let pool = guarded_business_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::USERS_MANAGE,
         &axum::http::Method::PUT
     );
+    let scope = ctx.cooperative_id();
     let requested: std::collections::BTreeSet<Uuid> = body.role_ids.into_iter().collect();
 
-    let mut tx = authz::begin_guarded_transaction(pool)
+    let mut tx = authz::begin_guarded_transaction(pool, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "guard tx failed");
             ApiError::Internal
         })?;
 
-    let target_exists: Option<bool> = sqlx::query_scalar("SELECT TRUE FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "user existence check failed");
-            ApiError::Internal
-        })?;
+    // Target ownership: the user must hold a membership row in the
+    // verified scope (any status — the composite FK anchors on row
+    // existence; the ACTOR's active membership is already enforced by
+    // BusinessAuth + the resolver join). Users who belong only to
+    // another cooperative are invisible (404, never a mutation target).
+    let target_exists: Option<bool> = sqlx::query_scalar(&format!(
+        "SELECT TRUE FROM users WHERE id = $1 AND {}",
+        member_visibility("$1", 2)
+    ))
+    .bind(user_id)
+    .bind(scope)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "user existence check failed");
+        ApiError::Internal
+    })?;
     if target_exists.is_none() {
         tx.rollback().await.map_err(|error| {
             tracing::error!(error = %error, "rollback failed");
@@ -1083,45 +1152,60 @@ pub async fn set_user_roles(
         return Err(ApiError::NotFound);
     }
 
-    // All requested roles must exist; assigning a disabled role is a
-    // validation error (policy: disabled roles grant nothing —
-    // assignment would be misleading). Removal of disabled roles is
-    // allowed.
+    // All requested roles must exist and be assignable in the verified
+    // scope. Assigning a disabled role is a validation error (policy:
+    // disabled roles grant nothing — assignment would be misleading).
+    // In a cooperative scope the role must be OWNED by that
+    // cooperative: NULL-attributed legacy roles stay manageable but are
+    // not assignable until the contract migration backfills them
+    // (P1-c4) — the composite FK could only pair them with a NULL
+    // assignment, and this API no longer writes NULL rows. Unknown,
+    // foreign-owned and NULL-attributed roles all answer the same
+    // validation code — the response never distinguishes which bucket
+    // failed (no cross-cooperative existence leak).
     for role_id in &requested {
-        let status: Option<String> = sqlx::query_scalar("SELECT status FROM roles WHERE id = $1")
-            .bind(role_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "role status read failed");
+        let role_row: Option<(String, Option<Uuid>)> =
+            sqlx::query_as("SELECT status, cooperative_id FROM roles WHERE id = $1")
+                .bind(role_id)
+                .fetch_optional(tx.as_mut())
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = %error, "role status read failed");
+                    ApiError::Internal
+                })?;
+        let reject = match role_row {
+            None => Some("unknown_role_rejected"),
+            Some((ref status, _)) if status != "active" => {
+                Some("disabled_role_assignment_rejected")
+            }
+            Some((_, role_coop)) => match (scope, role_coop) {
+                (Some(scope_id), Some(owner)) if owner == scope_id => None,
+                (None, _) => None, // never-bootstrapped lane: legacy rule
+                _ => Some("out_of_scope_role_rejected"),
+            },
+        };
+        if let Some(outcome) = reject {
+            tx.rollback().await.map_err(|error| {
+                tracing::error!(error = %error, "rollback failed");
                 ApiError::Internal
             })?;
-        match status {
-            None => {
-                tx.rollback().await.map_err(|error| {
-                    tracing::error!(error = %error, "rollback failed");
-                    ApiError::Internal
-                })?;
-                tracing::info!(outcome = "unknown_role_rejected", role_id = %role_id);
-                return Err(ApiError::ValidationFailed);
-            }
-            Some(status) if status != "active" => {
-                tx.rollback().await.map_err(|error| {
-                    tracing::error!(error = %error, "rollback failed");
-                    ApiError::Internal
-                })?;
-                tracing::info!(outcome = "disabled_role_assignment_rejected", role_id = %role_id);
-                return Err(ApiError::ValidationFailed);
-            }
-            Some(_) => {}
+            tracing::info!(outcome, role_id = %role_id);
+            return Err(ApiError::ValidationFailed);
         }
     }
 
-    let before: Vec<(Uuid, String)> = sqlx::query_as(
+    // Before-state restricted to the verified scope: assignments owned
+    // by another cooperative are neither reported nor touched.
+    let before: Vec<(Uuid, String)> = sqlx::query_as(&format!(
         "SELECT r.id, r.name FROM user_role_assignments ura \
-         JOIN roles r ON r.id = ura.role_id WHERE ura.user_id = $1 ORDER BY r.name",
-    )
+         JOIN roles r ON r.id = ura.role_id \
+         WHERE ura.user_id = $1 AND {} AND {} \
+         ORDER BY r.name",
+        scoped_visibility("ura.cooperative_id", 2),
+        scoped_visibility("r.cooperative_id", 2)
+    ))
     .bind(user_id)
+    .bind(scope)
     .fetch_all(tx.as_mut())
     .await
     .map_err(|error| {
@@ -1129,31 +1213,39 @@ pub async fn set_user_roles(
         ApiError::Internal
     })?;
 
-    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+    sqlx::query(&format!(
+        "DELETE FROM user_role_assignments WHERE user_id = $1 AND {}",
+        scoped_visibility("cooperative_id", 2)
+    ))
+    .bind(user_id)
+    .bind(scope)
+    .execute(tx.as_mut())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "assignment clear failed");
+        ApiError::Internal
+    })?;
+    for role_id in &requested {
+        sqlx::query(
+            "INSERT INTO user_role_assignments (user_id, role_id, cooperative_id) \
+             VALUES ($1, $2, $3)",
+        )
         .bind(user_id)
+        .bind(role_id)
+        .bind(scope)
         .execute(tx.as_mut())
         .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "assignment clear failed");
-            ApiError::Internal
+        .map_err(|error| match error {
+            sqlx::Error::Database(db_err) if db_err.is_unique_violation() => ApiError::Conflict,
+            other => {
+                tracing::error!(error = %other, "assignment insert failed");
+                ApiError::Internal
+            }
         })?;
-    for role_id in &requested {
-        sqlx::query("INSERT INTO user_role_assignments (user_id, role_id) VALUES ($1, $2)")
-            .bind(user_id)
-            .bind(role_id)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|error| match error {
-                sqlx::Error::Database(db_err) if db_err.is_unique_violation() => ApiError::Conflict,
-                other => {
-                    tracing::error!(error = %other, "assignment insert failed");
-                    ApiError::Internal
-                }
-            })?;
     }
 
-    // Lockout guard: removing the last administrative user's path.
-    if authz::administration_path_count(&mut tx)
+    // Lockout guard: removing the scope's last administrative path.
+    if authz::administration_path_count(&mut tx, scope)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "admin path count failed");
@@ -1165,7 +1257,7 @@ pub async fn set_user_roles(
             tracing::error!(error = %error, "rollback failed");
             ApiError::Internal
         })?;
-        audit_lockout_prevention(pool, &auth, "user_roles_change", user_id).await;
+        audit_lockout_prevention(pool, &ctx.auth, "user_roles_change", user_id, scope).await;
         return Err(ApiError::LockoutPrevented);
     }
 
@@ -1174,14 +1266,16 @@ pub async fn set_user_roles(
         ApiError::Internal
     })?;
 
-    // Audited as explicit assigned/unassigned deltas (durable history).
+    // Audited as explicit assigned/unassigned deltas (durable history),
+    // attributed to the verified cooperative.
     let before_ids: std::collections::BTreeSet<Uuid> = before.iter().map(|(id, _)| *id).collect();
     for (role_id, role_name) in &before {
         if !requested.contains(role_id) {
-            audit::record(
+            audit::record_scoped(
                 pool,
                 SecurityEventType::RoleUnassigned,
-                Some(auth.user_id),
+                scope,
+                Some(ctx.auth.user_id),
                 None,
                 serde_json::json!({
                     "target_user_id": user_id,
@@ -1199,10 +1293,11 @@ pub async fn set_user_roles(
                 .fetch_one(pool)
                 .await
                 .unwrap_or_else(|_| "bilinmeyen".to_string());
-            audit::record(
+            audit::record_scoped(
                 pool,
                 SecurityEventType::RoleAssigned,
-                Some(auth.user_id),
+                scope,
+                Some(ctx.auth.user_id),
                 None,
                 serde_json::json!({
                     "target_user_id": user_id,
@@ -1213,7 +1308,7 @@ pub async fn set_user_roles(
             .await;
         }
     }
-    tracing::info!(outcome = "user_roles_set", target_user = %user_id, count = requested.len(), actor = %auth.user_id);
+    tracing::info!(outcome = "user_roles_set", target_user = %user_id, count = requested.len(), actor = %ctx.auth.user_id);
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1223,11 +1318,13 @@ async fn audit_lockout_prevention(
     auth: &CurrentAuth,
     operation: &str,
     target_id: Uuid,
+    scope: Option<Uuid>,
 ) {
-    tracing::warn!(outcome = "lockout_prevented", operation, target = %target_id, actor = %auth.user_id);
-    audit::record(
+    tracing::warn!(outcome = "lockout_prevented", operation, target = %target_id, actor = %auth.user_id, cooperative_id = ?scope);
+    audit::record_scoped(
         pool,
         SecurityEventType::LockoutPrevented,
+        scope,
         Some(auth.user_id),
         None,
         serde_json::json!({ "operation": operation, "target_id": target_id }),

@@ -12,9 +12,12 @@
 //!   - audit events are cooperative-attributed;
 //!   - B-scoped actors get nothing: not bootstrap members → 403 at
 //!     extraction/gate;
-//!   - deferred lockout-sensitive mutations (disable_role, PUT
-//!     permissions, disable_user, PUT user-roles) keep the global
-//!     guard untouched (P1-c2b).
+//!   - M1-P1-c2b: the four administration-path-sensitive mutations
+//!     (disable_role, PUT permissions, disable_user, PUT user-roles)
+//!     run under the same verified scope with a cooperative-scoped
+//!     advisory lock + cooperative-scoped administrator-continuity
+//!     count; assignments are written WITH cooperative_id — the API
+//!     never creates NULL-cooperative rows.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -746,12 +749,12 @@ async fn user_listing_and_roles_are_scope_limited() {
 }
 
 #[tokio::test]
-async fn deferred_mutations_keep_their_global_guard() {
+async fn migrated_mutations_keep_last_admin_protection() {
     let Some(test) = setup().await else { return };
     bootstrap_admin(&test.pool, "a_admin6").await;
     let (cookie, csrf) = login(&test.app, test.peer, "a_admin6").await;
 
-    // PUT /roles/{id}/permissions stays on the GLOBAL path (P1-c2b):
+    // P1-c2b: PUT /roles/{id}/permissions now runs on the SCOPED path —
     // a bootstrap admin still uses it, and stripping the last
     // administration permission is still lockout-prevented.
     let target: Uuid =
@@ -775,7 +778,7 @@ async fn deferred_mutations_keep_their_global_guard() {
         "lockout guard must still prevent last-admin stripping"
     );
 
-    // disable_user likewise keeps the global guard: disabling the only
+    // disable_user likewise runs the scoped guard: disabling the only
     // administrator is refused.
     let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'a_admin6'")
         .fetch_one(&test.pool)
@@ -795,6 +798,977 @@ async fn deferred_mutations_keep_their_global_guard() {
         .0,
         StatusCode::CONFLICT
     );
+
+    test.cleanup().await;
+}
+
+// ------------------------------------------------------------------
+// M1-P1-007 (P1-c2b) — critical RBAC mutations + cooperative-scoped
+// administrator continuity.
+// ------------------------------------------------------------------
+
+/// Look up the bootstrap-scoped administrator count the way
+/// `administration_path_count(scope)` computes it (independent SQL —
+/// test asserts against its own re-derivation, never the app's).
+async fn scoped_admin_count(pool: &PgPool, coop: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(DISTINCT ura.user_id) \
+         FROM user_role_assignments ura \
+         JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+                      AND r.cooperative_id = $1 \
+         JOIN role_permissions rp ON rp.role_id = r.id \
+         JOIN permissions p ON p.id = rp.permission_id AND p.key = 'roles.manage' \
+         JOIN users u ON u.id = ura.user_id AND u.status = 'active' \
+         JOIN cooperative_memberships m \
+           ON m.user_id = ura.user_id AND m.cooperative_id = $1 \
+          AND m.status = 'active' \
+         WHERE ura.cooperative_id = $1",
+    )
+    .bind(coop)
+    .fetch_one(pool)
+    .await
+    .expect("scoped count")
+}
+
+/// Every one of the four critical mutations refuses to remove the
+/// verified scope's last administration path (409 lockout_prevented),
+/// and the refusal is audited to the cooperative.
+#[tokio::test]
+async fn scoped_lockout_covers_all_four_mutations() {
+    let Some(test) = setup().await else { return };
+    let (admin, coop) = bootstrap_admin(&test.pool, "son_yonetici").await;
+    let (cookie, csrf) = login(&test.app, test.peer, "son_yonetici").await;
+    let admin_role: Uuid =
+        sqlx::query_scalar("SELECT role_id FROM user_role_assignments WHERE user_id = $1")
+            .bind(admin)
+            .fetch_one(&test.pool)
+            .await
+            .expect("admin role");
+
+    let coop_str = coop.to_string();
+    for (method, path, body) in [
+        (
+            Method::PUT,
+            format!("/api/users/{admin}/roles"),
+            Some(json!({ "roleIds": [] })),
+        ),
+        (Method::POST, format!("/api/users/{admin}/disable"), None),
+        (
+            Method::POST,
+            format!("/api/roles/{admin_role}/disable"),
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/api/roles/{admin_role}/permissions"),
+            Some(json!({ "permissions": ["users.read"] })),
+        ),
+    ] {
+        let (status, body) = request_json(
+            &test,
+            method,
+            &path,
+            &cookie,
+            Some(&csrf),
+            Some(&coop_str),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {body}");
+        assert!(
+            body.contains("lockout_prevented"),
+            "{path} must fail with lockout_prevented: {body}"
+        );
+    }
+
+    // All four refusals are audited AND cooperative-attributed.
+    let (events, attributed): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE cooperative_id = $1) \
+         FROM security_events WHERE event_type = 'lockout_prevented'",
+    )
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .expect("audit");
+    assert_eq!(events, 4);
+    assert_eq!(attributed, 4, "lockout audit must carry the scope");
+
+    // State untouched: role + assignment + user survive.
+    assert_eq!(scoped_admin_count(&test.pool, coop).await, 1);
+
+    test.cleanup().await;
+}
+
+/// Cooperative-scoped counting (P1-K5): another cooperative's
+/// administrator path must NEVER satisfy this scope's lockout guard.
+#[tokio::test]
+async fn other_cooperative_admin_path_does_not_satisfy_lockout() {
+    let Some(test) = setup().await else { return };
+    let (admin, coop) = bootstrap_admin(&test.pool, "a_tek_admin").await;
+
+    // Cooperative B has its own administrator — globally TWO
+    // administration paths exist, but only ONE in the bootstrap scope.
+    let b_admin = create_user(&test.pool, "b_yonetici").await;
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+    repo::add_member(&test.pool, "B Kooperatifi", b_admin, None)
+        .await
+        .expect("B membership");
+    grant_role(
+        &test.pool,
+        b_admin,
+        "b-admin-rol",
+        Some(coop_b),
+        ADMIN_PERMS,
+    )
+    .await;
+    assert_eq!(scoped_admin_count(&test.pool, coop).await, 1);
+    assert_eq!(scoped_admin_count(&test.pool, coop_b).await, 1);
+
+    let (cookie, csrf) = login(&test.app, test.peer, "a_tek_admin").await;
+    let admin_role: Uuid =
+        sqlx::query_scalar("SELECT role_id FROM user_role_assignments WHERE user_id = $1")
+            .bind(admin)
+            .fetch_one(&test.pool)
+            .await
+            .expect("admin role");
+
+    // Under the OLD global count this would have been allowed; the
+    // scoped guard must still refuse every variant.
+    for (method, path, body) in [
+        (
+            Method::PUT,
+            format!("/api/users/{admin}/roles"),
+            Some(json!({ "roleIds": [] })),
+        ),
+        (Method::POST, format!("/api/users/{admin}/disable"), None),
+        (
+            Method::POST,
+            format!("/api/roles/{admin_role}/disable"),
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/api/roles/{admin_role}/permissions"),
+            Some(json!({ "permissions": ["users.read"] })),
+        ),
+    ] {
+        let (status, body) =
+            request_json(&test, method, &path, &cookie, Some(&csrf), None, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {body}");
+    }
+
+    // B's administrator was never disturbed.
+    assert_eq!(scoped_admin_count(&test.pool, coop_b).await, 1);
+    assert_eq!(scoped_admin_count(&test.pool, coop).await, 1);
+
+    test.cleanup().await;
+}
+
+/// Cross-cooperative mutation attempts: a role or user owned only by
+/// cooperative B is invisible to the bootstrap scope (404 for every
+/// critical verb — existence never leaks); a B-owned role id in an
+/// assignment payload is rejected (400, same code as unknown).
+#[tokio::test]
+async fn cross_cooperative_targets_are_invisible_to_mutations() {
+    let Some(test) = setup().await else { return };
+    bootstrap_admin(&test.pool, "a_admin7").await;
+    let (cookie, csrf) = login(&test.app, test.peer, "a_admin7").await;
+
+    let b_user = create_user(&test.pool, "b_kullanici").await;
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+    repo::add_member(&test.pool, "B Kooperatifi", b_user, None)
+        .await
+        .expect("B membership");
+    let b_role = grant_role(&test.pool, b_user, "b-rolu", Some(coop_b), ADMIN_PERMS).await;
+
+    // Every critical mutation against B-owned targets → 404.
+    for (method, path, body) in [
+        (Method::POST, format!("/api/roles/{b_role}/disable"), None),
+        (
+            Method::PUT,
+            format!("/api/roles/{b_role}/permissions"),
+            Some(json!({ "permissions": ["users.read"] })),
+        ),
+        (Method::POST, format!("/api/users/{b_user}/disable"), None),
+        (
+            Method::PUT,
+            format!("/api/users/{b_user}/roles"),
+            Some(json!({ "roleIds": [] })),
+        ),
+    ] {
+        let (status, body) =
+            request_json(&test, method, &path, &cookie, Some(&csrf), None, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+    }
+    // And B's state is untouched.
+    let b_role_status: String = sqlx::query_scalar("SELECT status FROM roles WHERE id = $1")
+        .bind(b_role)
+        .fetch_one(&test.pool)
+        .await
+        .expect("b role");
+    assert_eq!(b_role_status, "active");
+    let b_user_status: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(b_user)
+        .fetch_one(&test.pool)
+        .await
+        .expect("b user");
+    assert_eq!(b_user_status, "active");
+
+    // Assigning a B-owned role to a bootstrap member → 400, nothing
+    // written.
+    let member = create_user(&test.pool, "a_uye").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", member, None)
+        .await
+        .expect("membership");
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{member}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [b_role.to_string()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let written: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_role_assignments WHERE user_id = $1")
+            .bind(member)
+            .fetch_one(&test.pool)
+            .await
+            .expect("count");
+    assert_eq!(written, 0, "cross-cooperative assignment must not persist");
+
+    test.cleanup().await;
+}
+
+/// Two concurrent administrator self-removals in the SAME cooperative
+/// scope: the cooperative-scoped advisory lock serializes them — exactly
+/// one commits, the other observes zero remaining paths and aborts.
+#[tokio::test]
+async fn concurrent_admin_removals_leave_one_scoped_path() {
+    let Some(test) = setup().await else { return };
+    let (first_admin, coop) = bootstrap_admin(&test.pool, "esz_a").await;
+    let second_admin = create_user(&test.pool, "esz_b").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", second_admin, None)
+        .await
+        .expect("membership");
+    grant_role(
+        &test.pool,
+        second_admin,
+        "esz-b-rol",
+        Some(coop),
+        ADMIN_PERMS,
+    )
+    .await;
+
+    let (first_cookie, first_csrf) = login(&test.app, test.peer, "esz_a").await;
+    let (second_cookie, second_csrf) = login(&test.app, test.peer, "esz_b").await;
+
+    let first_path = format!("/api/users/{first_admin}/roles");
+    let second_path = format!("/api/users/{second_admin}/roles");
+    let first_req = request_json(
+        &test,
+        Method::PUT,
+        &first_path,
+        &first_cookie,
+        Some(&first_csrf),
+        None,
+        Some(json!({ "roleIds": [] })),
+    );
+    let second_req = request_json(
+        &test,
+        Method::PUT,
+        &second_path,
+        &second_cookie,
+        Some(&second_csrf),
+        None,
+        Some(json!({ "roleIds": [] })),
+    );
+    let (first, second) = tokio::join!(first_req, second_req);
+    let mut statuses = [first.0, second.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::NO_CONTENT, StatusCode::CONFLICT],
+        "exactly one removal must commit: {statuses:?}"
+    );
+
+    assert_eq!(
+        scoped_admin_count(&test.pool, coop).await,
+        1,
+        "exactly one administration path survives in the scope"
+    );
+
+    test.cleanup().await;
+}
+
+/// PUT /users/{id}/roles writes cooperative-scoped assignment rows —
+/// the RBAC API never creates new NULL-cooperative assignments.
+#[tokio::test]
+async fn api_assignments_carry_cooperative_never_null() {
+    let Some(test) = setup().await else { return };
+    let (_, coop) = bootstrap_admin(&test.pool, "a_admin8").await;
+    let (cookie, csrf) = login(&test.app, test.peer, "a_admin8").await;
+
+    // A second admin so the lockout guard is not in the way.
+    let second = create_user(&test.pool, "a_ikinci").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", second, None)
+        .await
+        .expect("membership");
+
+    // A scoped, assignable non-admin role.
+    let member_role =
+        grant_role(&test.pool, second, "uye-rolu", Some(coop), &["shares.read"]).await;
+
+    let target = create_user(&test.pool, "hedef_uye").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", target, None)
+        .await
+        .expect("membership");
+
+    let nulls_before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_role_assignments WHERE cooperative_id IS NULL",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .expect("null count");
+
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{target}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [member_role.to_string()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let written: Option<Uuid> =
+        sqlx::query_scalar("SELECT cooperative_id FROM user_role_assignments WHERE user_id = $1")
+            .bind(target)
+            .fetch_one(&test.pool)
+            .await
+            .expect("assignment row");
+    assert_eq!(written, Some(coop), "API assignment must carry the scope");
+    let nulls_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_role_assignments WHERE cooperative_id IS NULL",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .expect("null count");
+    assert_eq!(nulls_after, nulls_before, "no new NULL assignment rows");
+
+    test.cleanup().await;
+}
+
+/// NULL-attributed legacy rows in the bootstrap scope: manageable
+/// (disable / permission-replace succeed when they are not the last
+/// admin path), but NOT assignable — the composite FK can only pair
+/// scope-owned roles, and the API refuses to write NULL assignments.
+/// A user's NULL-attributed assignment IS replaced in place by the
+/// scoped rewrite.
+#[tokio::test]
+async fn null_legacy_rows_manageable_but_not_assignable() {
+    let Some(test) = setup().await else { return };
+    let (_, coop) = bootstrap_admin(&test.pool, "a_admin9").await;
+    let (cookie, csrf) = login(&test.app, test.peer, "a_admin9").await;
+    let second = create_user(&test.pool, "yedek_admin").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", second, None)
+        .await
+        .expect("membership");
+    grant_role(
+        &test.pool,
+        second,
+        "yedek-admin-rol",
+        Some(coop),
+        ADMIN_PERMS,
+    )
+    .await;
+
+    // Legacy NULL role with an innocuous permission.
+    let null_role = grant_role(&test.pool, second, "eski-rol", None, &["shares.read"]).await;
+    // Careful: grant_role wrote a NULL-cooperative ASSIGNMENT for
+    // `second` — that is the legacy lane the test exercises; delete it
+    // so `second` stays a clean admin path through its scoped role.
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1 AND cooperative_id IS NULL")
+        .bind(second)
+        .execute(&test.pool)
+        .await
+        .expect("cleanup null assignment");
+
+    // NULL role: disable + permission replace work (manageable).
+    for (method, path, body) in [
+        (
+            Method::POST,
+            format!("/api/roles/{null_role}/disable"),
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/api/roles/{null_role}/permissions"),
+            Some(json!({ "permissions": ["families.read"] })),
+        ),
+    ] {
+        let (status, body) =
+            request_json(&test, method, &path, &cookie, Some(&csrf), None, body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{path}: {body}");
+    }
+
+    // NULL role is NOT assignable: same 400 as unknown/foreign roles.
+    let target = create_user(&test.pool, "atama_hedefi").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", target, None)
+        .await
+        .expect("membership");
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{target}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [null_role.to_string()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A user's legacy NULL assignment is inside the scope's rewrite
+    // window: PUT replaces it with a scoped row.
+    let legacy_target = create_user(&test.pool, "eski_atamali").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", legacy_target, None)
+        .await
+        .expect("membership");
+    let scoped_role = grant_role(
+        &test.pool,
+        legacy_target,
+        "kapsamli-rol",
+        Some(coop),
+        &["shares.read"],
+    )
+    .await;
+    sqlx::query("INSERT INTO user_role_assignments (user_id, role_id) VALUES ($1, $2)")
+        .bind(legacy_target)
+        .bind(null_role)
+        .execute(&test.pool)
+        .await
+        .expect("null assignment");
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{legacy_target}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [scoped_role.to_string()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let rows: Vec<Option<Uuid>> =
+        sqlx::query_scalar("SELECT cooperative_id FROM user_role_assignments WHERE user_id = $1")
+            .bind(legacy_target)
+            .fetch_all(&test.pool)
+            .await
+            .expect("assignments");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0],
+        Some(coop),
+        "NULL assignment must be replaced by a scoped one"
+    );
+
+    test.cleanup().await;
+}
+
+/// A suspended/revoked membership (a) denies the actor on the very next
+/// request and (b) no longer counts as an administration path — the
+/// last-admin guard must not treat a suspended admin as a recovery
+/// route.
+#[tokio::test]
+async fn suspended_membership_denies_and_stops_counting() {
+    let Some(test) = setup().await else { return };
+    let (first_admin, coop) = bootstrap_admin(&test.pool, "uye_a").await;
+    let second_admin = create_user(&test.pool, "uye_b").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", second_admin, None)
+        .await
+        .expect("membership");
+    let second_role = grant_role(
+        &test.pool,
+        second_admin,
+        "uye-b-admin-rol",
+        Some(coop),
+        ADMIN_PERMS,
+    )
+    .await;
+    assert_eq!(scoped_admin_count(&test.pool, coop).await, 2);
+
+    // Suspend the second admin: next request is denied at extraction.
+    sqlx::query("UPDATE cooperative_memberships SET status = 'suspended' WHERE user_id = $1")
+        .bind(second_admin)
+        .execute(&test.pool)
+        .await
+        .expect("suspend");
+    let (second_cookie, second_csrf) = login(&test.app, test.peer, "uye_b").await;
+    let (status, _) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{first_admin}/roles"),
+        &second_cookie,
+        Some(&second_csrf),
+        None,
+        Some(json!({ "roleIds": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The suspended admin no longer counts as a path: admin #1 cannot
+    // remove their own last path now.
+    assert_eq!(scoped_admin_count(&test.pool, coop).await, 1);
+    let (cookie, csrf) = login(&test.app, test.peer, "uye_a").await;
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{first_admin}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // But admin #1 CAN still strip the suspended admin's role (the
+    // surviving active path is enough).
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{second_admin}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let _ = second_role;
+
+    test.cleanup().await;
+}
+
+/// Audit attribution (P1-c5 groundwork): every migrated mutation's
+/// security event carries the verified cooperative_id.
+#[tokio::test]
+async fn migrated_mutations_attribute_audit_to_scope() {
+    let Some(test) = setup().await else { return };
+    let (_, coop) = bootstrap_admin(&test.pool, "denetim_admin").await;
+    let (cookie, csrf) = login(&test.app, test.peer, "denetim_admin").await;
+    let second = create_user(&test.pool, "yedek").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", second, None)
+        .await
+        .expect("membership");
+    let second_role = grant_role(&test.pool, second, "yedek-admin", Some(coop), ADMIN_PERMS).await;
+    let plain_role = grant_role(&test.pool, second, "duz-rol", Some(coop), &["shares.read"]).await;
+
+    // PUT permissions on the non-admin role.
+    assert_eq!(
+        request_json(
+            &test,
+            Method::PUT,
+            &format!("/api/roles/{plain_role}/permissions"),
+            &cookie,
+            Some(&csrf),
+            None,
+            Some(json!({ "permissions": ["families.read"] })),
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // PUT user roles (assign delta → role_assigned) + disable_user on a
+    // non-admin member.
+    let target = create_user(&test.pool, "denetim_hedef").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", target, None)
+        .await
+        .expect("membership");
+    assert_eq!(
+        request_json(
+            &test,
+            Method::PUT,
+            &format!("/api/users/{target}/roles"),
+            &cookie,
+            Some(&csrf),
+            None,
+            Some(json!({ "roleIds": [plain_role.to_string()] })),
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/users/{target}/disable"),
+            &cookie,
+            Some(&csrf),
+            None,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // disable_role last: the role must be active while assigned above.
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/roles/{plain_role}/disable"),
+            &cookie,
+            Some(&csrf),
+            None,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+
+    let expected = [
+        "role_disabled",
+        "role_permissions_changed",
+        "role_assigned",
+        "user_disabled",
+    ];
+    for event in expected {
+        let (count, scoped): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE cooperative_id = $1) \
+             FROM security_events WHERE event_type = $2",
+        )
+        .bind(coop)
+        .bind(event)
+        .fetch_one(&test.pool)
+        .await
+        .expect("audit");
+        assert_eq!(count, 1, "{event} missing");
+        assert_eq!(scoped, 1, "{event} must be cooperative-attributed");
+    }
+    let _ = second_role;
+
+    test.cleanup().await;
+}
+
+/// Header rules on the migrated critical mutations: malformed → 400,
+/// unknown → 403, explicit non-bootstrap → 403, headerless → bootstrap.
+#[tokio::test]
+async fn header_rules_apply_to_critical_mutations() {
+    let Some(test) = setup().await else { return };
+    bootstrap_admin(&test.pool, "header_admin").await;
+    let (cookie, csrf) = login(&test.app, test.peer, "header_admin").await;
+    let second = create_user(&test.pool, "yedek2").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", second, None)
+        .await
+        .expect("membership");
+    let role = grant_role(&test.pool, second, "yedek-admin2", None, ADMIN_PERMS).await;
+
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+
+    // Malformed → 400; unknown → 403; non-bootstrap → 403.
+    for (header, expected) in [
+        (Some("bozuk-uuid".to_string()), StatusCode::BAD_REQUEST),
+        (Some(Uuid::new_v4().to_string()), StatusCode::FORBIDDEN),
+        (Some(coop_b.to_string()), StatusCode::FORBIDDEN),
+    ] {
+        let (status, body) = request_json(
+            &test,
+            Method::POST,
+            &format!("/api/roles/{role}/disable"),
+            &cookie,
+            Some(&csrf),
+            header.as_deref(),
+            None,
+        )
+        .await;
+        assert_eq!(status, expected, "header {header:?}: {body}");
+    }
+
+    // Headerless → bootstrap scope → the NULL-attributed role is
+    // manageable (a second admin path exists, so disabling is allowed).
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/roles/{role}/disable"),
+            &cookie,
+            Some(&csrf),
+            None,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+
+    test.cleanup().await;
+}
+
+/// Dual-membership actor (admin in bootstrap, viewer in B): exercises
+/// admin powers in the bootstrap scope — headerless AND explicit
+/// bootstrap header — but never in B. A bootstrap "viewer" reads but
+/// cannot mutate; a B-only viewer gets nothing at all.
+#[tokio::test]
+async fn dual_membership_and_viewer_isolation() {
+    let Some(test) = setup().await else { return };
+    let (dual, coop) = bootstrap_admin(&test.pool, "cift_uye").await;
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+    repo::add_member(&test.pool, "B Kooperatifi", dual, None)
+        .await
+        .expect("B membership");
+    grant_role(
+        &test.pool,
+        dual,
+        "b-izleyici-rol",
+        Some(coop_b),
+        &["roles.read"],
+    )
+    .await;
+
+    let (cookie, csrf) = login(&test.app, test.peer, "cift_uye").await;
+    let coop_str = coop.to_string();
+
+    // Headerless: admin powers in bootstrap scope.
+    let target = create_user(&test.pool, "cift_hedef").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", target, None)
+        .await
+        .expect("membership");
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/users/{target}/disable"),
+            &cookie,
+            Some(&csrf),
+            None,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // Explicit bootstrap header: same.
+    let target2 = create_user(&test.pool, "cift_hedef2").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", target2, None)
+        .await
+        .expect("membership");
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/users/{target2}/disable"),
+            &cookie,
+            Some(&csrf),
+            Some(&coop_str),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // Explicit B header → 403 even though the user IS a B member.
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/users/{target}/enable"),
+            &cookie,
+            Some(&csrf),
+            Some(&coop_b.to_string()),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Bootstrap viewer (roles.read only in A; full ADMIN in B): reads
+    // fine in A, mutations 403 — B powers can never leak into the
+    // bootstrap scope.
+    let viewer = create_user(&test.pool, "izleyici").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", viewer, None)
+        .await
+        .expect("membership");
+    grant_role(
+        &test.pool,
+        viewer,
+        "izleyici-rol",
+        Some(coop),
+        &["roles.read"],
+    )
+    .await;
+    repo::add_member(&test.pool, "B Kooperatifi", viewer, None)
+        .await
+        .expect("B membership");
+    grant_role(
+        &test.pool,
+        viewer,
+        "izleyici-b-admin",
+        Some(coop_b),
+        ADMIN_PERMS,
+    )
+    .await;
+    let (viewer_cookie, viewer_csrf) = login(&test.app, test.peer, "izleyici").await;
+    assert_eq!(
+        request_json(
+            &test,
+            Method::GET,
+            "/api/roles",
+            &viewer_cookie,
+            None,
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for (method, path, body) in [
+        (
+            Method::PUT,
+            format!("/api/users/{target}/roles"),
+            Some(json!({ "roleIds": [] })),
+        ),
+        (Method::POST, format!("/api/users/{target}/disable"), None),
+    ] {
+        let (status, body) = request_json(
+            &test,
+            method,
+            &path,
+            &viewer_cookie,
+            Some(&viewer_csrf),
+            None,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+    }
+
+    // B-only viewer: nothing in the bootstrap scope.
+    let b_only = create_user(&test.pool, "b_izleyici").await;
+    repo::add_member(&test.pool, "B Kooperatifi", b_only, None)
+        .await
+        .expect("B membership");
+    grant_role(
+        &test.pool,
+        b_only,
+        "b-only-rol",
+        Some(coop_b),
+        &["roles.read"],
+    )
+    .await;
+    let (b_cookie, _) = login(&test.app, test.peer, "b_izleyici").await;
+    assert_eq!(
+        request_json(
+            &test,
+            Method::GET,
+            "/api/roles",
+            &b_cookie,
+            None,
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
+    test.cleanup().await;
+}
+
+/// Never-bootstrapped lane (legacy compatibility): before the initial
+/// cooperative exists, the four mutations keep their documented legacy
+/// semantics — global guard, NULL-cooperative writes (the only possible
+/// representation pre-tenancy).
+#[tokio::test]
+async fn never_bootstrapped_lane_keeps_legacy_semantics() {
+    let Some(test) = setup().await else { return };
+
+    // No bootstrap: users + NULL roles in the pre-tenant lane.
+    let admin = create_user(&test.pool, "miras_admin").await;
+    let admin_role = grant_role(&test.pool, admin, "Miras Admin", None, ADMIN_PERMS).await;
+    let second = create_user(&test.pool, "miras_ikinci").await;
+    grant_role(&test.pool, second, "Miras Ikinci", None, ADMIN_PERMS).await;
+    let target = create_user(&test.pool, "miras_hedef").await;
+    let member_role = grant_role(&test.pool, target, "Uye", None, &["shares.read"]).await;
+
+    let (cookie, csrf) = login(&test.app, test.peer, "miras_admin").await;
+
+    // PUT user roles works and writes NULL — the pre-tenant lane cannot
+    // do anything else (no cooperative exists).
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/users/{target}/roles"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "roleIds": [member_role.to_string()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let written: Option<Uuid> = sqlx::query_scalar(
+        "SELECT cooperative_id FROM user_role_assignments WHERE user_id = $1 AND role_id = $2",
+    )
+    .bind(target)
+    .bind(member_role)
+    .fetch_one(&test.pool)
+    .await
+    .expect("assignment");
+    assert_eq!(written, None, "pre-tenant lane keeps NULL writes");
+
+    // Global lockout still applies: strip the second admin's roles →
+    // allowed while `admin` remains; then disabling `admin` would
+    // remove the LAST global path → refused.
+    assert_eq!(
+        request_json(
+            &test,
+            Method::PUT,
+            &format!("/api/users/{second}/roles"),
+            &cookie,
+            Some(&csrf),
+            None,
+            Some(json!({ "roleIds": [] })),
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        request_json(
+            &test,
+            Method::POST,
+            &format!("/api/users/{admin}/disable"),
+            &cookie,
+            Some(&csrf),
+            None,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let _ = admin_role;
 
     test.cleanup().await;
 }

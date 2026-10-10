@@ -528,3 +528,299 @@ async fn scoped_role_summaries_follow_the_same_rules() {
 
     test.cleanup().await;
 }
+
+// ------------------------------------------------------------------
+// M1-P1-007 (P1-c2b) — cooperative-scoped administrator continuity:
+// scoped path count, scoped advisory-lock keys, hardened bootstrap
+// attribution. DB-level proofs backing the HTTP tests in
+// rbac_cooperative.rs.
+// ------------------------------------------------------------------
+
+/// Write a NULL-cooperative role + NULL-cooperative assignment (the
+/// legacy lane) carrying `permissions` for `user`.
+async fn null_admin_grant(pool: &PgPool, user: Uuid, name: &str, permissions: &[&str]) -> Uuid {
+    let role_id: Uuid = sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("null role");
+    for key in permissions {
+        sqlx::query(
+            "INSERT INTO role_permissions (role_id, permission_id) \
+             SELECT $1, id FROM permissions WHERE key = $2",
+        )
+        .bind(role_id)
+        .bind(key)
+        .execute(pool)
+        .await
+        .expect("perm");
+    }
+    sqlx::query("INSERT INTO user_role_assignments (user_id, role_id) VALUES ($1, $2)")
+        .bind(user)
+        .bind(role_id)
+        .execute(pool)
+        .await
+        .expect("null assignment");
+    role_id
+}
+
+/// Cooperative-scoped `administration_path_count` (P1-K5): counts only
+/// paths EFFECTIVE in the queried cooperative — scoped role + scoped
+/// assignment + active membership + active user, with NULL-attributed
+/// legacy rows counting ONLY for the marker-verified bootstrap
+/// cooperative.
+#[tokio::test]
+async fn scoped_administration_path_count_is_per_cooperative() {
+    let Some(test) = setup().await else { return };
+
+    let (coop_a, _) = repo::bootstrap_initial_cooperative(&test.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap");
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+
+    // A-admin: scoped role + scoped assignment + active A membership.
+    let a_admin = create_user(&test.pool, "sayim_a").await;
+    repo::add_member(&test.pool, "A Kooperatifi", a_admin, None)
+        .await
+        .expect("A membership");
+    let role_a = scoped_role(&test.pool, "sayim-a-admin", coop_a, &["roles.manage"]).await;
+    assign(&test.pool, a_admin, role_a, coop_a).await;
+
+    // B-admin: fully B-scoped path.
+    let b_admin = create_user(&test.pool, "sayim_b").await;
+    repo::add_member(&test.pool, "B Kooperatifi", b_admin, None)
+        .await
+        .expect("B membership");
+    let role_b = scoped_role(&test.pool, "sayim-b-admin", coop_b, &["roles.manage"]).await;
+    assign(&test.pool, b_admin, role_b, coop_b).await;
+
+    // NULL-attributed legacy admin: bootstrap membership + NULL role +
+    // NULL assignment — effective ONLY in the bootstrap scope.
+    let null_admin = create_user(&test.pool, "sayim_null").await;
+    repo::add_member(&test.pool, "A Kooperatifi", null_admin, None)
+        .await
+        .expect("A membership");
+    null_admin_grant(
+        &test.pool,
+        null_admin,
+        "sayim-null-admin",
+        &["roles.manage"],
+    )
+    .await;
+
+    let mut tx = test.pool.begin().await.expect("tx");
+    let count_a = authz::administration_path_count(&mut tx, Some(coop_a))
+        .await
+        .expect("count A");
+    assert_eq!(count_a, 2, "scoped A path + NULL-attributed A path");
+    let count_b = authz::administration_path_count(&mut tx, Some(coop_b))
+        .await
+        .expect("count B");
+    assert_eq!(
+        count_b, 1,
+        "B sees ONLY its own admin path — NULL never leaks"
+    );
+    tx.rollback().await.expect("rollback");
+
+    // Suspending A's scoped admin drops A's count but never B's.
+    membership_status(&test.pool, coop_a, a_admin, "suspended").await;
+    let mut tx = test.pool.begin().await.expect("tx");
+    assert_eq!(
+        authz::administration_path_count(&mut tx, Some(coop_a))
+            .await
+            .expect("count A"),
+        1,
+        "suspended membership no longer counts as a path"
+    );
+    assert_eq!(
+        authz::administration_path_count(&mut tx, Some(coop_b))
+            .await
+            .expect("count B"),
+        1
+    );
+    tx.rollback().await.expect("rollback");
+
+    // The legacy global arm (None) counts every path regardless of
+    // scope — preserved for the never-bootstrapped lane.
+    let mut tx = test.pool.begin().await.expect("tx");
+    assert_eq!(
+        authz::administration_path_count(&mut tx, None)
+            .await
+            .expect("global count"),
+        3
+    );
+    tx.rollback().await.expect("rollback");
+
+    test.cleanup().await;
+}
+
+/// Malicious/incorrectly supplied scope values: the hardened bootstrap
+/// attribution (P1-c2b audit) can never assign NULL legacy rows to a
+/// non-bootstrap cooperative — even for a genuine member of that
+/// cooperative. `effective_permissions_in_bootstrap` re-verifies the
+/// marker inside the query.
+#[tokio::test]
+async fn null_legacy_never_resolves_in_foreign_scope() {
+    let Some(test) = setup().await else { return };
+
+    let (coop_a, _) = repo::bootstrap_initial_cooperative(&test.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap");
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+
+    // User is an ACTIVE member of B only, holding a NULL-attributed
+    // admin grant (legacy lane). In B's scope this grants NOTHING.
+    let user = create_user(&test.pool, "yabanci_scope").await;
+    repo::add_member(&test.pool, "B Kooperatifi", user, None)
+        .await
+        .expect("B membership");
+    null_admin_grant(&test.pool, user, "yabanci-null", &["roles.manage"]).await;
+
+    let b_perms = authz::effective_permissions_in_bootstrap(&test.pool, user, coop_b)
+        .await
+        .expect("B resolution");
+    assert!(
+        b_perms.is_empty(),
+        "NULL attribution must never apply to a non-bootstrap scope: {b_perms:?}"
+    );
+
+    // In the real bootstrap scope the same NULL rows grant — but only
+    // through an active bootstrap membership, which this user lacks.
+    let a_perms = authz::effective_permissions_in_bootstrap(&test.pool, user, coop_a)
+        .await
+        .expect("A resolution");
+    assert!(
+        a_perms.is_empty(),
+        "no bootstrap membership → NULL grant resolves to nothing"
+    );
+
+    // Add the bootstrap membership: the NULL grant now resolves in the
+    // bootstrap scope (verified legacy attribution) — still not in B.
+    repo::add_member(&test.pool, "A Kooperatifi", user, None)
+        .await
+        .expect("A membership");
+    let a_perms = authz::effective_permissions_in_bootstrap(&test.pool, user, coop_a)
+        .await
+        .expect("A resolution after membership");
+    assert!(a_perms.contains("roles.manage"));
+    let b_perms = authz::effective_permissions_in_bootstrap(&test.pool, user, coop_b)
+        .await
+        .expect("B resolution after A membership");
+    assert!(b_perms.is_empty(), "B scope still sees nothing");
+
+    test.cleanup().await;
+}
+
+/// Advisory-lock key strategy (P1-K5): `begin_guarded_transaction`
+/// derives a per-cooperative key — same cooperative serializes,
+/// different cooperatives never block each other, and the two-int
+/// scoped form cannot collide with the legacy bigint key.
+#[tokio::test]
+async fn scoped_advisory_lock_isolates_per_cooperative() {
+    let Some(test) = setup().await else { return };
+
+    let coop_a = repo::bootstrap_initial_cooperative(&test.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap")
+        .0;
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+
+    // Transaction holds the A-scoped guard lock.
+    let tx_a = authz::begin_guarded_transaction(&test.pool, Some(coop_a))
+        .await
+        .expect("A guard tx");
+
+    let try_lock = |coop: Uuid| {
+        let pool = test.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT pg_try_advisory_xact_lock($1::int4, hashtext($2::text))",
+            )
+            .bind(authz::ADMIN_PATH_GUARD_LOCK_NAMESPACE)
+            .bind(coop.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("try lock")
+        }
+    };
+
+    // Same cooperative → lock visibly held (serialization proven).
+    assert!(
+        !try_lock(coop_a).await,
+        "same-cooperative mutation must serialize on the scoped key"
+    );
+    // Different cooperative → independent key, acquired at once.
+    assert!(
+        try_lock(coop_b).await,
+        "another cooperative's mutations must never block on A's key"
+    );
+
+    // The legacy global key is a DIFFERENT lock space: a scoped lock
+    // does not contend with the never-bootstrapped lane's bigint key,
+    // and vice versa.
+    let tx_global = authz::begin_guarded_transaction(&test.pool, None)
+        .await
+        .expect("global guard tx must not contend with scoped locks");
+
+    // Release the guard transactions before cleanup — pool.close()
+    // waits for checked-out connections to be returned.
+    tx_global.rollback().await.expect("global rollback");
+    tx_a.rollback().await.expect("A rollback");
+
+    test.cleanup().await;
+}
+
+/// The guarded transaction composes: mutation + scoped count inside
+/// ONE transaction, so the post-mutation administrator-continuity
+/// check is evaluated atomically under the scoped lock.
+#[tokio::test]
+async fn guarded_tx_evaluates_post_mutation_count_atomically() {
+    let Some(test) = setup().await else { return };
+
+    let (coop_a, _) = repo::bootstrap_initial_cooperative(&test.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap");
+    let admin = create_user(&test.pool, "tek_yol").await;
+    repo::add_member(&test.pool, "A Kooperatifi", admin, None)
+        .await
+        .expect("A membership");
+    let role = scoped_role(&test.pool, "tek-yol-admin", coop_a, &["roles.manage"]).await;
+    assign(&test.pool, admin, role, coop_a).await;
+
+    // Inside the guarded tx: delete the assignment, then the scoped
+    // count observes ZERO and the caller would roll back.
+    let mut tx = authz::begin_guarded_transaction(&test.pool, Some(coop_a))
+        .await
+        .expect("guard tx");
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(admin)
+        .execute(tx.as_mut())
+        .await
+        .expect("delete");
+    let count = authz::administration_path_count(&mut tx, Some(coop_a))
+        .await
+        .expect("count");
+    assert_eq!(count, 0, "post-mutation state must see zero paths");
+    tx.rollback().await.expect("rollback");
+
+    // Rolled back — the path survived outside the tx.
+    let mut tx = test.pool.begin().await.expect("tx");
+    assert_eq!(
+        authz::administration_path_count(&mut tx, Some(coop_a))
+            .await
+            .expect("count"),
+        1
+    );
+    tx.rollback().await.expect("rollback");
+
+    test.cleanup().await;
+}
