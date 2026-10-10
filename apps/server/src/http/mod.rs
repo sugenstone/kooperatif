@@ -65,6 +65,7 @@ pub fn cors_layer(origins: &[String]) -> tower_http::cors::CorsLayer {
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::HeaderName::from_static("x-csrf-token"),
+            axum::http::HeaderName::from_static("x-cooperative-id"),
         ])
         .allow_methods([
             axum::http::Method::GET,
@@ -185,6 +186,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(governance_router())
         .merge(crate::reports::routes::reports_router())
         .merge(crate::realtime::routes::realtime_router())
+        .merge(crate::tenant::routes::tenant_router())
         .fallback(fallback)
         .layer(middleware::from_fn(sanitize_rejection_bodies))
         .layer(middleware::from_fn(security_headers))

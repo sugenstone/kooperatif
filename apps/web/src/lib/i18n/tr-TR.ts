@@ -567,6 +567,11 @@ export const trTR = {
 	'errors.lockout_prevented':
 		'Bu işlem güvenlik nedeniyle reddedildi: sistemde yönetim yetkisine sahip en az bir etkin kullanıcı kalmalıdır.',
 	'errors.validation_failed': 'Girilen bilgiler eksik veya geçersiz. Lütfen alanları kontrol edin.',
+	'errors.cooperative_context_required': 'Bu işlem için bir kooperatif bağlamı seçilmedi.',
+	'errors.cooperative_access_denied':
+		'Bu kooperatife erişim yetkiniz yok veya üyeliğiniz aktif değil.',
+	'errors.cooperative_not_ready':
+		'Bu kooperatif henüz işletim için etkinleştirilmedi. Lütfen yöneticinize başvurun.',
 
 	// STEP-010 — Gelir / Gider
 	'nav.incomes': 'Gelirler',

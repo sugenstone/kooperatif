@@ -37,6 +37,10 @@ pub struct SessionRow {
     #[allow(dead_code)]
     pub revocation_reason: Option<String>,
     pub client_label: Option<String>,
+    /// UX-level default cooperative (M1-K1): preselects the tenant
+    /// context when a request carries no explicit `x-cooperative-id`.
+    /// Never trusted alone — `TenantCtx` re-validates membership.
+    pub active_cooperative_id: Option<Uuid>,
 }
 
 /// Why a presented token does not yield an authenticated session.
@@ -74,7 +78,7 @@ pub async fn create_session(
          VALUES ($1, $2, $3, $4, $4, $5, $6, $7) \
          RETURNING id, user_id, token_hash, csrf_token, created_at, \
                    last_seen_at, expires_at, idle_expires_at, revoked_at, \
-                   revocation_reason, client_label",
+                   revocation_reason, client_label, active_cooperative_id",
     )
     .bind(init.user_id)
     .bind(init.token_hash.as_slice())
@@ -95,7 +99,8 @@ pub async fn find_by_token_hash(
 ) -> Result<Option<SessionRow>, sqlx::Error> {
     sqlx::query_as::<_, SessionRow>(
         "SELECT id, user_id, token_hash, csrf_token, created_at, last_seen_at, \
-                expires_at, idle_expires_at, revoked_at, revocation_reason, client_label \
+                expires_at, idle_expires_at, revoked_at, revocation_reason, client_label, \
+                active_cooperative_id \
          FROM user_sessions WHERE token_hash = $1",
     )
     .bind(token_hash.as_slice())
@@ -210,7 +215,8 @@ pub async fn list_active_sessions(
 ) -> Result<Vec<SessionRow>, sqlx::Error> {
     sqlx::query_as::<_, SessionRow>(
         "SELECT id, user_id, token_hash, csrf_token, created_at, last_seen_at, \
-                expires_at, idle_expires_at, revoked_at, revocation_reason, client_label \
+                expires_at, idle_expires_at, revoked_at, revocation_reason, client_label, \
+                active_cooperative_id \
          FROM user_sessions \
          WHERE user_id = $1 AND revoked_at IS NULL \
            AND expires_at > $2 AND idle_expires_at > $2 \

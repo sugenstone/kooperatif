@@ -34,6 +34,10 @@ pub struct CurrentAuth {
     /// frontend can send authenticated mutations after a page refresh.
     /// It is not a bearer credential (CSRF layer relies on SOP).
     pub csrf_token: String,
+    /// Session's UX-level default cooperative (M1-K1). The tenant
+    /// extractor treats it as a fallback hint only — membership is
+    /// re-validated per request.
+    pub active_cooperative_id: Option<Uuid>,
 }
 
 impl FromRequestParts<AppState> for CurrentAuth {
@@ -95,6 +99,7 @@ impl FromRequestParts<AppState> for CurrentAuth {
             session_created_at: session_row.created_at,
             session_expires_at: session_row.expires_at,
             csrf_token: session_row.csrf_token,
+            active_cooperative_id: session_row.active_cooperative_id,
         })
     }
 }

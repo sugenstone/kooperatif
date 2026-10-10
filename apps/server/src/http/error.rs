@@ -48,6 +48,19 @@ pub enum ApiError {
     /// 409 — optimistic-concurrency precondition failed: the record
     /// changed after the caller loaded it (docs/21 stale-state).
     StaleState,
+    /// 400 — a tenant-aware endpoint received no cooperative context:
+    /// neither an `x-cooperative-id` header nor a session default
+    /// (M1-K1). Fail closed, never implicit.
+    CooperativeContextRequired,
+    /// 403 — the requested cooperative context was denied: membership
+    /// missing/suspended/ended or the cooperative itself not active.
+    /// A single code for all causes so membership existence is never
+    /// leaked to non-members.
+    CooperativeAccessDenied,
+    /// 403 — the user IS an active member but the cooperative's
+    /// `business_enabled` gate is closed: tenant retrofit (P2+) has not
+    /// reached business modules for this cooperative yet.
+    CooperativeNotReady,
 }
 
 impl ApiError {
@@ -67,6 +80,9 @@ impl ApiError {
             Self::LockoutPrevented => "lockout_prevented",
             Self::InsufficientUnrestrictedFunds => "insufficient_unrestricted_funds",
             Self::StaleState => "stale_state",
+            Self::CooperativeContextRequired => "cooperative_context_required",
+            Self::CooperativeAccessDenied => "cooperative_access_denied",
+            Self::CooperativeNotReady => "cooperative_not_ready",
         }
     }
 
@@ -74,11 +90,14 @@ impl ApiError {
         match self {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::ValidationFailed => StatusCode::BAD_REQUEST,
+            Self::ValidationFailed | Self::CooperativeContextRequired => StatusCode::BAD_REQUEST,
             Self::AuthenticationRequired | Self::SessionExpired | Self::AuthenticationFailed => {
                 StatusCode::UNAUTHORIZED
             }
-            Self::CsrfFailed | Self::PermissionDenied => StatusCode::FORBIDDEN,
+            Self::CsrfFailed
+            | Self::PermissionDenied
+            | Self::CooperativeAccessDenied
+            | Self::CooperativeNotReady => StatusCode::FORBIDDEN,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::DependencyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Conflict

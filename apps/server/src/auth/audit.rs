@@ -99,6 +99,10 @@ pub enum SecurityEventType {
     GovernanceDecisionCancelled,
     GovernanceVoteRecorded,
     GovernanceDecisionFinalized,
+    CooperativeCreated,
+    CooperativeBootstrapped,
+    CooperativeMembershipGranted,
+    CooperativeContextSwitched,
 }
 
 impl SecurityEventType {
@@ -192,6 +196,10 @@ impl SecurityEventType {
             Self::GovernanceDecisionCancelled => "governance_decision_cancelled",
             Self::GovernanceVoteRecorded => "governance_vote_recorded",
             Self::GovernanceDecisionFinalized => "governance_decision_finalized",
+            Self::CooperativeCreated => "cooperative_created",
+            Self::CooperativeBootstrapped => "cooperative_bootstrapped",
+            Self::CooperativeMembershipGranted => "cooperative_membership_granted",
+            Self::CooperativeContextSwitched => "cooperative_context_switched",
         }
     }
 }
@@ -206,11 +214,28 @@ pub async fn record(
     session_id: Option<Uuid>,
     metadata: serde_json::Value,
 ) {
+    record_scoped(pool, event_type, None, user_id, session_id, metadata).await;
+}
+
+/// Tenant-attributed variant (M1-P0): `cooperative_id` is Some(_) for
+/// cooperative-scope events, NULL for platform-scope events (login,
+/// user lifecycle). From P1/P2 every coop-bound call site is migrated
+/// to this variant.
+pub async fn record_scoped(
+    pool: &PgPool,
+    event_type: SecurityEventType,
+    cooperative_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    metadata: serde_json::Value,
+) {
     let result = sqlx::query(
-        "INSERT INTO security_events (event_type, user_id, session_id, metadata) \
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO security_events \
+             (event_type, cooperative_id, user_id, session_id, metadata) \
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(event_type.as_str())
+    .bind(cooperative_id)
     .bind(user_id)
     .bind(session_id)
     .bind(metadata)

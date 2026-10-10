@@ -1,4 +1,9 @@
-import type { AuthResponse, LoginRequest, UserSummary } from '@kooperatif/contracts';
+import type {
+	AuthResponse,
+	CooperativeMembershipSummary,
+	LoginRequest,
+	UserSummary
+} from '@kooperatif/contracts';
 import { LOGIN_PATH, LOGOUT_PATH, ME_PATH } from '@kooperatif/contracts';
 import { apiFetch } from '$lib/api-client';
 
@@ -24,6 +29,10 @@ class AuthState {
 	csrfToken = $state<string | null>(null);
 	/** Effective permission keys from the backend (authoritative copy for UX). */
 	permissions = $state<string[]>([]);
+	/** Cooperative memberships of the signed-in user (M1-P0/PD-02). */
+	cooperatives = $state<CooperativeMembershipSummary[]>([]);
+	/** Session's default cooperative — UX hint only (M1-K1). */
+	activeCooperativeId = $state<string | null>(null);
 }
 
 export const auth = new AuthState();
@@ -43,6 +52,8 @@ export async function restoreSession(): Promise<void> {
 		auth.user = response.user;
 		auth.csrfToken = response.csrfToken;
 		auth.permissions = response.permissions;
+		auth.cooperatives = response.cooperatives;
+		auth.activeCooperativeId = response.activeCooperativeId;
 		auth.status = 'authenticated';
 	} catch {
 		// 401 (missing/expired/revoked) and any transport failure both
@@ -50,6 +61,8 @@ export async function restoreSession(): Promise<void> {
 		auth.user = null;
 		auth.csrfToken = null;
 		auth.permissions = [];
+		auth.cooperatives = [];
+		auth.activeCooperativeId = null;
 		auth.status = 'unauthenticated';
 	}
 }
@@ -63,6 +76,8 @@ export async function login(request: LoginRequest): Promise<void> {
 	auth.user = response.user;
 	auth.csrfToken = response.csrfToken;
 	auth.permissions = response.permissions;
+	auth.cooperatives = response.cooperatives;
+	auth.activeCooperativeId = response.activeCooperativeId;
 	auth.status = 'authenticated';
 }
 
@@ -79,6 +94,8 @@ export async function logout(): Promise<void> {
 		auth.user = null;
 		auth.csrfToken = null;
 		auth.permissions = [];
+		auth.cooperatives = [];
+		auth.activeCooperativeId = null;
 		auth.status = 'unauthenticated';
 	}
 }

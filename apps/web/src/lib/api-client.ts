@@ -1,5 +1,28 @@
 import type { ApiErrorCode } from '@kooperatif/contracts';
+import { COOPERATIVE_HEADER } from '@kooperatif/contracts';
 import { API_BASE_URL } from '$lib/api';
+
+/**
+ * Per-tab cooperative context key (M1-K1): sessionStorage is scoped to
+ * the tab, so two tabs may legitimately operate in different
+ * cooperatives at once. The backend still re-validates membership on
+ * every request — this value is only a UX-level default.
+ */
+const ACTIVE_COOPERATIVE_KEY = 'kooperatif.activeCooperativeId';
+
+export function getActiveCooperativeId(): string | null {
+	if (typeof sessionStorage === 'undefined') return null;
+	return sessionStorage.getItem(ACTIVE_COOPERATIVE_KEY);
+}
+
+export function setActiveCooperativeId(id: string | null): void {
+	if (typeof sessionStorage === 'undefined') return;
+	if (id === null) {
+		sessionStorage.removeItem(ACTIVE_COOPERATIVE_KEY);
+	} else {
+		sessionStorage.setItem(ACTIVE_COOPERATIVE_KEY, id);
+	}
+}
 
 /**
  * API error with the stable machine code from the backend contract
@@ -39,6 +62,10 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 	}
 	if (options.csrfToken) {
 		headers['x-csrf-token'] = options.csrfToken;
+	}
+	const cooperativeId = getActiveCooperativeId();
+	if (cooperativeId) {
+		headers[COOPERATIVE_HEADER] = cooperativeId;
 	}
 
 	const response = await fetch(`${API_BASE_URL}${path}`, {

@@ -17,18 +17,26 @@ export type { DecimalString } from './decimal';
 export { asDecimalString, isDecimalString } from './decimal';
 export type {
 	AuthResponse,
+	CooperativeContextResponse,
+	CooperativeMembershipSummary,
 	LoginRequest,
+	MyCooperativesResponse,
 	RoleSummary,
+	SelectCooperativeRequest,
 	SessionInfo,
 	SessionSummary,
 	SessionsResponse,
 	UserSummary
 } from './auth';
 export {
+	COOPERATIVE_CONTEXT_PATH,
+	COOPERATIVE_HEADER,
 	LOGIN_PATH,
 	LOGOUT_PATH,
 	ME_PATH,
+	MY_COOPERATIVES_PATH,
 	REVOKE_OTHERS_SESSIONS_PATH,
+	SELECT_COOPERATIVE_PATH,
 	SESSIONS_PATH,
 	sessionPath
 } from './auth';

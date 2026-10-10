@@ -27,3 +27,4 @@ pub mod reports;
 pub mod share_returns;
 pub mod shares;
 pub mod social_aid;
+pub mod tenant;

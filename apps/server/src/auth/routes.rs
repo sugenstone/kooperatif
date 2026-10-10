@@ -80,6 +80,12 @@ pub struct AuthResponse {
     pub permissions: Vec<String>,
     /// Safe summaries of the user's active roles.
     pub roles: Vec<RoleSummaryDto>,
+    /// The user's cooperative memberships (M1-P0, PD-02). Global
+    /// `permissions`/`roles` above remain until P1 scopes them per
+    /// cooperative; this block is the membership truth.
+    pub cooperatives: Vec<crate::tenant::repo::CooperativeMembershipSummary>,
+    /// Session's default cooperative (UX convenience, M1-K1).
+    pub active_cooperative_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -306,6 +312,12 @@ pub async fn login(
             tracing::error!(error = %error, "authorization context failed at login");
             ApiError::Internal
         })?;
+    let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, user.id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "cooperative list failed at login");
+            ApiError::Internal
+        })?;
 
     let body = AuthResponse {
         user: UserSummary {
@@ -321,6 +333,8 @@ pub async fn login(
         csrf_token: csrf_token.raw,
         permissions,
         roles,
+        cooperatives,
+        active_cooperative_id: created.active_cooperative_id,
     };
 
     Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(body)).into_response())
@@ -358,6 +372,12 @@ pub async fn me(
                 tracing::error!(error = %error, "authorization context failed");
                 ApiError::Internal
             })?;
+    let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, auth.user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "cooperative list failed");
+            ApiError::Internal
+        })?;
     Ok(Json(AuthResponse {
         user: UserSummary {
             id: auth.user_id,
@@ -372,6 +392,8 @@ pub async fn me(
         csrf_token: auth.csrf_token,
         permissions,
         roles,
+        cooperatives,
+        active_cooperative_id: auth.active_cooperative_id,
     }))
 }
 

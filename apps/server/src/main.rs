@@ -26,9 +26,17 @@ async fn main() -> ExitCode {
 
     if !matches!(
         command.as_str(),
-        "serve" | "migrate" | "create-user" | "grant-role"
+        "serve"
+            | "migrate"
+            | "create-user"
+            | "grant-role"
+            | "create-cooperative"
+            | "add-member"
+            | "bootstrap-cooperative"
     ) {
-        eprintln!("usage: kooperatif-server [serve|migrate|create-user|grant-role]");
+        eprintln!(
+            "usage: kooperatif-server [serve|migrate|create-user|grant-role|create-cooperative|add-member|bootstrap-cooperative]"
+        );
         return ExitCode::FAILURE;
     }
 
@@ -42,6 +50,15 @@ async fn main() -> ExitCode {
         // Deliberately privileged operator recovery/bootstrap path
         // (STEP-003 §14/§28): NOT reachable over HTTP, audited.
         return run_grant_role(std::env::args().skip(2)).await;
+    }
+
+    if matches!(
+        command.as_str(),
+        "create-cooperative" | "add-member" | "bootstrap-cooperative"
+    ) {
+        // Cooperative provisioning (M1-K7): explicitly authorized,
+        // audited, CLI-only — no public self-registration anywhere.
+        return run_tenant_cli(&command, std::env::args().skip(2)).await;
     }
 
     let config = match Config::from_env() {
@@ -422,6 +439,184 @@ async fn run_grant_role(args: impl Iterator<Item = String>) -> ExitCode {
     .await;
     eprintln!("'{actual_name}' rolü '{username}' kullanıcısına tanımlandı.");
     ExitCode::SUCCESS
+}
+
+/// Cooperative provisioning (M1-K7): privileged, audited, CLI-only —
+/// never an HTTP surface. Three subcommands:
+///
+///   kooperatif-server create-cooperative --name "Kooperatif Adı" [--legal-name "..."]
+///       Creates a cooperative in `provisioning` + business_enabled=false.
+///       Repeat calls are rejected by the unique name index (no
+///       duplicate cooperatives, no silent merge).
+///
+///   kooperatif-server add-member --username AD --cooperative "Kooperatif Adı"
+///       Grants/refreshes an active membership (idempotent upsert).
+///
+///   kooperatif-server bootstrap-cooperative --name "Ana Kooperatif"
+///       One-time initial cooperative for the existing installation:
+///       unique is_bootstrap row (active + enabled) plus an active
+///       membership for every user. Repeat calls only fill gaps —
+///       never duplicate the cooperative or reassign records.
+async fn run_tenant_cli(command: &str, args: impl Iterator<Item = String>) -> ExitCode {
+    use kooperatif_server::tenant::repo;
+
+    let mut name_arg: Option<String> = None;
+    let mut legal_name_arg: Option<String> = None;
+    let mut username_arg: Option<String> = None;
+    let mut cooperative_arg: Option<String> = None;
+
+    let mut iter = args.peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--name" => name_arg = iter.next(),
+            "--legal-name" => legal_name_arg = iter.next(),
+            "--username" => username_arg = iter.next(),
+            "--cooperative" => cooperative_arg = iter.next(),
+            other => {
+                eprintln!("bilinmeyen argüman: {other}");
+                eprintln!(
+                    "kullanım: kooperatif-server {command} \
+                     [--name AD --legal-name AD | --username AD --cooperative AD]"
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(url) = config.database_url.as_deref() else {
+        eprintln!("{command} requires KOOPERATIF_DATABASE_URL");
+        return ExitCode::FAILURE;
+    };
+    let pool = match db::connect(url).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("veritabanına bağlanılamadı: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match command {
+        "create-cooperative" => {
+            let Some(name) = name_arg else {
+                eprintln!("--name gereklidir");
+                return ExitCode::FAILURE;
+            };
+            match repo::create_cooperative(&pool, &name, legal_name_arg.as_deref()).await {
+                Ok(coop) => {
+                    audit::record_scoped(
+                        &pool,
+                        audit::SecurityEventType::CooperativeCreated,
+                        Some(coop.id),
+                        None,
+                        None,
+                        serde_json::json!({ "name": coop.name, "source": "cli" }),
+                    )
+                    .await;
+                    eprintln!(
+                        "Kooperatif oluşturuldu: {} (durum: {}, iş-geçidi: {})",
+                        coop.name, coop.status, coop.business_enabled
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(repo::CreateCooperativeError::DuplicateName) => {
+                    eprintln!("'{name}' adında bir kooperatif zaten var.");
+                    ExitCode::FAILURE
+                }
+                Err(repo::CreateCooperativeError::Database(error)) => {
+                    eprintln!("kooperatif oluşturulamadı: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "add-member" => {
+            let (Some(raw_username), Some(coop_name)) = (username_arg, cooperative_arg) else {
+                eprintln!("--username ve --cooperative gereklidir");
+                return ExitCode::FAILURE;
+            };
+            let username = match identity::normalize_and_validate_username(&raw_username) {
+                Ok(username) => username,
+                Err(_) => {
+                    eprintln!("Geçersiz kullanıcı adı: {raw_username}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let user = match users::find_by_normalized_username(&pool, &username).await {
+                Ok(Some(user)) => user,
+                Ok(None) => {
+                    eprintln!("'{username}' kullanıcı adı bulunamadı.");
+                    return ExitCode::FAILURE;
+                }
+                Err(error) => {
+                    eprintln!("kullanıcı sorgulanamadı: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match repo::add_member(&pool, &coop_name, user.id, None).await {
+                Ok(m) => {
+                    audit::record_scoped(
+                        &pool,
+                        audit::SecurityEventType::CooperativeMembershipGranted,
+                        Some(m.cooperative_id),
+                        Some(user.id),
+                        None,
+                        serde_json::json!({ "username": username, "source": "cli" }),
+                    )
+                    .await;
+                    eprintln!("'{username}' kullanıcısı '{coop_name}' kooperatifine eklendi.");
+                    ExitCode::SUCCESS
+                }
+                Err(repo::MembershipError::CooperativeNotFound) => {
+                    eprintln!("'{coop_name}' kooperatifi bulunamadı.");
+                    ExitCode::FAILURE
+                }
+                Err(repo::MembershipError::UserNotFound) => {
+                    eprintln!("'{username}' kullanıcısı bulunamadı.");
+                    ExitCode::FAILURE
+                }
+                Err(repo::MembershipError::Database(error)) => {
+                    eprintln!("üyelik eklenemedi: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "bootstrap-cooperative" => {
+            let Some(name) = name_arg else {
+                eprintln!("--name gereklidir");
+                return ExitCode::FAILURE;
+            };
+            match repo::bootstrap_initial_cooperative(&pool, &name).await {
+                Ok((coop_id, member_count)) => {
+                    audit::record_scoped(
+                        &pool,
+                        audit::SecurityEventType::CooperativeBootstrapped,
+                        Some(coop_id),
+                        None,
+                        None,
+                        serde_json::json!({
+                            "name": name,
+                            "member_count": member_count,
+                            "source": "cli"
+                        }),
+                    )
+                    .await;
+                    eprintln!("Başlangıç kooperatifi hazır: {name} ({member_count} üyelik etkin).");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("bootstrap başarısız: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        _ => unreachable!("tenant command validated by caller"),
+    }
 }
 
 async fn run_migrate(config: &Config) -> ExitCode {

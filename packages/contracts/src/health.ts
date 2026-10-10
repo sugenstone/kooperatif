@@ -45,7 +45,10 @@ export type ApiErrorCode =
 	| 'conflict'
 	| 'lockout_prevented'
 	| 'insufficient_unrestricted_funds'
-	| 'stale_state';
+	| 'stale_state'
+	| 'cooperative_context_required'
+	| 'cooperative_access_denied'
+	| 'cooperative_not_ready';
 
 export interface ApiErrorBody {
 	error: {

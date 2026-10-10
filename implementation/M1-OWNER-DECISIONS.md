@@ -1,10 +1,11 @@
 # M1 — SAHİP KARAR PAKETİ (OWNER DECISIONS)
 
-PROJECT-CONTROL-002 / M1-ARCH-001. **Bu belge yalnızca planlamadır; hiçbir
-uygulama kodu veya migration yazılmamıştır.** PD-01 (ortak PostgreSQL,
-katı izolasyon, RLS yalnızca derinlemesine savunma) ve PD-02
-(kullanıcı birden çok kooperatifte bağımsız roller) **onaylıdır —
-yeniden onay istenmemektedir.**
+PROJECT-CONTROL-002 / M1-ARCH-001.
+
+**DURUM (M1-P0-001): SAHİP TÜM KARARLARI ONAYLADI — PD-01, PD-02,
+M1-K1…M1-K7 → APPROVED.** P0 (tenant kernel) bu onayla uygulandı;
+kapanış kanıtları bu dosyanın sonundaki "P0 Uygulama Kaydı"
+bölümündedir. Karar metinleri aşağıda korunur.
 
 Mevcut zayıflık özeti: 43 iş tablosunun **hiçbirinde** tenant sütunu
 yok; roller/izinler global; oturumda kooperatif yok; `pg_notify`
@@ -123,3 +124,33 @@ Tümü önerilen şekliyle onaylanırsa faz sırası:
 → P4 RLS → P5 realtime+audit → P6 admin API → P7 frontend → P8 test
 matrisi → P9 koop-bazlı export.** UI ancak backend izolasyonu kanıtlandıktan
 sonra açılır.
+
+---
+
+## P0 Uygulama Kaydı (M1-P0-001)
+
+Onaylanan kararlarla uygulanan kapsam:
+
+- `migrations/0018_tenant_kernel.sql` — `cooperatives` (tek
+  `is_bootstrap` partial-unique ile bootstrap tekil), `cooperative_memberships`
+  `(cooperative_id, user_id)` unique, `user_sessions.active_cooperative_id`,
+  `security_events.cooperative_id`. Yıkıcı değişiklik yok; iş tablolarına
+  dokunulmadı (P2'de).
+- `apps/server/src/tenant/` — `repo` (create/add_member/bootstrap/
+  resolve/list/set_session), `extractor` (`TenantCtx`: header → oturum
+  varsayılanı → fail-closed; her istekte üyelik + status +
+  `business_enabled` doğrulaması), `routes`
+  (`POST /api/auth/cooperative`, `GET /api/auth/cooperative-context`,
+  `GET /api/cooperatives`).
+- `auth`: `SessionRow`/`CurrentAuth` + `active_cooperative_id`;
+  `AuthResponse` + `cooperatives[]` + `activeCooperativeId`; audit'e
+  `record_scoped` + 4 yeni event tipi.
+- `main.rs`: CLI `create-cooperative` / `add-member` /
+  `bootstrap-cooperative` (M1-K7 — HTTP yüzeyi yok, audit'li, idempotent).
+- Güvenlik kapısı: `business_enabled=false` kooperatiflerde context
+  kurulamaz → `cooperative_not_ready` (üye dahi olsa). İkinci bir
+  kooperatif, tenant geçişi tamamlanmamış modüllere erişemez.
+- Frontend: contracts'a yeni tipler/path'ler; `auth` store'a
+  `cooperatives`/`activeCooperativeId`; `apiFetch` sekmeye-özel
+  `sessionStorage`'dan `x-cooperative-id` ekler (sekme bağımsızlığı).
+- Testler: `tests/tenant_kernel.rs` — 11 DB-gated test.
