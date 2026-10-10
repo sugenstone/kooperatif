@@ -241,6 +241,24 @@ pub async fn bootstrap_completed(pool: &sqlx::PgPool) -> Result<bool, sqlx::Erro
         .await
 }
 
+/// Whether the installation has provably NEVER run tenant bootstrap
+/// (P1-c1). A missing `is_bootstrap` row alone is NOT sufficient
+/// evidence: a previously bootstrapped database whose bootstrap row was
+/// deleted, disabled, or had its flag flipped would otherwise silently
+/// reopen the pre-tenant access lane. We therefore require BOTH zero
+/// cooperatives AND zero cooperative-attributed audit trail
+/// (`security_events.cooperative_id`) — a bootstrap event, membership
+/// grant or context switch can only exist after real tenancy began.
+pub async fn never_bootstrapped(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM cooperatives) \
+            AND NOT EXISTS(SELECT 1 FROM security_events \
+                           WHERE cooperative_id IS NOT NULL)",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Whether the user holds an active membership in an active,
 /// business-enabled cooperative — the M1 §5 gate predicate for
 /// not-yet-tenant-scoped business modules.

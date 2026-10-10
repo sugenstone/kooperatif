@@ -18,4 +18,4 @@ pub mod gate;
 pub mod repo;
 pub mod routes;
 
-pub use extractor::TenantCtx;
+pub use extractor::{BusinessAuth, BusinessScope, TenantCtx};

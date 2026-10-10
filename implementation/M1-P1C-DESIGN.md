@@ -201,3 +201,25 @@ Bağımlılık zinciri: c1 → c2 → c3 → **d-CLI** → c4 → c5. (P1-e ve P
 
 **P1-c1** — `BusinessAuth` + `require_business` + izolasyon testleri.
 Tek dosya, endpoint değişikliği yok, tamamen geri alınabilir.
+
+## 8. P1-c1 uygulama durumu (M1-P1-004)
+
+TAMAMLANDI ve yerel commit'lendi:
+
+- `tenant/extractor.rs`: `BusinessScope` (`Bootstrap` |
+  `NeverBootstrapped`) + `BusinessAuth` extractor; üyelik doğrulama
+  `verify_business_membership` helper'ına çıkarıldı (TenantCtx ile
+  paylaşılan tek doğrulama).
+- `tenant/repo.rs`: `never_bootstrapped` — sıfır kooperatif AND sıfır
+  coop-attributed `security_events`; eksik bootstrap satırı + residue →
+  fail-closed.
+- `authz.rs`: `effective_permissions_in_bootstrap` (NULL şeridi YALNIZCA
+  bootstrap'a atfedilir — deterministic verified attribution) +
+  `require_business(state, &BusinessAuth, perm)`.
+- `tests/business_auth.rs`: probe router üzerinden 8/8 — explicit
+  bootstrap, headerless pin + session-default yoksayma, explicit
+  non-bootstrap/unknown/malformed red, suspended/ended/sıfır-üyelik,
+  business_enabled=false bootstrap, never-bootstrapped legacy şeridi,
+  residue fail-closed, NULL legacy attribution (bootstrap'ta çalışır /
+  B-only üyeye sızmaz), eşzamanlı context bağımsızlığı.
+- Endpoint'lere BAĞLANMADI (P1-c3); mevcut davranış değişmedi.

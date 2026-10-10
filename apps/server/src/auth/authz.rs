@@ -264,6 +264,93 @@ pub async fn require_in_cooperative(
     }
 }
 
+/// M1-P1-c1 — bootstrap-scope resolution WITH verified legacy
+/// attribution (P1-K3, §4 of the P1-c1 task).
+///
+/// NULL-cooperative role/assignment rows can only have been written in
+/// exactly two ways: (a) before tenancy existed, or (b) by a legacy
+/// NULL-writing path (rbac.rs before P1-c2, `grant-role` before P1-d)
+/// that only ever served the single bootstrap cooperative. They are
+/// therefore attributable to the bootstrap cooperative — and ONLY
+/// there. Deterministic rule, never a cross-cooperative fallback:
+/// `cooperative_id IS NULL` counts when the verified scope is the
+/// bootstrap cooperative; it never counts in any other scope (the
+/// strict resolver `effective_permissions_in_cooperative` already
+/// proves that lane).
+///
+/// An `active` bootstrap membership is still mandatory — a NULL
+/// assignment cannot create access without it.
+pub async fn effective_permissions_in_bootstrap(
+    pool: &PgPool,
+    user_id: Uuid,
+    bootstrap_id: Uuid,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT p.key \
+         FROM user_role_assignments ura \
+         JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+                      AND (r.cooperative_id = $2 OR r.cooperative_id IS NULL) \
+         JOIN cooperative_memberships m \
+           ON m.cooperative_id = $2 AND m.user_id = ura.user_id \
+          AND m.status = 'active' \
+         JOIN role_permissions rp ON rp.role_id = r.id \
+         JOIN permissions p ON p.id = rp.permission_id \
+         WHERE ura.user_id = $1 \
+           AND (ura.cooperative_id = $2 OR ura.cooperative_id IS NULL)",
+    )
+    .bind(user_id)
+    .bind(bootstrap_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// M1-P1-c1 — verified business authorization for legacy business
+/// handlers.
+///
+/// Takes a `BusinessAuth` built by its extractor (never a raw UUID or
+/// header value):
+/// - `BusinessScope::Bootstrap` → permissions resolved in the verified
+///   bootstrap scope, NULL-lane attribution included (see
+///   `effective_permissions_in_bootstrap`);
+/// - `BusinessScope::NeverBootstrapped` → the documented legacy global
+///   path — reachable only when the installation provably predates
+///   tenancy.
+///
+/// Anything else is impossible to represent: the extractor has already
+/// failed closed on unverifiable, non-bootstrap, or broken contexts.
+/// Not yet attached to business routers (P1-c3 migrates call sites).
+pub async fn require_business(
+    state: &AppState,
+    ctx: &crate::tenant::extractor::BusinessAuth,
+    permission: &str,
+) -> Result<(), ApiError> {
+    use crate::tenant::extractor::BusinessScope;
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+    let permissions = match &ctx.scope {
+        BusinessScope::Bootstrap { cooperative_id, .. } => {
+            effective_permissions_in_bootstrap(pool, ctx.auth.user_id, *cooperative_id).await
+        }
+        BusinessScope::NeverBootstrapped => effective_permissions(pool, ctx.auth.user_id).await,
+    }
+    .map_err(|error| {
+        tracing::error!(error = %error, permission, "business permission resolution failed");
+        ApiError::Internal
+    })?;
+    if permissions.contains(permission) {
+        Ok(())
+    } else {
+        tracing::info!(
+            outcome = "permission_denied",
+            user_id = %ctx.auth.user_id,
+            cooperative_id = ?ctx.cooperative_id(),
+            permission,
+            "business authorization denied"
+        );
+        Err(ApiError::PermissionDenied)
+    }
+}
+
 /// Active role summaries of a user (id + display name), safe for API
 /// responses.
 pub async fn active_role_summaries(
