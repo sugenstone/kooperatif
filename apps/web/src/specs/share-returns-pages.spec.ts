@@ -393,4 +393,48 @@ describe('share return detail page', () => {
 		expect(screen.queryByRole('button', { name: 'Kesinleştir' })).not.toBeInTheDocument();
 		expect(screen.queryByRole('button', { name: 'Talebi İptal Et' })).not.toBeInTheDocument();
 	});
+
+	it('cancels an open entitlement only after the in-app confirmation', async () => {
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.endsWith('/cancel') && init?.method === 'POST') {
+				return jsonResponse({});
+			}
+			return detailResponder(finalizedReturn)(url, init);
+		});
+		render(ReturnDetailPage, { data: { id: RETURN_ID } });
+
+		const rowButtons = await screen.findAllByRole('button', { name: 'Hak Edişi İptal Et' });
+		await userEvent.click(rowButtons[0]);
+		const reasonInput = document.getElementById('ec-reason') as HTMLInputElement;
+		reasonInput.value = 'yanlış hak ediş';
+		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+		const panelRow = reasonInput.closest('tr') as HTMLElement;
+		await userEvent.click(within(panelRow).getByRole('button', { name: 'Hak Edişi İptal Et' }));
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) => !(String(input).endsWith('/cancel') && init?.method === 'POST')
+			)
+		).toBe(true);
+
+		await userEvent.click(within(panelRow).getByRole('button', { name: 'Hak Edişi İptal Et' }));
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await tick();
+		const call = fetchMock.mock.calls.find(
+			([input, init]) =>
+				String(input).includes('/share-return-entitlements/') &&
+				String(input).endsWith('/cancel') &&
+				init?.method === 'POST'
+		);
+		expect(call).toBeDefined();
+		const body = JSON.parse(String((call?.[1] as RequestInit).body));
+		expect(body).toEqual({ reason: 'yanlış hak ediş' });
+	});
 });

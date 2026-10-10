@@ -410,4 +410,80 @@ describe('investment detail page', () => {
 		expect(screen.queryByRole('button', { name: 'Yatırımı Tasfiye Et' })).not.toBeInTheDocument();
 		expect(screen.queryByRole('button', { name: 'Yatırımı İptal Et' })).not.toBeInTheDocument();
 	});
+
+	it('cancels a recorded valuation only after the in-app confirmation', async () => {
+		let posted: unknown = null;
+		stubFetch(async (url, init) => {
+			if (
+				url.includes('/investment-valuations/') &&
+				url.endsWith('/cancel') &&
+				init?.method === 'POST'
+			) {
+				posted = JSON.parse(String(init.body));
+				return jsonResponse(baseDetail);
+			}
+			return detailResponder(baseDetail)(url, init);
+		});
+		render(InvestmentDetailPage, { data: { id: INVESTMENT_ID } });
+		await screen.findByText(/Depo Binası/);
+
+		await userEvent.click(screen.getByRole('button', { name: 'Değerlemeyi İptal Et' }));
+		const reasonInput = screen.getByPlaceholderText('İptal gerekçesi') as HTMLInputElement;
+		reasonInput.value = 'hatalı değerleme';
+		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+		const panel = reasonInput.closest('div.flex') as HTMLElement;
+		await userEvent.click(within(panel).getByRole('button', { name: 'Değerlemeyi İptal Et' }));
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(posted).toBeNull();
+
+		await userEvent.click(within(panel).getByRole('button', { name: 'Değerlemeyi İptal Et' }));
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await waitFor(() => expect(posted).not.toBeNull());
+		expect(posted).toMatchObject({ reason: 'hatalı değerleme' });
+	});
+
+	it('reverses a posted income only after the in-app confirmation', async () => {
+		let posted: unknown = null;
+		stubFetch(async (url, init) => {
+			if (
+				url.includes('/investment-incomes/') &&
+				url.endsWith('/reverse') &&
+				init?.method === 'POST'
+			) {
+				posted = JSON.parse(String(init.body));
+				return jsonResponse(baseDetail);
+			}
+			return detailResponder(baseDetail)(url, init);
+		});
+		render(InvestmentDetailPage, { data: { id: INVESTMENT_ID } });
+		await screen.findByText(/Depo Binası/);
+
+		await userEvent.click(screen.getByRole('button', { name: 'Geliri Geri Al' }));
+		const reasonInput = screen.getByPlaceholderText('Geri alma gerekçesi') as HTMLInputElement;
+		reasonInput.value = 'yanlış tutar';
+		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+		const panel = reasonInput.closest('div.flex') as HTMLElement;
+		await userEvent.click(within(panel).getByRole('button', { name: 'Geliri Geri Al' }));
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(posted).toBeNull();
+
+		await userEvent.click(within(panel).getByRole('button', { name: 'Geliri Geri Al' }));
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await waitFor(() => expect(posted).not.toBeNull());
+		expect(posted).toMatchObject({ reason: 'yanlış tutar' });
+	});
 });

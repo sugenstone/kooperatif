@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -377,5 +377,45 @@ describe('Assessment detail page', () => {
 		expect(sources.getAllByText('100,00 ₺').length).toBe(2);
 		expect(sources.getByText('7')).toBeInTheDocument();
 		expect(sources.getByText('9')).toBeInTheDocument();
+	});
+
+	it('closes an open period only after the in-app confirmation', async () => {
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.endsWith('/close') && init?.method === 'POST') {
+				return jsonResponse({ ...openDetail, status: 'closed' });
+			}
+			if (url.includes('/assessments')) return jsonResponse(assessmentsPayload);
+			if (url.includes('/api/periods/')) return jsonResponse(openDetail);
+			return jsonResponse({});
+		});
+		render(PeriodDetail, { data: { id: openDetail.id } });
+
+		await screen.findByText('Dönemi Kapat');
+		await userEvent.click(screen.getByRole('button', { name: 'Dönemi Kapat' }));
+		// REQ-027: no request before the in-app confirmation.
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) => !(String(input).endsWith('/close') && init?.method === 'POST')
+			)
+		).toBe(true);
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) => !(String(input).endsWith('/close') && init?.method === 'POST')
+			)
+		).toBe(true);
+
+		await userEvent.click(screen.getByRole('button', { name: 'Dönemi Kapat' }));
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await tick();
+		const call = fetchMock.mock.calls.find(
+			([input, init]) => String(input).endsWith('/close') && init?.method === 'POST'
+		);
+		expect(call).toBeDefined();
 	});
 });

@@ -370,4 +370,77 @@ describe('social aid fund detail page', () => {
 		// Reversal of history remains available even on a closed fund.
 		expect(screen.getByRole('button', { name: 'Bağışı Geri Al' })).toBeInTheDocument();
 	});
+
+	it('closes the fund only after the in-app confirmation', async () => {
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.endsWith('/close') && init?.method === 'POST') {
+				return jsonResponse({ ...baseDetail, status: 'closed' });
+			}
+			return detailResponder(baseDetail)(url, init);
+		});
+		render(SocialAidDetailPage, { data: { id: FUND_ID } });
+		await screen.findByText(/Eğitim Yardımı/);
+
+		await userEvent.click(screen.getByRole('button', { name: 'Fonu Kapat' }));
+		const panelConfirm = screen.getAllByRole('button', { name: 'Fonu Kapat' }).at(-1)!;
+		await userEvent.click(panelConfirm);
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) => !(String(input).endsWith('/close') && init?.method === 'POST')
+			)
+		).toBe(true);
+
+		await userEvent.click(screen.getAllByRole('button', { name: 'Fonu Kapat' }).at(-1)!);
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await tick();
+		const call = fetchMock.mock.calls.find(
+			([input, init]) => String(input).endsWith('/close') && init?.method === 'POST'
+		);
+		expect(call).toBeDefined();
+	});
+
+	it('posts a disbursement reversal only after the in-app confirmation', async () => {
+		let posted: unknown = null;
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.includes('/disbursements/') && url.endsWith('/reverse') && init?.method === 'POST') {
+				posted = JSON.parse(String(init.body));
+				return jsonResponse(baseDetail);
+			}
+			return detailResponder(baseDetail)(url, init);
+		});
+		render(SocialAidDetailPage, { data: { id: FUND_ID } });
+		await screen.findByText(/Eğitim Yardımı/);
+
+		await userEvent.click(screen.getByRole('button', { name: 'Ödemeyi Geri Al' }));
+		const reasonInput = document.getElementById('rev-dis-reason') as HTMLInputElement;
+		reasonInput.value = 'yanlış tutar';
+		reasonInput.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+		await userEvent.click(screen.getAllByRole('button', { name: 'Ödemeyi Geri Al' }).at(-1)!);
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(posted).toBeNull();
+		expect(
+			fetchMock.mock.calls.every(
+				([input, init]) => !(String(input).endsWith('/reverse') && init?.method === 'POST')
+			)
+		).toBe(true);
+
+		await userEvent.click(screen.getAllByRole('button', { name: 'Ödemeyi Geri Al' }).at(-1)!);
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await waitFor(() => expect(posted).not.toBeNull());
+		expect(posted).toMatchObject({ reason: 'yanlış tutar' });
+	});
 });

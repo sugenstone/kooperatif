@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest';
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -400,5 +400,43 @@ describe('Shareholder detail page', () => {
 		const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
 		const body = JSON.parse(String((patchCall?.[1] as RequestInit).body));
 		expect(body.defaultCollectionAccountId).toBeNull();
+	});
+
+	it('posts the family change only after the in-app confirmation', async () => {
+		const fetchMock = stubFetch(async (url, init) => {
+			if (url.includes('/family-change') && init?.method === 'POST') {
+				return jsonResponse(detailPayload);
+			}
+			return jsonResponse(detailPayload);
+		});
+		render(ShareholderDetail, { data: { id: detailPayload.id } });
+
+		await screen.findByText('Abdullah Üye · Vasi: Belirtilmemiş · Aile No 126');
+		await userEvent.click(screen.getByRole('button', { name: 'Aile Değiştir' }));
+		const seq = document.getElementById('change-seq') as HTMLInputElement;
+		seq.value = '300';
+		seq.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+		await userEvent.click(screen.getByRole('button', { name: 'Aile Değiştir' }));
+		// REQ-027: the in-app AlertDialog gates the mutation.
+		const dialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
+		await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+		document.body.style.pointerEvents = '';
+		document.body.style.overflow = '';
+		expect(fetchMock.mock.calls.every(([input]) => !String(input).includes('/family-change'))).toBe(
+			true
+		);
+
+		await userEvent.click(screen.getByRole('button', { name: 'Aile Değiştir' }));
+		const confirmDialog = await screen.findByRole('alertdialog');
+		await userEvent.click(within(confirmDialog).getByRole('button', { name: 'Onayla' }));
+		await tick();
+		const call = fetchMock.mock.calls.find(
+			([input, init]) => String(input).includes('/family-change') && init?.method === 'POST'
+		);
+		expect(call).toBeDefined();
+		const body = JSON.parse(String((call?.[1] as RequestInit).body));
+		expect(body.family).toEqual({ mode: 'new', sequenceNumber: 300 });
 	});
 });
