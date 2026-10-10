@@ -162,6 +162,7 @@ updated. Each milestone is one or more STEPs, each ending with STOP.
 - Acceptance: two cooperatives with identically numbered families and accounts; an operator of cooperative A sees, posts and receives realtime events only for A; all prior suites green.
 - Risks: largest blast radius of the roadmap (touches every query). Mitigation: mechanical, module-by-module STEPs; contract tests; restore-verified backup before production migration.
 - Decisions: PD-01, PD-02.
+- **M1-ARCH-001 STATUS (2026-10): discovery + planning complete, implementation NOT started.** Detailed artifacts: `M1-ARCHITECTURE-DISCOVERY.md`, `M1-TENANT-DATA-MODEL.md`, `M1-DATABASE-MIGRATION-PLAN.md`, `M1-TENANT-ISOLATION-TEST-MATRIX.md`, `M1-IMPLEMENTATION-ROADMAP.md` (phases P0–P9, gates G1–G5), `M1-OWNER-DECISIONS.md` (7 open decisions M1-K1…K7). Recommended deviations from the sketch above: per-coop counter-table numbering (identity columns cannot produce per-coop sequences — 024.6), header + session-default hybrid context (multi-tab requirement), persons coop-owned, RLS via dedicated `kooperatif_app` role, coop creation via CLI. **Blocked on owner decision gate G1.**
 
 ### M2 — User administration, passwords, audit viewer — M
 
