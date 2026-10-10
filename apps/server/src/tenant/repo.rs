@@ -86,6 +86,10 @@ pub async fn create_cooperative(
 ///
 /// - Creates the unique `is_bootstrap` cooperative (active +
 ///   business-enabled) if absent; otherwise reuses it.
+/// - Records the durable lifecycle marker in `installation_state`
+///   inside the same transaction (M1-P1-005): the marker row is the
+///   authoritative proof that bootstrap happened, and its FK makes the
+///   bootstrap cooperative undeletable while referenced.
 /// - Ensures EVERY user holds an `active` membership — preserves
 ///   existing single-cooperative workflows: users keep working while
 ///   tenant context is introduced.
@@ -115,6 +119,15 @@ pub async fn bootstrap_initial_cooperative(
             .await?
         }
     };
+
+    sqlx::query(
+        "UPDATE installation_state \
+         SET bootstrap_cooperative_id = $1, \
+             tenant_bootstrapped_at = COALESCE(tenant_bootstrapped_at, now())",
+    )
+    .bind(coop_id)
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query(
         "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
@@ -231,27 +244,64 @@ pub async fn list_user_cooperatives(
     .await
 }
 
+/// Resolve the bootstrap cooperative through the durable lifecycle
+/// marker (M1-P1-005) — never from the `is_bootstrap` flag alone.
+///
+/// `installation_state.bootstrap_cooperative_id` is authoritative; the
+/// JOIN additionally requires the referenced row to still carry
+/// `is_bootstrap`. Returns `None` for BOTH legitimately-absent and
+/// inconsistent states (NULL marker, flag-stripped cooperative, marker
+/// pointing at a non-bootstrap row) — callers disambiguate with
+/// `never_bootstrapped`, which fails closed on inconsistency.
+pub async fn resolve_bootstrap(pool: &sqlx::PgPool) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.id, c.name \
+         FROM installation_state s \
+         JOIN cooperatives c ON c.id = s.bootstrap_cooperative_id \
+         WHERE c.is_bootstrap",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 /// Whether the one-time bootstrap has been completed — the only moment
 /// the tenant model is "engaged". Before bootstrap, zero cooperatives
 /// exist and the pre-tenant single-cooperative access rules apply;
 /// afterwards, every business request must resolve through membership.
+///
+/// The durable marker is the primary evidence (M1-P1-005); the
+/// `is_bootstrap` flag is kept as a secondary signal so a database
+/// whose marker was not yet written (pre-0020 state mid-upgrade) is
+/// still treated as engaged rather than reopened.
 pub async fn bootstrap_completed(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cooperatives WHERE is_bootstrap)")
-        .fetch_one(pool)
-        .await
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM installation_state \
+                       WHERE bootstrap_cooperative_id IS NOT NULL) \
+            OR EXISTS(SELECT 1 FROM cooperatives WHERE is_bootstrap)",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// Whether the installation has provably NEVER run tenant bootstrap
-/// (P1-c1). A missing `is_bootstrap` row alone is NOT sufficient
-/// evidence: a previously bootstrapped database whose bootstrap row was
-/// deleted, disabled, or had its flag flipped would otherwise silently
-/// reopen the pre-tenant access lane. We therefore require BOTH zero
-/// cooperatives AND zero cooperative-attributed audit trail
-/// (`security_events.cooperative_id`) — a bootstrap event, membership
-/// grant or context switch can only exist after real tenancy began.
+/// (P1-c1, hardened in M1-P1-005). The legacy lane may open ONLY when
+/// ALL of the following hold:
+///   1. the singleton `installation_state` row exists (a missing marker
+///      record is itself evidence of tampering/partial migration);
+///   2. its `bootstrap_cooperative_id` is NULL — no bootstrap was ever
+///      recorded transactionally;
+///   3. zero cooperative rows exist;
+///   4. zero cooperative-attributed audit events exist.
+///
+/// Any other combination is a broken or previously-tenanted state and
+/// must fail closed — a missing `is_bootstrap` row alone is NEVER
+/// sufficient evidence.
 pub async fn never_bootstrapped(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT NOT EXISTS(SELECT 1 FROM cooperatives) \
+        "SELECT EXISTS(SELECT 1 FROM installation_state) \
+            AND NOT EXISTS(SELECT 1 FROM installation_state \
+                           WHERE bootstrap_cooperative_id IS NOT NULL) \
+            AND NOT EXISTS(SELECT 1 FROM cooperatives) \
             AND NOT EXISTS(SELECT 1 FROM security_events \
                            WHERE cooperative_id IS NOT NULL)",
     )

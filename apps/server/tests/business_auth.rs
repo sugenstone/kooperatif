@@ -579,3 +579,226 @@ async fn concurrent_requests_hold_independent_contexts() {
 
     test.cleanup().await;
 }
+
+// ------------------------------------------------------------------
+// M1-P1-005 — bootstrap lifecycle marker hardening
+// ------------------------------------------------------------------
+
+/// The marker FK makes the bootstrap cooperative undeletable while it
+/// is referenced: a previously bootstrapped database can never degrade
+/// to "bootstrap row missing" through a DELETE.
+#[tokio::test]
+async fn marker_makes_bootstrap_cooperative_undeletable() {
+    let Some(test) = setup().await else { return };
+    let coop = bootstrap(&test.pool).await;
+
+    let err = sqlx::query("DELETE FROM cooperatives WHERE id = $1")
+        .bind(coop)
+        .execute(&test.pool)
+        .await
+        .expect_err("FK must reject deleting the marked bootstrap row");
+    let sqlx::Error::Database(db_err) = err else {
+        panic!("expected FK violation");
+    };
+    assert_eq!(
+        db_err.constraint(),
+        Some("installation_state_bootstrap_cooperative_id_fkey")
+    );
+
+    // Business access is unaffected — the marker still resolves.
+    let user = create_user(&test.pool, "korunan").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", user, None)
+        .await
+        .expect("membership");
+    let (cookie, _) = session_for(&test.pool, user).await;
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe", &cookie, None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    test.cleanup().await;
+}
+
+/// Audit evidence is no longer load-bearing for an already-bootstrapped
+/// installation: deleting every security_event cannot strip the
+/// bootstrap context (the marker is authoritative).
+#[tokio::test]
+async fn audit_evidence_loss_keeps_bootstrap_authority() {
+    let Some(test) = setup().await else { return };
+    let user = create_user(&test.pool, "denetim_kaybi").await;
+    let coop = bootstrap(&test.pool).await;
+    let (cookie, _) = session_for(&test.pool, user).await;
+
+    sqlx::query("DELETE FROM security_events")
+        .execute(&test.pool)
+        .await
+        .expect("wipe audit");
+
+    let (status, body) = request_get(&test.app, test.peer, "/probe", &cookie, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, coop.to_string(), "marker outlives audit loss");
+
+    test.cleanup().await;
+}
+
+/// A marker pointing at a non-bootstrap cooperative is inconsistent —
+/// every business context must fail closed, never re-pick a row.
+#[tokio::test]
+async fn inconsistent_marker_and_flag_fail_closed() {
+    let Some(test) = setup().await else { return };
+    let user = create_user(&test.pool, "tutarsiz").await;
+    bootstrap(&test.pool).await;
+    let (cookie, _) = session_for(&test.pool, user).await;
+
+    // Flag stripped: marker still points at the row but `is_bootstrap`
+    // is gone → resolution is inconsistent → deny (not legacy lane).
+    sqlx::query("UPDATE cooperatives SET is_bootstrap = false WHERE is_bootstrap")
+        .execute(&test.pool)
+        .await
+        .expect("strip flag");
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe", &cookie, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Marker repointed at a real non-bootstrap cooperative → deny.
+    sqlx::query("UPDATE cooperatives SET is_bootstrap = true WHERE is_bootstrap = false")
+        .execute(&test.pool)
+        .await
+        .expect("restore flag");
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B")
+        .id;
+    sqlx::query("UPDATE installation_state SET bootstrap_cooperative_id = $1")
+        .bind(coop_b)
+        .execute(&test.pool)
+        .await
+        .expect("repoint marker");
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe", &cookie, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN,
+        "non-bootstrap marker target must deny"
+    );
+
+    test.cleanup().await;
+}
+
+/// Previously bootstrapped but marker wiped (NULL or row deleted):
+/// cooperative residue exists → the legacy lane must NOT reopen.
+#[tokio::test]
+async fn wiped_or_missing_marker_fails_closed() {
+    let Some(test) = setup().await else { return };
+    let user = create_user(&test.pool, "marker_silindi").await;
+    bootstrap(&test.pool).await;
+    let (cookie, _) = session_for(&test.pool, user).await;
+
+    // Marker NULL + cooperative residue → deny.
+    sqlx::query("UPDATE installation_state SET bootstrap_cooperative_id = NULL")
+        .execute(&test.pool)
+        .await
+        .expect("wipe marker value");
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe", &cookie, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Marker record itself deleted (partial migration / tamper) → deny.
+    sqlx::query("DELETE FROM installation_state")
+        .execute(&test.pool)
+        .await
+        .expect("delete marker row");
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe", &cookie, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Total wipe (marker row + cooperatives + audit): indistinguishable
+    // from never-bootstrapped — this is the documented direct-SQL
+    // residual; verify only that the cooperative residue case above
+    // already fails (the lane's conditions are asserted by
+    // `never_bootstrapped_opens_documented_legacy_lane`).
+    test.cleanup().await;
+}
+
+/// A cooperative row with no bootstrap marker (partial provisioning /
+/// migration) is residue, not a context: deny for any request.
+#[tokio::test]
+async fn partially_provisioned_cooperative_fails_closed() {
+    let Some(test) = setup().await else { return };
+    let user = create_user(&test.pool, "kismi_kurulum").await;
+    repo::create_cooperative(&test.pool, "Taslak Kooperatif", None)
+        .await
+        .expect("non-bootstrap coop");
+    let (cookie, _) = session_for(&test.pool, user).await;
+
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe", &cookie, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    test.cleanup().await;
+}
+
+/// NULL writers still exist (rbac.rs / grant-role until P1-c2/P1-d):
+/// a NULL-cooperative role+assignment created AFTER bootstrap remains
+/// bootstrap-attributed — the documented, temporary compatibility —
+/// while never leaking to another cooperative's member.
+#[tokio::test]
+async fn post_bootstrap_null_assignment_stays_bootstrap_scoped() {
+    let Some(test) = setup().await else { return };
+    let coop = bootstrap(&test.pool).await;
+
+    // Bootstrap member with a fresh NULL assignment → granted in
+    // bootstrap scope (verified legacy attribution).
+    let admin = create_user(&test.pool, "yeni_null_admin").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", admin, None)
+        .await
+        .expect("bootstrap membership");
+    grant_perm(&test.pool, admin, "payments.read", None).await;
+    let (cookie_a, _) = session_for(&test.pool, admin).await;
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe-perm", &cookie_a, None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // A different-cooperative member holding the same NULL grant gets
+    // nothing in the bootstrap scope.
+    let b_member = create_user(&test.pool, "b_uyesi_null").await;
+    repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("coop B");
+    repo::add_member(&test.pool, "B Kooperatifi", b_member, None)
+        .await
+        .expect("B membership");
+    grant_perm(&test.pool, b_member, "payments.read", None).await;
+    let (cookie_b, _) = session_for(&test.pool, b_member).await;
+    assert_eq!(
+        request_get(&test.app, test.peer, "/probe-perm", &cookie_b, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN,
+        "NULL assignment never creates cross-cooperative access"
+    );
+
+    // Scope still resolves to the bootstrap cooperative id.
+    let (status, body) = request_get(&test.app, test.peer, "/probe", &cookie_a, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, coop.to_string());
+
+    test.cleanup().await;
+}

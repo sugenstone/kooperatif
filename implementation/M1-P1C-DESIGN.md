@@ -52,6 +52,21 @@ resolve():
       legacy endpoint'ler için anlamsız ve karışıklık kaynağı)
   bootstrap yoksa                   → ctx.cooperative_id = None
       (pre-tenant legacy şeridi — P0 gate'in aynı istisnası)
+
+### Bootstrap çözümü — dayanıklı marker (M1-P1-005, uygulandı)
+`is_bootstrap` bayrağı tek başına delil değildir: flag-stripped ya da
+silinmiş bootstrap satırı + kayıp audit izi, global şeridi yanlışlıkla
+yeniden açabilirdi. `0020_installation_state.sql` ile tek satırlı
+`installation_state` tablosu eklendi; `bootstrap_cooperative_id` FK'si
+bootstrap kooperatifini referanslı iken SİLİNEMEZ kılar ve marker yalnızca
+`bootstrap_initial_cooperative` tarafından, kooperatifle AYNI transaction
+içinde yazılır — sıradan kooperatif yönetimiyle kaldırılamaz.
+`resolve_bootstrap()` marker'dan JOIN'ler ve `c.is_bootstrap` tutarlılığı
+şarttır; tutarsızlık (flag-strip, non-bootstrap hedef) → çözüm yok →
+`never_bootstrapped` residue kontrolüyle fail-closed. `never_bootstrapped`
+artık 4 kanıt ister: singleton marker satırı mevcut + marker NULL +
+sıfır kooperatif + sıfır coop-attributed audit. Yükseltme yolu: 0020,
+mevcut bootstrap kurulumları için marker'ı geriye dönük doldurur.
   sonrasında resolve_membership() ile TenantCtx ile BİREBİR aynı
   doğrulama: membership yoksa / status != 'active' → 403;
   coop status != 'active' → 403; business_enabled=false →

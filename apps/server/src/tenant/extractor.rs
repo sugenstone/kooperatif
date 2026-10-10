@@ -123,9 +123,11 @@ async fn verify_business_membership(
 /// - `Bootstrap`: the unique `is_bootstrap` cooperative after full
 ///   membership/status/`business_enabled` verification. Until P2 owns
 ///   business rows, legacy endpoints only ever run in this scope.
-/// - `NeverBootstrapped`: the database provably predates tenancy (zero
-///   cooperatives AND zero cooperative-attributed audit trail). The only
-///   state where the legacy global authorization lane may open.
+/// - `NeverBootstrapped`: the database provably predates tenancy —
+///   `installation_state` singleton exists with a NULL marker AND zero
+///   cooperatives AND zero cooperative-attributed audit events
+///   (M1-P1-005). The only state where the legacy global authorization
+///   lane may open.
 #[derive(Debug, Clone)]
 pub enum BusinessScope {
     Bootstrap {
@@ -145,11 +147,14 @@ pub enum BusinessScope {
 ///   `active_cooperative_id` UX default is deliberately IGNORED — it is
 ///   not a security decision and must never pick a different scope for
 ///   a legacy endpoint.
-/// - Bootstrap absent: the legacy lane opens only when
+/// - Bootstrap resolution is marker-authoritative (M1-P1-005): the
+///   `installation_state` FK makes the bootstrap row undeletable while
+///   referenced, and a marker/flag inconsistency resolves to no
+///   bootstrap. The legacy lane then opens only when
 ///   `never_bootstrapped` proves the installation predates tenancy;
-///   any residual cooperative rows or cooperative-attributed audit
-///   events without a bootstrap row mean the tenant state is broken
-///   and the request fails closed.
+///   any marker, cooperative residue, or cooperative-attributed audit
+///   event means the tenant state is broken and the request fails
+///   closed.
 #[derive(Debug, Clone)]
 pub struct BusinessAuth {
     pub auth: CurrentAuth,
@@ -177,14 +182,12 @@ impl FromRequestParts<AppState> for BusinessAuth {
         let auth = CurrentAuth::from_request_parts(parts, state).await?;
         let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
 
-        let bootstrap: Option<(Uuid, String)> =
-            sqlx::query_as("SELECT id, name FROM cooperatives WHERE is_bootstrap")
-                .fetch_optional(pool)
-                .await
-                .map_err(|error| {
-                    tracing::error!(error = %error, "business context bootstrap lookup failed");
-                    ApiError::Internal
-                })?;
+        let bootstrap = crate::tenant::repo::resolve_bootstrap(pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "business context bootstrap lookup failed");
+                ApiError::Internal
+            })?;
 
         let explicit = match parts.headers.get(COOPERATIVE_HEADER) {
             Some(value) => {
