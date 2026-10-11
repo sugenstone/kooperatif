@@ -33,7 +33,6 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::credits::repo as credit_repo;
 use crate::http::error::ApiError;
@@ -41,6 +40,7 @@ use crate::http::AppState;
 use crate::parties::repo as party_repo;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::shares::routes::{identity_dto, ShareholderIdentityDto};
+use crate::tenant::extractor::BusinessAuth;
 
 use super::model as payment_model;
 use super::repo as payment_repo;
@@ -84,12 +84,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Payment mutations share this prologue (CSRF layers + permission).
 macro_rules! payments_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::PAYMENTS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::PAYMENTS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -565,10 +565,10 @@ fn validated_payment(
 
 pub async fn list_payments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<PaymentListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = payment_repo::list_payments(pool, query.search.as_deref(), page, page_size)
@@ -589,10 +589,10 @@ pub async fn list_payments(
 /// management rights.
 pub async fn payer_persons(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PayerQuery>,
 ) -> Result<Json<Vec<PayerCandidateDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     if query.search.trim().is_empty() {
         return Ok(Json(Vec::new()));
@@ -627,10 +627,10 @@ pub async fn payer_persons(
 pub async fn create_payment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreatePaymentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let validated = validated_payment(body, now)?;
     let fingerprint = payment_model::idempotency_fingerprint(&payment_model::PaymentFingerprint {
@@ -651,7 +651,7 @@ pub async fn create_payment(
 
     let outcome = payment_repo::create_payment(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         payment_repo::CreatePayment {
             payer_person_id: validated.payer_person_id,
             payer_first_name: validated.payer_first_name,
@@ -670,10 +670,11 @@ pub async fn create_payment(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::PaymentPosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "payment_id": outcome.payment_id,
@@ -692,7 +693,7 @@ pub async fn create_payment(
         tracing::info!(
             outcome = "payment_posted", id = %outcome.payment_id,
             number = outcome.payment_number,
-            allocations = outcome.allocation_count, actor = %auth.user_id
+            allocations = outcome.allocation_count, actor = %ctx.auth.user_id
         );
     }
 
@@ -756,10 +757,10 @@ async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentDetailDto, 
 
 pub async fn get_payment(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let exists = payment_repo::find_payment(pool, id)
         .await
@@ -774,11 +775,11 @@ pub async fn get_payment(
 pub async fn add_allocations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<AddAllocationsRequest>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
     if body.allocations.is_empty() || body.allocations.len() > 500 {
         return Err(ApiError::ValidationFailed);
     }
@@ -792,13 +793,14 @@ pub async fn add_allocations(
         });
     }
 
-    let outcome = payment_repo::add_allocations(pool, auth.user_id, id, allocations)
+    let outcome = payment_repo::add_allocations(pool, ctx.auth.user_id, id, allocations)
         .await
         .map_err(command_error)?;
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::PaymentAllocationsAdded,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "payment_id": id,
@@ -816,22 +818,23 @@ pub async fn add_allocations(
 pub async fn reverse_payment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = payment_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let outcome =
-        payment_repo::reverse_payment(pool, auth.user_id, id, reason, state.auth.clock.now())
+        payment_repo::reverse_payment(pool, ctx.auth.user_id, id, reason, state.auth.clock.now())
             .await
             .map_err(command_error)?;
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::PaymentReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "payment_id": id,
@@ -841,7 +844,7 @@ pub async fn reverse_payment(
             }),
         )
         .await;
-        tracing::info!(outcome = "payment_reversed", id = %id, actor = %auth.user_id);
+        tracing::info!(outcome = "payment_reversed", id = %id, actor = %ctx.auth.user_id);
     }
     load_detail(pool, id).await.map(Json)
 }
@@ -851,16 +854,16 @@ pub async fn reverse_payment(
 pub async fn reverse_allocation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path((id, allocation_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = payment_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let outcome = payment_repo::reverse_allocation(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         id,
         allocation_id,
         reason,
@@ -869,10 +872,11 @@ pub async fn reverse_allocation(
     .await
     .map_err(command_error)?;
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::PaymentAllocationReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "payment_id": id,
@@ -889,10 +893,10 @@ pub async fn reverse_allocation(
 /// still valid?" surface (docs/06 §64).
 pub async fn assessment_payments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<AssessmentPaymentDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assessments WHERE id = $1)")
         .bind(id)
@@ -931,10 +935,10 @@ pub async fn assessment_payments(
 /// remaining amounts.
 pub async fn shareholder_open_assessments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(shareholder_id): Path<Uuid>,
 ) -> Result<Json<Vec<OpenAssessmentDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
@@ -970,10 +974,10 @@ pub async fn shareholder_open_assessments(
 /// always derived, never a stored balance.
 pub async fn shareholder_financial_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(shareholder_id): Path<Uuid>,
 ) -> Result<Json<FinancialSummaryDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
@@ -1002,10 +1006,10 @@ pub async fn shareholder_financial_summary(
 /// silently attributed across periods.
 pub async fn period_financial_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(period_id): Path<Uuid>,
 ) -> Result<Json<PeriodFinancialSummaryDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM periods WHERE id = $1)")
         .bind(period_id)
@@ -1034,10 +1038,10 @@ pub async fn period_financial_summary(
 /// collection flow; the Family itself is never the debtor.
 pub async fn family_collection_context(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(family_id): Path<Uuid>,
 ) -> Result<Json<FamilyCollectionContextDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let family = party_repo::find_family(pool, family_id)
         .await

@@ -98,6 +98,9 @@ fn quoted_ident(name: &str) -> String {
 /// Advisory-lock key shared by the owner heartbeat and GC transitions.
 const GC_LOCK_KEY_SQL: &str = "hashtextextended($1, 0)";
 
+/// Advisory-lock key for the GC leader election — one sweep at a time.
+const GC_LEADER_KEY_SQL: &str = "hashtextextended('kooperatif-gc-leader', 0)";
+
 /// Claim a disposable test database: writes the owned marker on a
 /// DEDICATED admin connection (not the shared pool — the caller may
 /// close it) and spawns the heartbeat task. The returned claim stops
@@ -260,12 +263,32 @@ impl DropGate {
     }
 }
 
+/// Best-effort sweep entry point (test setups). Leader-elected: only
+/// one sweep runs at a time across ALL callers/processes; losers
+/// return immediately. Sweeps are idempotent — a lost pass costs
+/// nothing because the winner (or the next caller) does the work.
 pub async fn drop_stale_test_databases(admin: &PgPool) -> u64 {
-    drop_stale_test_databases_gated(admin, None).await
+    drop_stale_test_databases_impl(admin, None, true).await
+}
+
+/// Test-only variant that bypasses leader election — the GC behavior
+/// tests need a pass that deterministically executes instead of
+/// deferring to whichever sweeper won leadership.
+#[doc(hidden)]
+pub async fn drop_stale_test_databases_forced(admin: &PgPool) -> u64 {
+    drop_stale_test_databases_impl(admin, None, false).await
 }
 
 #[doc(hidden)]
 pub async fn drop_stale_test_databases_gated(admin: &PgPool, gate: Option<&DropGate>) -> u64 {
+    drop_stale_test_databases_impl(admin, gate, false).await
+}
+
+async fn drop_stale_test_databases_impl(
+    admin: &PgPool,
+    gate: Option<&DropGate>,
+    elect_leader: bool,
+) -> u64 {
     let now: i64 = match sqlx::query_scalar("SELECT extract(epoch from now())::bigint")
         .fetch_one(admin)
         .await
@@ -276,7 +299,7 @@ pub async fn drop_stale_test_databases_gated(admin: &PgPool, gate: Option<&DropG
             return 0;
         }
     };
-    let names: Vec<String> = match sqlx::query_scalar(
+    let mut names: Vec<String> = match sqlx::query_scalar(
         "SELECT d.datname FROM pg_database d \
          WHERE d.datname ~ '^kooperatif_test_[0-9a-f]{32}$' \
            AND NOT d.datistemplate \
@@ -293,6 +316,13 @@ pub async fn drop_stale_test_databases_gated(admin: &PgPool, gate: Option<&DropG
             return 0;
         }
     };
+    // A gated pass exists to reach its one probed candidate promptly —
+    // process it first so the sweep isn't O(candidates) under load.
+    if let Some(gate) = gate {
+        if let Some(index) = names.iter().position(|name| *name == gate.database) {
+            names.swap(0, index);
+        }
+    }
     // Advisory locks are session-scoped — pin ONE connection so lock,
     // re-check, transition and unlock run on the same backend.
     let mut conn = match admin.acquire().await {
@@ -302,6 +332,22 @@ pub async fn drop_stale_test_databases_gated(admin: &PgPool, gate: Option<&DropG
             return 0;
         }
     };
+    // Leader election: GC sweeps are idempotent, so duplicate
+    // concurrent passes only multiply cost — every candidate DROP
+    // queues on the single checkpointer while holding the candidate's
+    // advisory lock, starving the other sweepers' try-locks
+    // (checkpoint convoy). One sweeper at a time; losers do nothing
+    // and the next caller retries.
+    if elect_leader {
+        let won: bool =
+            sqlx::query_scalar(&format!("SELECT pg_try_advisory_lock({GC_LEADER_KEY_SQL})"))
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap_or(false);
+        if !won {
+            return 0;
+        }
+    }
     let mut dropped = 0u64;
     for name in names {
         let locked: bool =
@@ -313,6 +359,12 @@ pub async fn drop_stale_test_databases_gated(admin: &PgPool, gate: Option<&DropG
                 Ok(locked) => locked,
                 Err(error) => {
                     tracing::warn!(error = %error, "GC lock attempt failed");
+                    if elect_leader {
+                        let _ =
+                            sqlx::query(&format!("SELECT pg_advisory_unlock({GC_LEADER_KEY_SQL})"))
+                                .execute(&mut *conn)
+                                .await;
+                    }
                     return dropped;
                 }
             };
@@ -328,6 +380,11 @@ pub async fn drop_stale_test_databases_gated(admin: &PgPool, gate: Option<&DropG
         if matches!(outcome, GcOutcome::Dropped) {
             dropped += 1;
         }
+    }
+    if elect_leader {
+        let _ = sqlx::query(&format!("SELECT pg_advisory_unlock({GC_LEADER_KEY_SQL})"))
+            .execute(&mut *conn)
+            .await;
     }
     if dropped > 0 {
         tracing::info!(dropped, "stale test databases dropped");

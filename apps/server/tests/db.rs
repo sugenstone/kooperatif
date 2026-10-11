@@ -170,18 +170,31 @@ fn probe_admin_url() -> String {
         .expect("url with database segment")
 }
 
-/// Run GC passes until the probe is gone (bounded). Under parallel
-/// load a pass may skip a droppable database when a concurrent pass
-/// holds its advisory lock — eventual reclamation is the contract.
+/// Run GC passes until the probe is gone (deadline-bounded). Uses
+/// the leader-elected sweep: under parallel load a losing call is a
+/// cheap no-op while whichever sweeper holds leadership does the
+/// work — avoids adding to the checkpoint convoy. Eventual
+/// reclamation within a generous deadline is the contract, not
+/// pass count.
 async fn dropped_eventually(admin: &sqlx::PgPool, name: &str) -> bool {
-    for _ in 0..5 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
         let _ = db::drop_stale_test_databases(admin).await;
         if !probe_exists(admin, name).await {
             return true;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    false
+    let comment = probe_comment(admin, name).await;
+    let conns: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = $1")
+        .bind(name)
+        .fetch_one(admin)
+        .await
+        .unwrap_or(-1);
+    panic!("probe {name} survived 120s of GC passes: comment={comment:?} conns={conns}")
 }
 
 #[tokio::test]
@@ -193,7 +206,7 @@ async fn gc_marks_on_first_sighting_then_drops_after_grace() {
     // First pass: zero connections, no marker → marked, NOT dropped.
     // (Probe-state assertions only — a parallel pass may legitimately
     // drop unrelated stale databases, making the count unreliable.)
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(
         probe_exists(&admin, &name).await,
         "probe must survive pass 1"
@@ -205,7 +218,7 @@ async fn gc_marks_on_first_sighting_then_drops_after_grace() {
     );
 
     // Second pass inside the grace window → still protected.
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(probe_exists(&admin, &name).await);
 
     // Backdate the marker past the 30-minute grace → reclaimed.
@@ -238,7 +251,7 @@ async fn gc_never_touches_connected_or_nonmatching_databases() {
         .expect("live connection");
     sqlx::query("SELECT 1").execute(&live).await.unwrap();
 
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(
         probe_exists(&admin, &matching).await,
         "connected DB survived"
@@ -250,7 +263,7 @@ async fn gc_never_touches_connected_or_nonmatching_databases() {
 
     // Now idle it: close the pool — first sighting marks, never drops.
     live.close().await;
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(probe_exists(&admin, &matching).await);
     // The nonmatching name must not carry a marker either.
     assert!(probe_comment(&admin, &nonmatching).await.is_none());
@@ -277,7 +290,7 @@ async fn claimed_database_survives_indefinite_idle_without_connections() {
 
     // Stay disconnected far longer than a single heartbeat cycle.
     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(
         probe_exists(&admin, &name).await,
         "claimed DB must never be dropped"
@@ -290,7 +303,7 @@ async fn claimed_database_survives_indefinite_idle_without_connections() {
 
     // More heartbeats + another pass — still owned, still alive.
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(probe_exists(&admin, &name).await);
 
     claim.stop();
@@ -308,7 +321,7 @@ async fn expired_lease_demotes_to_pending_before_any_drop() {
 
     // Simulate a dead owner: an owned marker far past the lease TTL.
     set_probe_comment(&admin, &name, "kooperatif-test-owned:1").await;
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(
         probe_exists(&admin, &name).await,
         "expired lease must demote, not drop"
@@ -320,7 +333,7 @@ async fn expired_lease_demotes_to_pending_before_any_drop() {
     );
 
     // Fresh pending marker → still protected inside the grace window.
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(probe_exists(&admin, &name).await);
 
     // Age the pending marker past the grace → finally reclaimed.
@@ -354,7 +367,7 @@ async fn interrupted_run_is_reclaimed_after_pending_grace() {
     // With the heartbeat dead the lease goes stale (backdated here so
     // the test stays fast — the transition path is identical).
     set_probe_comment(&admin, &name, "kooperatif-test-owned:1").await;
-    let _ = db::drop_stale_test_databases(&admin).await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(
         probe_exists(&admin, &name).await,
         "first sighting of dead lease demotes"

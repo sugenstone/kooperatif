@@ -31,12 +31,12 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::payments::model as payment_model;
+use crate::tenant::extractor::BusinessAuth;
 
 use super::model as account_model;
 use super::repo as account_repo;
@@ -83,12 +83,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Account mutations share the full CSRF + permission prologue.
 macro_rules! accounts_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::FINANCIAL_ACCOUNTS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::FINANCIAL_ACCOUNTS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -248,10 +248,10 @@ pub struct AccountListQuery {
 
 pub async fn list_accounts(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AccountListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
     let list = ListQuery {
         search: query.search.clone(),
@@ -299,15 +299,15 @@ pub async fn list_accounts(
 /// union of the two read surfaces is allowed.
 pub async fn account_options(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Response, ApiError> {
     // Either capability suffices: viewing active accounts or posting
     // collections into them.
-    if authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ)
+    if authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ)
         .await
         .is_err()
     {
-        authz::require(&state, &auth, authz::catalog::PAYMENTS_MANAGE).await?;
+        authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_MANAGE).await?;
     }
     let pool = pool_of(&state)?;
     let rows = account_repo::list_active_account_options(pool)
@@ -337,9 +337,9 @@ pub async fn account_options(
 /// cross-currency sum (STEP-008 is TRY-only; the grouping is explicit).
 pub async fn accounts_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
     let rows = account_repo::total_balance_by_currency(pool)
         .await
@@ -361,10 +361,10 @@ pub async fn accounts_summary(
 
 pub async fn get_account(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
     let row = account_repo::get_account(pool, id).await.map_err(|e| {
         tracing::error!(error = %e, "get account failed");
@@ -378,11 +378,11 @@ pub async fn get_account(
 
 pub async fn list_movements(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
     if account_repo::get_account(pool, id)
         .await
@@ -453,10 +453,10 @@ pub struct CreateAccountRequest {
 pub async fn create_account(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateAccountRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = accounts_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
     let name = account_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
     let account_type = AccountType::parse(&body.account_type).ok_or(ApiError::ValidationFailed)?;
     let description = account_model::validate_description(body.description.as_deref())
@@ -472,7 +472,7 @@ pub async fn create_account(
 
     let id = account_repo::create_account(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         account_repo::CreateAccount {
             name,
             account_type,
@@ -484,10 +484,11 @@ pub async fn create_account(
     .await
     .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FinancialAccountCreated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "accountId": id }),
     )
@@ -520,11 +521,11 @@ pub struct UpdateAccountRequest {
 pub async fn update_account(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateAccountRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = accounts_mutation!(&state, &headers, &auth, &Method::PATCH);
+    let pool = accounts_mutation!(&state, &headers, &ctx, &Method::PATCH);
     let name = account_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
     let description = account_model::validate_description(body.description.as_deref())
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -556,10 +557,11 @@ pub async fn update_account(
     .await
     .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FinancialAccountUpdated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "accountId": id }),
     )
@@ -584,19 +586,20 @@ pub struct StatusChangeRequest {
 pub async fn change_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<StatusChangeRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = accounts_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
     let target = AccountStatus::parse(&body.status).ok_or(ApiError::ValidationFailed)?;
     account_repo::change_account_status(pool, id, target)
         .await
         .map_err(command_error)?;
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FinancialAccountStatusChanged,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "accountId": id, "status": target.as_str() }),
     )
@@ -629,10 +632,10 @@ pub struct PostTransferRequest {
 
 pub async fn list_transfers(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<AccountTransferDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = account_repo::list_transfers(pool, page, page_size)
@@ -655,10 +658,10 @@ pub async fn list_transfers(
 pub async fn post_transfer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostTransferRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = accounts_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let amount = account_model::validate_positive_amount(&body.amount)
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -690,7 +693,7 @@ pub async fn post_transfer(
 
     let outcome = account_repo::post_transfer(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         account_repo::PostTransfer {
             source_account_id: body.source_account_id,
             destination_account_id: body.destination_account_id,
@@ -705,10 +708,11 @@ pub async fn post_transfer(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::AccountTransferPosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "transferId": outcome.transfer_id,
@@ -739,10 +743,10 @@ pub async fn post_transfer(
 
 pub async fn get_transfer(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
     let row = account_repo::get_transfer(pool, id).await.map_err(|e| {
         tracing::error!(error = %e, "get transfer failed");
@@ -764,23 +768,24 @@ pub struct ReverseTransferRequest {
 pub async fn reverse_transfer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseTransferRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = accounts_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = account_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
     let (replayed, transfer_number) =
-        account_repo::reverse_transfer(pool, auth.user_id, id, reason, now)
+        account_repo::reverse_transfer(pool, ctx.auth.user_id, id, reason, now)
             .await
             .map_err(command_error)?;
     if !replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::AccountTransferReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({ "transferId": id, "transferNumber": transfer_number }),
         )
