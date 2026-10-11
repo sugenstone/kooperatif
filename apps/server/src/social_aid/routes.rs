@@ -39,7 +39,6 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
@@ -49,6 +48,7 @@ use crate::payments::model as payment_model;
 use crate::social_aid::model as aid_model;
 use crate::social_aid::repo as aid_repo;
 use crate::social_aid::repo::SocialAidError;
+use crate::tenant::extractor::BusinessAuth;
 
 pub fn social_aid_router() -> Router<AppState> {
     Router::new()
@@ -86,12 +86,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Social Aid mutations share the full CSRF + permission prologue.
 macro_rules! social_aid_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::SOCIAL_AID_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::SOCIAL_AID_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -394,10 +394,10 @@ pub struct FundListQuery {
 
 pub async fn list_funds(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<FundListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
     let list = ListQuery {
         search: query.search.clone(),
@@ -458,10 +458,10 @@ pub async fn list_funds(
 
 pub async fn get_fund(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
     load_detail(pool, id)
         .await?
@@ -497,10 +497,10 @@ pub struct PersonLookupDto {
 
 pub async fn person_lookup(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PersonLookupQuery>,
 ) -> Result<Json<Vec<PersonLookupDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_MANAGE).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_MANAGE).await?;
     let pool = pool_of(&state)?;
     let search = query.search.as_deref().unwrap_or_default();
     if search.trim().is_empty() {
@@ -537,10 +537,10 @@ pub struct EventListQuery {
 
 pub async fn list_donations(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EventListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&ListQuery {
         search: None,
@@ -569,10 +569,10 @@ pub async fn list_donations(
 
 pub async fn get_donation(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
     aid_repo::get_donation(pool, id)
         .await
@@ -583,10 +583,10 @@ pub async fn get_donation(
 
 pub async fn list_disbursements(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EventListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&ListQuery {
         search: None,
@@ -615,10 +615,10 @@ pub async fn list_disbursements(
 
 pub async fn get_disbursement(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
     aid_repo::get_disbursement(pool, id)
         .await
@@ -646,10 +646,10 @@ pub struct CreateFundRequest {
 pub async fn create_fund(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateFundRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
 
     let name = aid_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
     let description = aid_model::validate_description(body.description.as_deref())
@@ -672,7 +672,7 @@ pub async fn create_fund(
 
     let outcome = aid_repo::create_fund(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         aid_repo::CreateFund {
             name,
             description,
@@ -686,10 +686,11 @@ pub async fn create_fund(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::SocialAidFundCreated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "fundId": outcome.fund_id,
@@ -699,7 +700,7 @@ pub async fn create_fund(
         .await;
         tracing::info!(
             outcome = "social_aid_fund_created", id = %outcome.fund_id,
-            number = outcome.fund_number, actor = %auth.user_id
+            number = outcome.fund_number, actor = %ctx.auth.user_id
         );
     }
 
@@ -719,20 +720,21 @@ pub async fn create_fund(
 pub async fn close_fund(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
 
-    let number = aid_repo::close_fund(pool, auth.user_id, id, now)
+    let number = aid_repo::close_fund(pool, ctx.auth.user_id, id, now)
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::SocialAidFundClosed,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "fundId": id, "fundNumber": number }),
     )
@@ -752,23 +754,24 @@ pub struct CancelFundRequest {
 pub async fn cancel_fund(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelFundRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason =
         aid_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
 
-    let number = aid_repo::cancel_fund(pool, auth.user_id, id, reason, now)
+    let number = aid_repo::cancel_fund(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::SocialAidFundCancelled,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "fundId": id, "fundNumber": number }),
     )
@@ -805,10 +808,10 @@ pub struct PostDonationRequest {
 pub async fn post_donation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostDonationRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
 
     let amount = aid_model::validate_positive_amount(&body.amount)
@@ -841,7 +844,7 @@ pub async fn post_donation(
 
     let outcome = aid_repo::post_donation(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         aid_repo::PostDonation {
             fund_id: body.fund_id,
             donor_person_id: body.donor_person_id,
@@ -859,10 +862,11 @@ pub async fn post_donation(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::SocialAidDonationPosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "donationId": outcome.event_id,
@@ -873,7 +877,7 @@ pub async fn post_donation(
         .await;
         tracing::info!(
             outcome = "social_aid_donation_posted", id = %outcome.event_id,
-            number = outcome.event_number, fund = %body.fund_id, actor = %auth.user_id
+            number = outcome.event_number, fund = %body.fund_id, actor = %ctx.auth.user_id
         );
     }
 
@@ -899,24 +903,25 @@ pub struct ReverseRequest {
 pub async fn reverse_donation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason = aid_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
 
-    let (already, number) = aid_repo::reverse_donation(pool, auth.user_id, id, reason, now)
+    let (already, number) = aid_repo::reverse_donation(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
     if !already {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::SocialAidDonationReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({ "donationId": id, "donationNumber": number }),
         )
@@ -955,10 +960,10 @@ pub struct PostDisbursementRequest {
 pub async fn post_disbursement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostDisbursementRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
 
     let amount = aid_model::validate_positive_amount(&body.amount)
@@ -992,7 +997,7 @@ pub async fn post_disbursement(
 
     let outcome = aid_repo::post_disbursement(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         aid_repo::PostDisbursement {
             fund_id: body.fund_id,
             beneficiary_person_id: body.beneficiary_person_id,
@@ -1010,10 +1015,11 @@ pub async fn post_disbursement(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::SocialAidDisbursementPosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "disbursementId": outcome.event_id,
@@ -1024,7 +1030,7 @@ pub async fn post_disbursement(
         .await;
         tracing::info!(
             outcome = "social_aid_disbursement_posted", id = %outcome.event_id,
-            number = outcome.event_number, fund = %body.fund_id, actor = %auth.user_id
+            number = outcome.event_number, fund = %body.fund_id, actor = %ctx.auth.user_id
         );
     }
 
@@ -1043,24 +1049,25 @@ pub async fn post_disbursement(
 pub async fn reverse_disbursement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason = aid_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
 
-    let (already, number) = aid_repo::reverse_disbursement(pool, auth.user_id, id, reason, now)
+    let (already, number) = aid_repo::reverse_disbursement(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
     if !already {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::SocialAidDisbursementReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({ "disbursementId": id, "disbursementNumber": number }),
         )
