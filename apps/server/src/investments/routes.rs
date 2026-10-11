@@ -35,7 +35,6 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
@@ -44,6 +43,7 @@ use crate::investments::repo as inv_repo;
 use crate::investments::repo::InvestmentCommandError;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::payments::model as payment_model;
+use crate::tenant::extractor::BusinessAuth;
 
 pub fn investments_router() -> Router<AppState> {
     Router::new()
@@ -77,12 +77,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Investment mutations share the full CSRF + permission prologue.
 macro_rules! investments_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::INVESTMENTS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::INVESTMENTS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -477,10 +477,10 @@ pub struct InvestmentListQuery {
 
 pub async fn list_investments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<InvestmentListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INVESTMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INVESTMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let list = ListQuery {
         search: query.search.clone(),
@@ -553,10 +553,10 @@ pub async fn list_investments(
 
 pub async fn get_investment(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INVESTMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INVESTMENTS_READ).await?;
     let pool = pool_of(&state)?;
     load_detail(pool, id)
         .await?
@@ -588,10 +588,10 @@ pub struct CreateInvestmentRequest {
 pub async fn create_investment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateInvestmentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let today = istanbul_today(now);
 
@@ -629,7 +629,7 @@ pub async fn create_investment(
 
     let outcome = inv_repo::create_investment(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         inv_repo::CreateInvestment {
             name,
             investment_type,
@@ -646,10 +646,11 @@ pub async fn create_investment(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentCreated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "investmentId": outcome.investment_id,
@@ -659,7 +660,7 @@ pub async fn create_investment(
         .await;
         tracing::info!(
             outcome = "investment_created", id = %outcome.investment_id,
-            number = outcome.investment_number, actor = %auth.user_id
+            number = outcome.investment_number, actor = %ctx.auth.user_id
         );
     }
 
@@ -684,23 +685,24 @@ pub struct CancelInvestmentRequest {
 pub async fn cancel_investment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelInvestmentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason = inv_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
 
-    let number = inv_repo::cancel_investment(pool, auth.user_id, id, reason, now)
+    let number = inv_repo::cancel_investment(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::InvestmentCancelled,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "investmentId": id, "investmentNumber": number }),
     )
@@ -731,11 +733,11 @@ pub struct PostFundingRequest {
 pub async fn post_funding(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<PostFundingRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
 
     let amount = inv_model::validate_positive_amount(&body.amount)
@@ -759,7 +761,7 @@ pub async fn post_funding(
 
     let outcome = inv_repo::post_funding(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         inv_repo::PostFunding {
             investment_id: id,
             financial_account_id: body.financial_account_id,
@@ -775,10 +777,11 @@ pub async fn post_funding(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentFundingPosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "fundingId": outcome.event_id,
@@ -790,7 +793,7 @@ pub async fn post_funding(
         .await;
         tracing::info!(
             outcome = "investment_funding_posted", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            investment = %id, actor = %ctx.auth.user_id
         );
     }
 
@@ -813,11 +816,11 @@ pub struct ReverseRequest {
 pub async fn reverse_funding(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason = inv_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -833,15 +836,16 @@ pub async fn reverse_funding(
         return Err(ApiError::NotFound);
     };
 
-    let (replayed, number) = inv_repo::reverse_funding(pool, auth.user_id, id, reason, now)
+    let (replayed, number) = inv_repo::reverse_funding(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
     if !replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentFundingReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "fundingId": id,
@@ -879,11 +883,11 @@ pub struct RecordValuationRequest {
 pub async fn record_valuation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<RecordValuationRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let today = istanbul_today(now);
 
@@ -905,7 +909,7 @@ pub async fn record_valuation(
 
     let outcome = inv_repo::record_valuation(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         inv_repo::RecordValuation {
             investment_id: id,
             valuation_date,
@@ -921,10 +925,11 @@ pub async fn record_valuation(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentValuationRecorded,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "valuationId": outcome.event_id,
@@ -936,7 +941,7 @@ pub async fn record_valuation(
         .await;
         tracing::info!(
             outcome = "investment_valuation_recorded", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            investment = %id, actor = %ctx.auth.user_id
         );
     }
 
@@ -959,11 +964,11 @@ pub struct CancelValuationRequest {
 pub async fn cancel_valuation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelValuationRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason = inv_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -979,15 +984,16 @@ pub async fn cancel_valuation(
         return Err(ApiError::NotFound);
     };
 
-    let (replayed, number) = inv_repo::cancel_valuation(pool, auth.user_id, id, reason, now)
+    let (replayed, number) = inv_repo::cancel_valuation(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
     if !replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentValuationCancelled,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "valuationId": id,
@@ -1025,11 +1031,11 @@ pub struct PostIncomeRequest {
 pub async fn post_income(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<PostIncomeRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
 
     let amount = inv_model::validate_positive_amount(&body.amount)
@@ -1056,7 +1062,7 @@ pub async fn post_income(
 
     let outcome = inv_repo::post_income(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         inv_repo::PostIncome {
             investment_id: id,
             financial_account_id: body.financial_account_id,
@@ -1073,10 +1079,11 @@ pub async fn post_income(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentIncomePosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "incomeId": outcome.event_id,
@@ -1088,7 +1095,7 @@ pub async fn post_income(
         .await;
         tracing::info!(
             outcome = "investment_income_posted", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            investment = %id, actor = %ctx.auth.user_id
         );
     }
 
@@ -1104,11 +1111,11 @@ pub async fn post_income(
 pub async fn reverse_income(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let reason = inv_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -1123,15 +1130,16 @@ pub async fn reverse_income(
         return Err(ApiError::NotFound);
     };
 
-    let (replayed, number) = inv_repo::reverse_income(pool, auth.user_id, id, reason, now)
+    let (replayed, number) = inv_repo::reverse_income(pool, ctx.auth.user_id, id, reason, now)
         .await
         .map_err(command_error)?;
 
     if !replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentIncomeReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "incomeId": id,
@@ -1183,11 +1191,11 @@ pub struct DisposeInvestmentRequest {
 pub async fn dispose_investment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<DisposeInvestmentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let today = istanbul_today(now);
 
@@ -1244,7 +1252,7 @@ pub async fn dispose_investment(
 
     let outcome = inv_repo::dispose_investment(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         inv_repo::DisposeInvestment {
             investment_id: id,
             disposed_at,
@@ -1262,10 +1270,11 @@ pub async fn dispose_investment(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::InvestmentDisposed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "disposalId": outcome.event_id,
@@ -1276,7 +1285,7 @@ pub async fn dispose_investment(
         .await;
         tracing::info!(
             outcome = "investment_disposed", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            investment = %id, actor = %ctx.auth.user_id
         );
     }
 
