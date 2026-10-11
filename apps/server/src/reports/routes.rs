@@ -32,6 +32,10 @@
 //! write to any domain table. Money fields are decimal STRINGS
 //! (ADR-004); NULL stays NULL end-to-end (an undetermined entitlement is
 //! never rendered as 0.00).
+//!
+//! M1-P1-c3b: authorization resolves in the verified bootstrap scope
+//! (`BusinessAuth` + `require_business`) — a role owned by another
+//! cooperative can never grant report access.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -44,12 +48,12 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::auth::authz;
-use crate::auth::extractor::CurrentAuth;
 use crate::financial_accounts::model::MovementSource;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::payments::model::canonical_amount as canonical;
+use crate::tenant::extractor::BusinessAuth;
 
 use super::repo as report_repo;
 
@@ -159,8 +163,8 @@ struct OverviewDto {
     votes_total: i64,
 }
 
-async fn overview(State(state): State<AppState>, auth: CurrentAuth) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+async fn overview(State(state): State<AppState>, ctx: BusinessAuth) -> Result<Response, ApiError> {
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let row = report_repo::overview(pool)
         .await
@@ -235,10 +239,10 @@ struct AccountReportDto {
 
 async fn accounts(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AccountsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let status = query
         .status
@@ -337,10 +341,10 @@ struct MovementSummaryDto {
 
 async fn movements(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<MovementsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let source_type = query
         .source_type
@@ -527,10 +531,10 @@ fn assessment_dto(r: report_repo::AssessmentReportRow) -> AssessmentDto {
 
 async fn assessments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AssessmentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let filter = assessment_filter(&query)?;
     let (page, page_size) = page_of(&query.list)?;
@@ -553,10 +557,10 @@ async fn assessments(
 
 async fn assessments_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AssessmentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let filter = assessment_filter(&query)?;
     let s = report_repo::assessments_summary(pool, &filter)
@@ -605,10 +609,10 @@ struct PeriodReportDto {
 
 async fn periods(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = report_repo::periods_report(pool, page, page_size)
@@ -671,10 +675,10 @@ struct ShareholderReportDto {
 
 async fn shareholders(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = report_repo::shareholders_report(pool, query.search.as_deref(), page, page_size)
@@ -727,10 +731,10 @@ struct FamilyReportDto {
 
 async fn families(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = report_repo::families_report(pool, query.search.as_deref(), page, page_size)
@@ -835,10 +839,10 @@ fn payment_filter(query: &PaymentsQuery) -> Result<report_repo::PaymentFilter, A
 
 async fn payments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PaymentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let filter = payment_filter(&query)?;
     let (page, page_size) = page_of(&query.list)?;
@@ -893,10 +897,10 @@ async fn payments(
 
 async fn payments_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PaymentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let filter = payment_filter(&query)?;
     let s = report_repo::payments_summary(pool, &filter)
@@ -946,10 +950,10 @@ struct CreditSummaryDto {
 
 async fn credits(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let (rows, summary) = tokio::try_join!(
@@ -1033,10 +1037,10 @@ struct EntitlementSummaryDto {
 
 async fn share_returns(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let (rows, summary) = tokio::try_join!(
@@ -1115,10 +1119,10 @@ struct InvestmentReportDto {
 
 async fn investments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = report_repo::investments_report(pool, page, page_size)
@@ -1198,10 +1202,10 @@ struct SocialAidResponse {
 
 async fn social_aid(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let (pairs, funds) = tokio::try_join!(
@@ -1280,9 +1284,9 @@ struct GovernanceDecisionDto {
 
 async fn governance(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let overview = report_repo::overview(pool)
         .await
@@ -1344,10 +1348,10 @@ struct MonthlyFlowDto {
 
 async fn income_expense_trend(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<TrendQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
     let months = query.months.unwrap_or(6);
     if !(1..=24).contains(&months) {

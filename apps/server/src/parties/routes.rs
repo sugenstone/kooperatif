@@ -14,6 +14,12 @@
 //!
 //! All reads/writes `no-store`; mutations require both CSRF layers and
 //! enforce permissions server-side (STEP-003 semantics).
+//!
+//! M1-P1-c3b: every handler extracts `BusinessAuth` — the verified
+//! bootstrap-pinned cooperative context — and resolves permissions via
+//! `require_business`; a foreign cooperative's role can never
+//! authorize a parties operation and audit events are
+//! cooperative-attributed.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -27,12 +33,12 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::model as party_model;
 use crate::parties::repo as party_repo;
+use crate::tenant::extractor::BusinessAuth;
 
 const DEFAULT_PAGE_SIZE: i64 = 20;
 const MAX_PAGE_SIZE: i64 = 100;
@@ -300,14 +306,15 @@ pub fn page_of(query: &ListQuery) -> Result<(i64, i64), ApiError> {
     Ok((page, page_size))
 }
 
-/// Shareholder mutations share this prologue (CSRF layers + permission).
+/// Shareholder mutations share this prologue (CSRF layers + verified
+/// cooperative-scoped permission — M1-P1-c3b).
 macro_rules! parties_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $permission:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $permission:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, $permission).await?;
+        authz::require_business($state, $ctx, $permission).await?;
         pool_of($state)?
     }};
 }
@@ -353,10 +360,10 @@ fn list_item_dto(row: &party_repo::ShareholderListRow) -> ShareholderListItemDto
 
 pub async fn list_shareholders(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<ShareholderListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHAREHOLDERS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = party_repo::list_shareholders(
@@ -382,10 +389,10 @@ pub async fn list_shareholders(
 
 pub async fn duplicate_check(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<ShareholderListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHAREHOLDERS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
     let first = query.search.as_deref().unwrap_or_default();
     // Reuse `search` as "firstName lastName" for the duplicate probe.
@@ -459,13 +466,13 @@ fn resolve_family_ref(reference: &FamilyRefRequest) -> Result<party_repo::Family
 pub async fn create_shareholder(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateShareholderRequest>,
 ) -> Result<Response, ApiError> {
     let pool = parties_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::SHAREHOLDERS_MANAGE,
         &Method::POST
     );
@@ -493,7 +500,7 @@ pub async fn create_shareholder(
     let now = state.auth.clock.now();
     let created = party_repo::create_shareholder(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         party_repo::CreateShareholder {
             person_first_name: person_first,
             person_last_name: person_last,
@@ -527,41 +534,46 @@ pub async fn create_shareholder(
     })?;
 
     // Audit: person(s), family and shareholder created — identity data
-    // only, no unnecessary duplication of personal payloads.
+    // only, no unnecessary duplication of personal payloads. Events
+    // carry the verified cooperative attribution (M1-P1-c3b).
     if created.created_person {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::PersonCreated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({ "person_id": created.person_id }),
         )
         .await;
     }
     if created.created_guardian_person {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::PersonCreated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({ "person_id": created.guardian_person_id, "role": "guardian" }),
         )
         .await;
     }
     if created.created_family {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::FamilyCreated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({ "family_id": created.family_id, "source": "shareholder_create" }),
         )
         .await;
     }
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareholderCreated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "shareholder_id": created.shareholder_id,
@@ -572,7 +584,7 @@ pub async fn create_shareholder(
         }),
     )
     .await;
-    tracing::info!(outcome = "shareholder_created", id = %created.shareholder_id, actor = %auth.user_id);
+    tracing::info!(outcome = "shareholder_created", id = %created.shareholder_id, actor = %ctx.auth.user_id);
 
     let detail = load_detail(pool, created.shareholder_id)
         .await?
@@ -621,10 +633,10 @@ async fn load_detail(
 
 pub async fn get_shareholder(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ShareholderDetailDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHAREHOLDERS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
     load_detail(pool, id)
         .await?
@@ -635,14 +647,14 @@ pub async fn get_shareholder(
 pub async fn update_shareholder(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateShareholderRequest>,
 ) -> Result<Json<ShareholderDetailDto>, ApiError> {
     let pool = parties_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::SHAREHOLDERS_MANAGE,
         &Method::PATCH
     );
@@ -699,10 +711,11 @@ pub async fn update_shareholder(
             tracing::error!(error = %error, "person update failed");
             ApiError::Internal
         })?;
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::PersonUpdated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "person_id": person_id,
@@ -745,10 +758,11 @@ pub async fn update_shareholder(
                         tracing::error!(error = %error, "guardian person create failed");
                         ApiError::Internal
                     })?;
-                    audit::record(
+                    audit::record_scoped(
                         pool,
                         SecurityEventType::PersonCreated,
-                        Some(auth.user_id),
+                        ctx.cooperative_id(),
+                        Some(ctx.auth.user_id),
                         None,
                         serde_json::json!({ "person_id": created, "role": "guardian" }),
                     )
@@ -785,10 +799,11 @@ pub async fn update_shareholder(
                 ApiError::Internal
             })?;
         }
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::ShareholderUpdated,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "shareholder_id": id,
@@ -834,10 +849,11 @@ pub async fn update_shareholder(
                 tracing::error!(error = %error, "default account update failed");
                 ApiError::Internal
             })?;
-            audit::record(
+            audit::record_scoped(
                 pool,
                 SecurityEventType::ShareholderDefaultAccountChanged,
-                Some(auth.user_id),
+                ctx.cooperative_id(),
+                Some(ctx.auth.user_id),
                 None,
                 serde_json::json!({
                     "shareholder_id": id,
@@ -863,14 +879,14 @@ pub async fn update_shareholder(
 pub async fn status_change(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<StatusChangeRequest>,
 ) -> Result<Response, ApiError> {
     let pool = parties_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::SHAREHOLDERS_MANAGE,
         &Method::POST
     );
@@ -921,10 +937,11 @@ pub async fn status_change(
         ApiError::Internal
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareholderStatusChanged,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "shareholder_id": id, "from": old, "to": target.as_str(), "reason": body.reason
@@ -939,14 +956,14 @@ pub async fn status_change(
 pub async fn family_change(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<FamilyChangeRequest>,
 ) -> Result<Response, ApiError> {
     let pool = parties_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::FAMILIES_MANAGE,
         &Method::POST
     );
@@ -969,7 +986,7 @@ pub async fn family_change(
     let now = state.auth.clock.now();
     let (new_family_id, old_sequence, new_sequence) = party_repo::change_family(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         id,
         target,
         body.reason.as_deref(),
@@ -988,10 +1005,11 @@ pub async fn family_change(
         }
     })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareholderFamilyChanged,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "shareholder_id": id,
@@ -1002,17 +1020,17 @@ pub async fn family_change(
         }),
     )
     .await;
-    tracing::info!(outcome = "shareholder_family_changed", id = %id, from = old_sequence, to = new_sequence, actor = %auth.user_id);
+    tracing::info!(outcome = "shareholder_family_changed", id = %id, from = old_sequence, to = new_sequence, actor = %ctx.auth.user_id);
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub async fn list_persons(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<PersonDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHAREHOLDERS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
     let search = query.search.as_deref().unwrap_or_default();
     let rows = party_repo::search_persons(pool, search, 20)
@@ -1036,10 +1054,10 @@ pub async fn list_persons(
 
 pub async fn list_families(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<FamilyListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FAMILIES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FAMILIES_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = party_repo::list_families(pool, query.search.as_deref(), page, page_size)
@@ -1067,13 +1085,13 @@ pub async fn list_families(
 pub async fn create_family(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateFamilyRequest>,
 ) -> Result<Response, ApiError> {
     let pool = parties_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         authz::catalog::FAMILIES_MANAGE,
         &Method::POST
     );
@@ -1096,15 +1114,16 @@ pub async fn create_family(
                 }
             })?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FamilyCreated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "family_id": id, "sequence_number": sequence, "source": "api" }),
     )
     .await;
-    tracing::info!(outcome = "family_created", id = %id, sequence, actor = %auth.user_id);
+    tracing::info!(outcome = "family_created", id = %id, sequence, actor = %ctx.auth.user_id);
 
     let row = party_repo::find_family(pool, id)
         .await
@@ -1126,10 +1145,10 @@ pub async fn create_family(
 
 pub async fn get_family(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::FAMILIES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::FAMILIES_READ).await?;
     let pool = pool_of(&state)?;
 
     let family = party_repo::find_family(pool, id)
