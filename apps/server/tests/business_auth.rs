@@ -74,6 +74,7 @@ async fn probe_perm(
 }
 
 struct TestApp {
+    _claim: app_db::TestDbClaim,
     app: Router,
     pool: PgPool,
     state: AppState,
@@ -128,10 +129,7 @@ async fn setup() -> Option<TestApp> {
         .await
         .expect("admin connectivity");
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test database created");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
@@ -172,6 +170,7 @@ async fn setup() -> Option<TestApp> {
     let bytes = Uuid::new_v4();
     let octets = bytes.as_bytes();
     Some(TestApp {
+        _claim: claim,
         app,
         pool,
         state,

@@ -46,6 +46,7 @@ const ORIGIN: &str = "http://localhost:5173";
 const TEST_PASSWORD: &str = "domain-test-parola-1";
 
 struct TestApp {
+    _claim: app_db::TestDbClaim,
     app: axum::Router,
     pool: PgPool,
     _database_name: String,
@@ -74,10 +75,7 @@ async fn setup() -> Option<TestApp> {
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
     // F11: bound per-test database accumulation (24 h cutoff, no connections).
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test db");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
@@ -114,6 +112,7 @@ async fn setup() -> Option<TestApp> {
     );
     let octets = Uuid::new_v4().as_bytes().to_vec();
     Some(TestApp {
+        _claim: claim,
         app,
         pool,
         _database_name: database_name,

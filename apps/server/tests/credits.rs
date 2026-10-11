@@ -56,6 +56,7 @@ fn test_database_url() -> Option<String> {
 }
 
 struct TestApp {
+    _claim: app_db::TestDbClaim,
     app: axum::Router,
     pool: PgPool,
     _peer: SocketAddr,
@@ -81,10 +82,7 @@ async fn setup() -> Option<TestApp> {
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
     // F11: bound per-test database accumulation (24 h cutoff, no connections).
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test db");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
@@ -121,6 +119,7 @@ async fn setup() -> Option<TestApp> {
     );
     let octets = Uuid::new_v4().as_bytes().to_vec();
     Some(TestApp {
+        _claim: claim,
         app,
         pool,
         default_account: Mutex::new(None),

@@ -35,6 +35,7 @@ fn test_database_url() -> Option<String> {
 }
 
 struct TestDb {
+    _claim: app_db::TestDbClaim,
     pool: PgPool,
     database_name: String,
     admin_url: String,
@@ -87,10 +88,7 @@ async fn setup() -> Option<TestDb> {
         .await
         .expect("admin connectivity");
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test database created");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
@@ -99,6 +97,7 @@ async fn setup() -> Option<TestDb> {
         .await
         .expect("migrations applied");
     Some(TestDb {
+        _claim: claim,
         pool,
         database_name,
         admin_url,

@@ -59,6 +59,7 @@ const SILENCE_TIMEOUT: Duration = Duration::from_secs(4);
 struct SerialGuard(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
 
 struct TestApp {
+    _claim: app_db::TestDbClaim,
     _serial: SerialGuard,
     /// Kept for `oneshot` requests (login, canonical re-reads) that do
     /// not need a real TCP hop.
@@ -85,10 +86,7 @@ async fn setup() -> Option<TestApp> {
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
     // F11: bound per-test database accumulation (24 h cutoff, no connections).
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test db");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let db_url = format!("{base_url}/{database_name}");
     let pool = app_db::connect(&db_url).await.expect("db");
@@ -152,6 +150,7 @@ async fn setup() -> Option<TestApp> {
         .unwrap();
     });
     Some(TestApp {
+        _claim: claim,
         _serial: serial,
         app,
         pool,
