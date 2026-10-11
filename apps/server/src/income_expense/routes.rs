@@ -20,6 +20,12 @@
 //! exactly ONE Account Movement; entry tables hold WHY it happened,
 //! the movement holds the authoritative money effect (ADR-003).
 //! Money fields are decimal STRINGS (ADR-004).
+//!
+//! M1-P1-c3c1: every handler extracts `BusinessAuth` — the verified
+//! bootstrap-pinned cooperative context — and resolves permissions via
+//! `require_business`; a foreign cooperative's role can never
+//! authorize an income/expense operation and audit events are
+//! cooperative-attributed.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -35,12 +41,12 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::payments::model as payment_model;
+use crate::tenant::extractor::BusinessAuth;
 
 use super::model as entry_model;
 use super::repo as entry_repo;
@@ -80,14 +86,15 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::DependencyUnavailable)
 }
 
-/// Entry/category mutations share the full CSRF + permission prologue.
+/// Entry/category mutations share the full CSRF + verified
+/// cooperative-scoped permission prologue (M1-P1-c3c1).
 macro_rules! income_expense_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::INCOME_EXPENSE_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::INCOME_EXPENSE_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -251,10 +258,10 @@ pub struct CategoryListQuery {
 
 pub async fn list_categories(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<CategoryListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INCOME_EXPENSE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&ListQuery {
         search: query.search.clone(),
@@ -296,10 +303,10 @@ pub async fn list_categories(
 /// Active categories of one type for entry forms (`?type=income`).
 pub async fn category_options(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<CategoryListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INCOME_EXPENSE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
     let category_type = CategoryType::parse(query.category_type.as_deref().unwrap_or_default())
         .ok_or(ApiError::ValidationFailed)?;
@@ -325,10 +332,10 @@ pub struct CreateCategoryRequest {
 pub async fn create_category(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateCategoryRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = income_expense_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
     let category_type =
         CategoryType::parse(&body.category_type).ok_or(ApiError::ValidationFailed)?;
     let name = entry_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
@@ -337,7 +344,7 @@ pub async fn create_category(
 
     let id = entry_repo::create_category(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         entry_repo::CreateCategory {
             category_type,
             name,
@@ -347,10 +354,11 @@ pub async fn create_category(
     .await
     .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FinancialCategoryCreated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "categoryId": id, "categoryType": category_type.as_str() }),
     )
@@ -379,11 +387,11 @@ pub struct UpdateCategoryRequest {
 pub async fn update_category(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateCategoryRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = income_expense_mutation!(&state, &headers, &auth, &Method::PATCH);
+    let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::PATCH);
     let name = entry_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
     let description = entry_model::validate_description(body.description.as_deref())
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -392,10 +400,11 @@ pub async fn update_category(
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FinancialCategoryUpdated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "categoryId": id }),
     )
@@ -419,19 +428,20 @@ pub struct CategoryStatusChangeRequest {
 pub async fn change_category_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CategoryStatusChangeRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = income_expense_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
     let target = CategoryStatus::parse(&body.status).ok_or(ApiError::ValidationFailed)?;
     entry_repo::change_category_status(pool, id, target)
         .await
         .map_err(command_error)?;
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::FinancialCategoryStatusChanged,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "categoryId": id, "status": target.as_str() }),
     )
@@ -510,11 +520,11 @@ fn entry_filter(query: &EntryListQuery) -> Result<entry_repo::EntryFilter, ApiEr
 
 async fn list_entries_of(
     state: AppState,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     kind: EntryKind,
     query: EntryListQuery,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INCOME_EXPENSE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&ListQuery {
         search: query.search.clone(),
@@ -541,27 +551,27 @@ async fn list_entries_of(
 
 pub async fn list_incomes(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EntryListQuery>,
 ) -> Result<Response, ApiError> {
-    list_entries_of(state, auth, EntryKind::Income, query).await
+    list_entries_of(state, ctx, EntryKind::Income, query).await
 }
 
 pub async fn list_expenses(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EntryListQuery>,
 ) -> Result<Response, ApiError> {
-    list_entries_of(state, auth, EntryKind::Expense, query).await
+    list_entries_of(state, ctx, EntryKind::Expense, query).await
 }
 
 async fn get_entry_of(
     state: AppState,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     kind: EntryKind,
     id: Uuid,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INCOME_EXPENSE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
     let row = entry_repo::get_entry(pool, kind, id)
         .await
@@ -574,18 +584,18 @@ async fn get_entry_of(
 
 pub async fn get_income(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    get_entry_of(state, auth, EntryKind::Income, id).await
+    get_entry_of(state, ctx, EntryKind::Income, id).await
 }
 
 pub async fn get_expense(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    get_entry_of(state, auth, EntryKind::Expense, id).await
+    get_entry_of(state, ctx, EntryKind::Expense, id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -611,11 +621,11 @@ pub struct PostEntryRequest {
 async fn post_entry_of(
     state: AppState,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     kind: EntryKind,
     body: PostEntryRequest,
 ) -> Result<Response, ApiError> {
-    let pool = income_expense_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let amount = entry_model::validate_positive_amount(&body.amount)
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -650,7 +660,7 @@ async fn post_entry_of(
 
     let outcome = entry_repo::post_entry(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         kind,
         entry_repo::PostEntry {
             financial_account_id: body.financial_account_id,
@@ -668,13 +678,14 @@ async fn post_entry_of(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             match kind {
                 EntryKind::Income => SecurityEventType::IncomePosted,
                 EntryKind::Expense => SecurityEventType::ExpensePosted,
             },
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "entryId": outcome.entry_id,
@@ -688,7 +699,7 @@ async fn post_entry_of(
         .await;
         tracing::info!(
             outcome = "entry_posted", kind = kind.as_str(),
-            id = %outcome.entry_id, number = outcome.entry_number, actor = %auth.user_id
+            id = %outcome.entry_id, number = outcome.entry_number, actor = %ctx.auth.user_id
         );
     }
 
@@ -709,19 +720,19 @@ async fn post_entry_of(
 pub async fn post_income(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostEntryRequest>,
 ) -> Result<Response, ApiError> {
-    post_entry_of(state, headers, auth, EntryKind::Income, body).await
+    post_entry_of(state, headers, ctx, EntryKind::Income, body).await
 }
 
 pub async fn post_expense(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostEntryRequest>,
 ) -> Result<Response, ApiError> {
-    post_entry_of(state, headers, auth, EntryKind::Expense, body).await
+    post_entry_of(state, headers, ctx, EntryKind::Expense, body).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -737,27 +748,28 @@ pub struct ReverseEntryRequest {
 async fn reverse_entry_of(
     state: AppState,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     kind: EntryKind,
     id: Uuid,
     body: ReverseEntryRequest,
 ) -> Result<Response, ApiError> {
-    let pool = income_expense_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = entry_model::validate_reversal_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
     let (replayed, entry_number) =
-        entry_repo::reverse_entry(pool, auth.user_id, kind, id, reason, now)
+        entry_repo::reverse_entry(pool, ctx.auth.user_id, kind, id, reason, now)
             .await
             .map_err(command_error)?;
     if !replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             match kind {
                 EntryKind::Income => SecurityEventType::IncomeReversed,
                 EntryKind::Expense => SecurityEventType::ExpenseReversed,
             },
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "entryId": id,
@@ -779,31 +791,31 @@ async fn reverse_entry_of(
 pub async fn reverse_income(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseEntryRequest>,
 ) -> Result<Response, ApiError> {
-    reverse_entry_of(state, headers, auth, EntryKind::Income, id, body).await
+    reverse_entry_of(state, headers, ctx, EntryKind::Income, id, body).await
 }
 
 pub async fn reverse_expense(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseEntryRequest>,
 ) -> Result<Response, ApiError> {
-    reverse_entry_of(state, headers, auth, EntryKind::Expense, id, body).await
+    reverse_entry_of(state, headers, ctx, EntryKind::Expense, id, body).await
 }
 
 /// Operational Income/Expense summary over POSTED entries — NOT an
 /// account balance and NOT a P&L (docs/15, STEP-010 §31).
 pub async fn operational_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EntryListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INCOME_EXPENSE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
     let filter = entry_filter(&query)?;
     let summary = entry_repo::operational_summary(pool, &filter)

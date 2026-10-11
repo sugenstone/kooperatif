@@ -16,6 +16,12 @@
 //! or ledger operations. Obligations are durable; money does not move.
 //! `amount`/`baseAmount` are decimal STRINGS (ADR-004); the preview is
 //! an explicit POST so it is CSRF-guarded like every command.
+//!
+//! M1-P1-c3c1: every handler extracts `BusinessAuth` — the verified
+//! bootstrap-pinned cooperative context — and resolves permissions via
+//! `require_business`; a foreign cooperative's role can never
+//! authorize a periods/assessments operation and audit events are
+//! cooperative-attributed.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -30,12 +36,12 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::shares::routes::{identity_dto, ShareholderIdentityDto};
+use crate::tenant::extractor::BusinessAuth;
 
 use super::model as period_model;
 use super::repo as period_repo;
@@ -71,14 +77,15 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::DependencyUnavailable)
 }
 
-/// Period mutations share this prologue (CSRF layers + permission).
+/// Period mutations share this prologue (CSRF layers + verified
+/// cooperative-scoped permission — M1-P1-c3c1).
 macro_rules! periods_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr, $permission:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr, $permission:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, $permission).await?;
+        authz::require_business($state, $ctx, $permission).await?;
         pool_of($state)?
     }};
 }
@@ -365,10 +372,10 @@ fn validated(payload: PeriodRequest, require_expected: bool) -> Result<Validated
 
 pub async fn list_periods(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<PeriodListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PERIODS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PERIODS_READ).await?;
     let pool = pool_of(&state)?;
     let (page, page_size) = page_of(&query)?;
     let rows = period_repo::list_periods(pool, query.search.as_deref(), page, page_size)
@@ -386,13 +393,13 @@ pub async fn list_periods(
 pub async fn create_period(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PeriodRequest>,
 ) -> Result<Response, ApiError> {
     let pool = periods_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         &Method::POST,
         authz::catalog::PERIODS_MANAGE
     );
@@ -401,7 +408,7 @@ pub async fn create_period(
 
     let (period_id, period_number) = period_repo::create_period(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         period_repo::CreatePeriod {
             name: validated.name,
             collection_start_date: validated.collection_start_date,
@@ -414,10 +421,11 @@ pub async fn create_period(
     .await
     .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::PeriodCreated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "period_id": period_id,
@@ -429,7 +437,7 @@ pub async fn create_period(
         }),
     )
     .await;
-    tracing::info!(outcome = "period_created", id = %period_id, number = period_number, actor = %auth.user_id);
+    tracing::info!(outcome = "period_created", id = %period_id, number = period_number, actor = %ctx.auth.user_id);
 
     let row = period_repo::find_period(pool, period_id)
         .await
@@ -447,10 +455,10 @@ pub async fn create_period(
 
 pub async fn get_period(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PeriodDetailDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PERIODS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PERIODS_READ).await?;
     let pool = pool_of(&state)?;
     period_repo::find_period(pool, id)
         .await
@@ -467,14 +475,14 @@ pub async fn get_period(
 pub async fn update_period(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<PeriodRequest>,
 ) -> Result<Json<PeriodDetailDto>, ApiError> {
     let pool = periods_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         &Method::PATCH,
         authz::catalog::PERIODS_MANAGE
     );
@@ -501,10 +509,11 @@ pub async fn update_period(
         .await
         .map_err(db_err("period reload failed"))?
         .ok_or(ApiError::NotFound)?;
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::PeriodUpdated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "period_id": id,
@@ -524,23 +533,24 @@ pub async fn update_period(
 pub async fn delete_period(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let pool = periods_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         &Method::DELETE,
         authz::catalog::PERIODS_MANAGE
     );
     let period_number = period_repo::delete_period(pool, id)
         .await
         .map_err(command_error)?;
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::PeriodDeleted,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "period_id": id, "period_number": period_number }),
     )
@@ -553,28 +563,29 @@ pub async fn delete_period(
 pub async fn close_period(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PeriodDetailDto>, ApiError> {
     let pool = periods_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         &Method::POST,
         authz::catalog::PERIODS_MANAGE
     );
     let period_number = period_repo::close_period(pool, id, state.auth.clock.now())
         .await
         .map_err(command_error)?;
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::PeriodClosed,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({ "period_id": id, "period_number": period_number }),
     )
     .await;
-    tracing::info!(outcome = "period_closed", id = %id, number = period_number, actor = %auth.user_id);
+    tracing::info!(outcome = "period_closed", id = %id, number = period_number, actor = %ctx.auth.user_id);
     let row = period_repo::find_period(pool, id)
         .await
         .map_err(db_err("period reload failed"))?
@@ -591,14 +602,14 @@ pub async fn close_period(
 pub async fn preview_assessments(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PreviewResponse>, ApiError> {
     let pool = periods_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         &Method::POST,
         authz::catalog::ASSESSMENTS_READ
     );
@@ -650,24 +661,25 @@ pub async fn preview_assessments(
 pub async fn generate_assessments(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let pool = periods_mutation!(
         &state,
         &headers,
-        &auth,
+        &ctx,
         &Method::POST,
         authz::catalog::ASSESSMENTS_MANAGE
     );
-    let summary = period_repo::generate_assessments(pool, auth.user_id, id)
+    let summary = period_repo::generate_assessments(pool, ctx.auth.user_id, id)
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::AssessmentsGenerated,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "period_id": id,
@@ -682,7 +694,7 @@ pub async fn generate_assessments(
     .await;
     tracing::info!(
         outcome = "assessments_generated", id = %id,
-        assessments = summary.assessment_count, actor = %auth.user_id
+        assessments = summary.assessment_count, actor = %ctx.auth.user_id
     );
 
     let row = period_repo::find_period(pool, id)
@@ -701,11 +713,11 @@ pub async fn generate_assessments(
 
 pub async fn list_assessments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(period_id): Path<Uuid>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<AssessmentListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ASSESSMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ASSESSMENTS_READ).await?;
     let pool = pool_of(&state)?;
     period_repo::find_period(pool, period_id)
         .await
@@ -727,10 +739,10 @@ pub async fn list_assessments(
 
 pub async fn get_assessment(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssessmentDetailDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ASSESSMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ASSESSMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let Some(row) = period_repo::find_assessment(pool, id)
         .await
@@ -760,10 +772,10 @@ pub async fn get_assessment(
 /// ownership.
 pub async fn list_shareholder_assessments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(shareholder_id): Path<Uuid>,
 ) -> Result<Json<Vec<ShareholderAssessmentDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::ASSESSMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::ASSESSMENTS_READ).await?;
     let pool = pool_of(&state)?;
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
