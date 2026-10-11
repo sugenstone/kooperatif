@@ -33,7 +33,6 @@ use uuid::Uuid;
 use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
@@ -41,6 +40,7 @@ use crate::parties::routes::PaginatedDto;
 use crate::payments::model as payment_model;
 use crate::share_returns::model as return_model;
 use crate::share_returns::repo as return_repo;
+use crate::tenant::extractor::BusinessAuth;
 
 pub fn share_returns_router() -> Router<AppState> {
     Router::new()
@@ -84,12 +84,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 /// Share-return mutations share this prologue (CSRF layers +
 /// permission).
 macro_rules! returns_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::SHARE_RETURNS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::SHARE_RETURNS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -387,10 +387,10 @@ pub struct ReturnListQuery {
 
 pub async fn list_returns(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ReturnListQuery>,
 ) -> Result<Json<PaginatedDto<ShareReturnListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHARE_RETURNS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHARE_RETURNS_READ).await?;
     let pool = pool_of(&state)?;
     let status = query
         .status
@@ -440,10 +440,10 @@ pub async fn list_returns(
 
 pub async fn get_return(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHARE_RETURNS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHARE_RETURNS_READ).await?;
     let pool = pool_of(&state)?;
     load_detail(pool, id)
         .await?
@@ -475,10 +475,10 @@ fn parse_business_date(raw: &str) -> Result<Date, ApiError> {
 pub async fn initiate_return(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<InitiateReturnRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let effective_return_date = parse_business_date(&body.effective_return_date)?;
     let reason = return_model::validate_reason(body.reason.as_deref())
@@ -490,7 +490,7 @@ pub async fn initiate_return(
 
     let outcome = return_repo::initiate_return(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         return_repo::InitiateReturn {
             share_id: body.share_id,
             effective_return_date,
@@ -504,10 +504,11 @@ pub async fn initiate_return(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::ShareReturnRequested,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "returnId": outcome.return_id,
@@ -519,7 +520,7 @@ pub async fn initiate_return(
         .await;
         tracing::info!(
             outcome = "share_return_initiated", id = %outcome.return_id,
-            number = outcome.return_number, actor = %auth.user_id
+            number = outcome.return_number, actor = %ctx.auth.user_id
         );
     }
 
@@ -588,11 +589,11 @@ pub struct FinalizeReturnRequest {
 pub async fn finalize_return(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<FinalizeReturnRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let specs: Vec<return_repo::EntitlementSpec> = body
         .entitlements
@@ -602,7 +603,7 @@ pub async fn finalize_return(
 
     let outcome = return_repo::finalize_return(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         id,
         body.expected_updated_at,
         &specs,
@@ -611,10 +612,11 @@ pub async fn finalize_return(
     .await
     .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareReturnFinalized,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "returnId": id,
@@ -625,7 +627,7 @@ pub async fn finalize_return(
     .await;
     tracing::info!(
         outcome = "share_return_finalized", id = %id,
-        number = outcome.return_number, actor = %auth.user_id
+        number = outcome.return_number, actor = %ctx.auth.user_id
     );
 
     let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
@@ -643,24 +645,25 @@ pub struct CancelReturnRequest {
 pub async fn cancel_return(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelReturnRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = return_model::validate_required_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
 
     let (_replayed, return_number) =
-        return_repo::cancel_return(pool, auth.user_id, id, reason.clone(), now)
+        return_repo::cancel_return(pool, ctx.auth.user_id, id, reason.clone(), now)
             .await
             .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareReturnCancelled,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "returnId": id,
@@ -671,7 +674,7 @@ pub async fn cancel_return(
     .await;
     tracing::info!(
         outcome = "share_return_cancelled", id = %id,
-        number = return_number, actor = %auth.user_id
+        number = return_number, actor = %ctx.auth.user_id
     );
 
     let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
@@ -683,22 +686,23 @@ pub async fn cancel_return(
 pub async fn recognize_entitlement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<EntitlementSpecRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let spec = parse_entitlement_spec(&body)?;
 
-    let entitlement_id = return_repo::recognize_entitlement(pool, auth.user_id, id, spec, now)
+    let entitlement_id = return_repo::recognize_entitlement(pool, ctx.auth.user_id, id, spec, now)
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareReturnEntitlementRecognized,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "returnId": id,
@@ -728,10 +732,10 @@ pub struct EntitlementListQuery {
 
 pub async fn list_entitlements(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EntitlementListQuery>,
 ) -> Result<Json<PaginatedDto<EntitlementDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHARE_RETURNS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHARE_RETURNS_READ).await?;
     let pool = pool_of(&state)?;
     let entitlement_type = query
         .entitlement_type
@@ -786,11 +790,11 @@ pub struct DetermineEntitlementRequest {
 pub async fn determine_entitlement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<DetermineEntitlementRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let amount = return_model::validate_entitlement_amount(Some(&body.amount))
         .map_err(|_| ApiError::ValidationFailed)?
@@ -808,7 +812,7 @@ pub async fn determine_entitlement(
 
     let number = return_repo::determine_entitlement(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         id,
         amount,
         due_date,
@@ -820,10 +824,11 @@ pub async fn determine_entitlement(
     .await
     .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareReturnEntitlementDetermined,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "entitlementId": id,
@@ -851,23 +856,24 @@ pub struct CancelEntitlementRequest {
 pub async fn cancel_entitlement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelEntitlementRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = return_model::validate_required_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
 
-    let number = return_repo::cancel_entitlement(pool, auth.user_id, id, reason.clone(), now)
+    let number = return_repo::cancel_entitlement(pool, ctx.auth.user_id, id, reason.clone(), now)
         .await
         .map_err(command_error)?;
 
-    audit::record(
+    audit::record_scoped(
         pool,
         SecurityEventType::ShareReturnEntitlementCancelled,
-        Some(auth.user_id),
+        ctx.cooperative_id(),
+        Some(ctx.auth.user_id),
         None,
         serde_json::json!({
             "entitlementId": id,
@@ -901,11 +907,11 @@ pub struct PostSettlementRequest {
 pub async fn post_settlement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<PostSettlementRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let now = state.auth.clock.now();
     let amount = return_model::validate_settlement_amount(&body.amount)
         .map_err(|_| ApiError::ValidationFailed)?;
@@ -930,7 +936,7 @@ pub async fn post_settlement(
 
     let outcome = return_repo::post_settlement(
         pool,
-        auth.user_id,
+        ctx.auth.user_id,
         return_repo::PostSettlement {
             entitlement_id: id,
             financial_account_id: body.financial_account_id,
@@ -944,10 +950,11 @@ pub async fn post_settlement(
     .map_err(command_error)?;
 
     if !outcome.replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::ShareReturnSettlementPosted,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "settlementId": outcome.settlement_id,
@@ -960,7 +967,7 @@ pub async fn post_settlement(
         .await;
         tracing::info!(
             outcome = "share_return_settled", id = %outcome.settlement_id,
-            number = outcome.settlement_number, actor = %auth.user_id
+            number = outcome.settlement_number, actor = %ctx.auth.user_id
         );
     }
 
@@ -987,25 +994,26 @@ pub struct ReverseSettlementRequest {
 pub async fn reverse_settlement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseSettlementRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = returns_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
     let reason = return_model::validate_required_reason(&body.reason)
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
 
     let (replayed, number) =
-        return_repo::reverse_settlement(pool, auth.user_id, id, reason.clone(), now)
+        return_repo::reverse_settlement(pool, ctx.auth.user_id, id, reason.clone(), now)
             .await
             .map_err(command_error)?;
 
     if !replayed {
-        audit::record(
+        audit::record_scoped(
             pool,
             SecurityEventType::ShareReturnSettlementReversed,
-            Some(auth.user_id),
+            ctx.cooperative_id(),
+            Some(ctx.auth.user_id),
             None,
             serde_json::json!({
                 "settlementId": id,
