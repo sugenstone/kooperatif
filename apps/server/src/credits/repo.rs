@@ -183,6 +183,12 @@ async fn insert_application(
 /// covered by the same transaction (a manual command may split one
 /// amount across several credits).
 ///
+/// `limit` caps the TOTAL amount consumed across every target: manual
+/// application passes `Some(requested)` so the engine settles exactly
+/// the requested amount — FIFO ordering is preserved but consumption
+/// stops once the budget is fully allocated. Automatic paths pass
+/// `None` and keep consuming up to each assessment's remaining debt.
+///
 /// Returns (assessment_id -> total applied) for outcome/audit data.
 #[allow(clippy::too_many_arguments)]
 async fn consume_credit_fifo(
@@ -192,6 +198,7 @@ async fn consume_credit_fifo(
     mode: ApplicationMode,
     idempotency_key: Option<&str>,
     idempotency_fingerprint: Option<&str>,
+    limit: Option<Decimal>,
     actor: Uuid,
 ) -> Result<HashMap<Uuid, Decimal>, CreditCommandError> {
     let mut applied: HashMap<Uuid, Decimal> = HashMap::new();
@@ -212,8 +219,12 @@ async fn consume_credit_fifo(
     }
     let mut cursor = 0usize;
     let mut key_stamped = false;
+    let mut budget = limit.unwrap_or(Decimal::MAX);
 
     for assessment_id in assessment_ids {
+        if budget <= Decimal::ZERO {
+            break;
+        }
         // Lock the assessment row: serializes vs. concurrent manual
         // applications and re-derives remaining under the lock.
         let row: Option<(Decimal, String)> =
@@ -239,13 +250,13 @@ async fn consume_credit_fifo(
             continue;
         }
 
-        while remaining > Decimal::ZERO && cursor < available.len() {
+        while remaining > Decimal::ZERO && budget > Decimal::ZERO && cursor < available.len() {
             let (credit_id, avail) = &mut available[cursor];
             if *avail <= Decimal::ZERO {
                 cursor += 1;
                 continue;
             }
-            let applied_amount = remaining.min(*avail);
+            let applied_amount = remaining.min(*avail).min(budget);
             let (key, fingerprint) = if key_stamped {
                 (None, None)
             } else {
@@ -265,6 +276,7 @@ async fn consume_credit_fifo(
             .await?;
             *avail -= applied_amount;
             remaining -= applied_amount;
+            budget -= applied_amount;
             settled += applied_amount;
             *applied.entry(*assessment_id).or_default() += applied_amount;
         }
@@ -304,6 +316,7 @@ pub async fn auto_apply_to_assessments(
             shareholder_id,
             &ids,
             ApplicationMode::Automatic,
+            None,
             None,
             None,
             actor,
@@ -720,6 +733,7 @@ pub async fn assign_credit(
         ApplicationMode::Automatic,
         None,
         None,
+        None,
         actor,
     )
     .await?;
@@ -864,6 +878,7 @@ pub async fn apply_credit(
         ApplicationMode::Manual,
         Some(&command.idempotency_key),
         Some(&command.fingerprint),
+        Some(command.amount),
         actor,
     )
     .await;

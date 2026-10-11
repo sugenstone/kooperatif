@@ -1377,10 +1377,9 @@ async fn scoped_credit_flow_parity() {
     assert_eq!(count(&test.pool, "account_movements").await, 1);
 
     // Manual application succeeds against the reopened debt — the
-    // same FIFO engine as the automatic path: the request bounds the
-    // command (≤ remaining AND ≤ available), the engine consumes
-    // available credit up to the debt — here exactly the reopened
-    // amount.
+    // same FIFO engine as the automatic path, but a manual command
+    // applies EXACTLY the requested amount (owner-approved rule): we
+    // request the reopened amount and expect exactly that back.
     let (status, body) = request_json(
         &test,
         Method::POST,
@@ -1388,7 +1387,7 @@ async fn scoped_credit_flow_parity() {
         &cookie,
         Some(&csrf),
         None,
-        Some(json!({ "amount": "1.00", "idempotencyKey": "a-1" })),
+        Some(json!({ "amount": auto_amount.to_string(), "idempotencyKey": "a-1" })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");

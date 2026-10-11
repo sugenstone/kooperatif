@@ -481,8 +481,9 @@ pub async fn assign_credit(
         .into_response())
 }
 
-/// Manual apply-credit command (docs/05): settles part of an ACTIVE
-/// Assessment from ITS OWN Shareholder's available credit. Same engine
+/// Manual apply-credit command (docs/05): settles the EXACTLY
+/// requested amount of an ACTIVE Assessment from ITS OWN Shareholder's
+/// available credit — never more, never less on success. Same engine
 /// as the automatic path — never a second arithmetic.
 pub async fn apply_credit(
     State(state): State<AppState>,

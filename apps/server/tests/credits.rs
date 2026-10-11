@@ -1355,3 +1355,366 @@ async fn authorization_csrf_idor_and_cache_control() {
         "no-store"
     );
 }
+
+// ---------------------------------------------------------------------
+// Exact-amount manual application (owner-approved rule): the requested
+// amount is the exact consumption budget — never a validation bound
+// while the engine consumes more.
+// ---------------------------------------------------------------------
+
+/// Build the state manual apply needs: available credit AND open debt
+/// on the same shareholder — assign sweeps everything, so an automatic
+/// application is reversed to reopen the debt and return availability.
+#[allow(clippy::too_many_arguments)]
+async fn reopen_for_manual_apply(
+    test: &TestApp,
+    cookie: &str,
+    csrf: &str,
+    shareholder: Uuid,
+    credit_amount: &str,
+    payment_key: &str,
+    credit_key: &str,
+    assessment_amount: &str,
+    due_date: &str,
+) -> Uuid {
+    let period = api_generate_period(test, cookie, csrf, assessment_amount, due_date).await;
+    let a = assessment_of(test, cookie, period, shareholder).await;
+    let a_id: Uuid = a["id"].as_str().unwrap().parse().unwrap();
+
+    let payment = post_unallocated_payment(test, cookie, csrf, credit_amount, payment_key).await;
+    let p_id: Uuid = payment["id"].as_str().unwrap().parse().unwrap();
+    let (status, out) = assign_credit(
+        test,
+        cookie,
+        csrf,
+        p_id,
+        shareholder,
+        credit_amount,
+        credit_key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{out}");
+
+    // Reverse every active application the sweep produced on this
+    // assessment — debt reopens, availability returns.
+    for app in assessment_applications(test, cookie, a_id).await {
+        if app["status"] != "active" {
+            continue;
+        }
+        let app_id = app["id"].as_str().unwrap();
+        let (status, _) = send(
+            &test.app,
+            req(
+                "POST",
+                &format!("/api/credit-applications/{app_id}/reverse"),
+                cookie,
+                Some(csrf),
+                Some(json!({ "reversalReason": "manuel senaryo hazirligi" })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    a_id
+}
+
+#[tokio::test]
+async fn manual_apply_consumes_exactly_the_requested_amount() {
+    let Some(test) = setup().await else { return };
+    let (cookie, csrf) = admin_session(&test).await;
+    let shareholder = api_create_shareholder(&test, &cookie, &csrf, "Suna", "Tutar").await;
+
+    // Credit 600, debt 600 — under the old rule a request of 250 would
+    // have applied all 600.
+    let a_id = reopen_for_manual_apply(
+        &test,
+        &cookie,
+        &csrf,
+        shareholder,
+        "600.00",
+        "key-xp1",
+        "key-xc1",
+        "600.00",
+        "2026-06-30",
+    )
+    .await;
+    assert_eq!(
+        open_remaining(&test, &cookie, shareholder, a_id).await,
+        "600.00"
+    );
+    let ledger = credit_ledger(&test, &cookie, shareholder).await;
+    assert_eq!(ledger["summary"]["available"], "600.00");
+    let account = default_account(&test, &cookie, &csrf).await;
+    let balance_before = account_balance(&test, &cookie, account).await;
+
+    // Partial request — the engine MUST stop at 250, not consume 600.
+    let (status, applied) = apply_credit(&test, &cookie, &csrf, a_id, "250.00", "key-xa1").await;
+    assert_eq!(status, StatusCode::CREATED, "{applied}");
+    assert_eq!(applied["appliedAmount"], "250.00");
+    assert_eq!(applied["assessmentRemaining"], "350.00");
+    assert_eq!(
+        open_remaining(&test, &cookie, shareholder, a_id).await,
+        "350.00"
+    );
+
+    let ledger = credit_ledger(&test, &cookie, shareholder).await;
+    assert_eq!(ledger["summary"]["available"], "350.00");
+    assert_eq!(ledger["summary"]["totalApplied"], "250.00");
+
+    // One manual application row of exactly the requested amount — no
+    // account movement ever accompanies credit bookkeeping.
+    let apps = assessment_applications(&test, &cookie, a_id).await;
+    let manual: Vec<&Value> = apps
+        .iter()
+        .filter(|x| x["mode"] == "manual" && x["status"] == "active")
+        .collect();
+    assert_eq!(manual.len(), 1);
+    assert_eq!(manual[0]["amount"], "250.00");
+    assert_eq!(
+        account_balance(&test, &cookie, account).await,
+        balance_before
+    );
+
+    // The remainder is then consumed exactly as well.
+    let (status, applied) = apply_credit(&test, &cookie, &csrf, a_id, "350.00", "key-xa2").await;
+    assert_eq!(status, StatusCode::CREATED, "{applied}");
+    assert_eq!(applied["appliedAmount"], "350.00");
+    assert_eq!(applied["assessmentRemaining"], "0.00");
+    assert_eq!(
+        open_remaining(&test, &cookie, shareholder, a_id).await,
+        "0.00"
+    );
+    let ledger = credit_ledger(&test, &cookie, shareholder).await;
+    assert_eq!(ledger["summary"]["available"], "0.00");
+}
+
+#[tokio::test]
+async fn manual_apply_splits_fifo_and_partially_consumes_last_credit() {
+    let Some(test) = setup().await else { return };
+    let (cookie, csrf) = admin_session(&test).await;
+    let shareholder = api_create_shareholder(&test, &cookie, &csrf, "Kaan", "Bolme").await;
+
+    let period = api_generate_period(&test, &cookie, &csrf, "50.00", "2026-07-31").await;
+    let a = assessment_of(&test, &cookie, period, shareholder).await;
+    let a_id: Uuid = a["id"].as_str().unwrap().parse().unwrap();
+
+    // Two credit origins: 20 then 15 — FIFO order is credit_number ASC.
+    let pa = post_unallocated_payment(&test, &cookie, &csrf, "20.00", "key-xpa").await;
+    let pa_id: Uuid = pa["id"].as_str().unwrap().parse().unwrap();
+    let (status, out) = assign_credit(
+        &test,
+        &cookie,
+        &csrf,
+        pa_id,
+        shareholder,
+        "20.00",
+        "key-xca",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{out}");
+    let pb = post_unallocated_payment(&test, &cookie, &csrf, "15.00", "key-xpb").await;
+    let pb_id: Uuid = pb["id"].as_str().unwrap().parse().unwrap();
+    let (status, out) = assign_credit(
+        &test,
+        &cookie,
+        &csrf,
+        pb_id,
+        shareholder,
+        "15.00",
+        "key-xcb",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{out}");
+
+    // Reopen: reverse the two automatic applications — available 35,
+    // remaining debt 50.
+    for app in assessment_applications(&test, &cookie, a_id).await {
+        if app["status"] != "active" {
+            continue;
+        }
+        let app_id = app["id"].as_str().unwrap();
+        let (status, _) = send(
+            &test.app,
+            req(
+                "POST",
+                &format!("/api/credit-applications/{app_id}/reverse"),
+                &cookie,
+                Some(&csrf),
+                Some(json!({ "reversalReason": "fifo senaryosu" })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(
+        open_remaining(&test, &cookie, shareholder, a_id).await,
+        "50.00"
+    );
+
+    // Request 25: first credit fully (20), second partially (5).
+    let (status, applied) = apply_credit(&test, &cookie, &csrf, a_id, "25.00", "key-xaf").await;
+    assert_eq!(status, StatusCode::CREATED, "{applied}");
+    assert_eq!(applied["appliedAmount"], "25.00");
+    assert_eq!(applied["assessmentRemaining"], "25.00");
+
+    let apps = assessment_applications(&test, &cookie, a_id).await;
+    let manual: Vec<&Value> = apps
+        .iter()
+        .filter(|x| x["mode"] == "manual" && x["status"] == "active")
+        .collect();
+    let total: rust_decimal::Decimal = manual
+        .iter()
+        .map(|x| {
+            x["amount"]
+                .as_str()
+                .unwrap()
+                .parse::<rust_decimal::Decimal>()
+                .unwrap()
+        })
+        .sum();
+    assert_eq!(total, rust_decimal::Decimal::new(2500, 2));
+
+    let ledger = credit_ledger(&test, &cookie, shareholder).await;
+    let credits = ledger["credits"].as_array().unwrap();
+    let c1 = credits
+        .iter()
+        .find(|c| c["sourcePaymentId"].as_str().unwrap() == pa_id.to_string())
+        .expect("first credit");
+    let c2 = credits
+        .iter()
+        .find(|c| c["sourcePaymentId"].as_str().unwrap() == pb_id.to_string())
+        .expect("second credit");
+    // FIFO: the older origin is fully consumed, the newer only the
+    // remaining 5 of the requested 25 — 10 stays available.
+    assert_eq!(c1["appliedAmount"], "20.00");
+    assert_eq!(c1["availableAmount"], "0.00");
+    assert_eq!(c2["appliedAmount"], "5.00");
+    assert_eq!(c2["availableAmount"], "10.00");
+    assert_eq!(ledger["summary"]["available"], "10.00");
+}
+
+#[tokio::test]
+async fn manual_apply_rejects_out_of_budget_amounts_with_zero_writes() {
+    let Some(test) = setup().await else { return };
+    let (cookie, csrf) = admin_session(&test).await;
+    let shareholder = api_create_shareholder(&test, &cookie, &csrf, "Eylul", "Sifir").await;
+
+    let a_id = reopen_for_manual_apply(
+        &test,
+        &cookie,
+        &csrf,
+        shareholder,
+        "100.00",
+        "key-xp2",
+        "key-xc2",
+        "300.00",
+        "2026-08-31",
+    )
+    .await;
+    // Available 100, remaining 300.
+    async fn count_apps(pool: &PgPool, a: Uuid) -> i64 {
+        let (n,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM credit_applications WHERE assessment_id = $1")
+                .bind(a)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        n
+    }
+    let before = count_apps(&test.pool, a_id).await;
+
+    // Request exceeds available credit → existing conflict, no write.
+    let (status, _) = apply_credit(&test, &cookie, &csrf, a_id, "100.01", "key-xg1").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(count_apps(&test.pool, a_id).await, before);
+
+    // Request exceeds the outstanding balance → same conflict, no write.
+    let (status, _) = apply_credit(&test, &cookie, &csrf, a_id, "300.01", "key-xg2").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(count_apps(&test.pool, a_id).await, before);
+
+    // Boundary value succeeds exactly: the full available 100.
+    let (status, applied) = apply_credit(&test, &cookie, &csrf, a_id, "100.00", "key-xg3").await;
+    assert_eq!(status, StatusCode::CREATED, "{applied}");
+    assert_eq!(applied["appliedAmount"], "100.00");
+    assert_eq!(applied["assessmentRemaining"], "200.00");
+}
+
+#[tokio::test]
+async fn manual_apply_replay_and_concurrent_same_key_single_write() {
+    let Some(test) = setup().await else { return };
+    let (cookie, csrf) = admin_session(&test).await;
+    let shareholder = api_create_shareholder(&test, &cookie, &csrf, "Bora", "Tekil").await;
+
+    let a_id = reopen_for_manual_apply(
+        &test,
+        &cookie,
+        &csrf,
+        shareholder,
+        "500.00",
+        "key-xp3",
+        "key-xc3",
+        "500.00",
+        "2026-09-30",
+    )
+    .await;
+
+    // Sequential replay: the original response and the replay MUST
+    // report the same applied amount.
+    let (status, first) = apply_credit(&test, &cookie, &csrf, a_id, "200.00", "key-xr1").await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let (status, replay) = apply_credit(&test, &cookie, &csrf, a_id, "200.00", "key-xr1").await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["appliedAmount"], first["appliedAmount"]);
+    assert_eq!(replay["appliedAmount"], "200.00");
+
+    // Concurrent same-key requests: one logical application, no
+    // duplicates — the loser either replays or reports the race.
+    let req_a = req(
+        "POST",
+        &format!("/api/assessments/{a_id}/credit-applications"),
+        &cookie,
+        Some(&csrf),
+        Some(json!({ "amount": "150.00", "idempotencyKey": "key-xr2" })),
+    );
+    let req_b = req(
+        "POST",
+        &format!("/api/assessments/{a_id}/credit-applications"),
+        &cookie,
+        Some(&csrf),
+        Some(json!({ "amount": "150.00", "idempotencyKey": "key-xr2" })),
+    );
+    let ((sa, ra), (sb, rb)) = tokio::join!(send(&test.app, req_a), send(&test.app, req_b));
+    for (s, r) in [(sa, &ra), (sb, &rb)] {
+        assert!(
+            s == StatusCode::CREATED || s == StatusCode::OK || s == StatusCode::CONFLICT,
+            "unexpected {s}: {r}"
+        );
+    }
+    let apps = assessment_applications(&test, &cookie, a_id).await;
+    let keyed: Vec<&Value> = apps
+        .iter()
+        .filter(|x| x["mode"] == "manual" && x["status"] == "active" && x["amount"] == "150.00")
+        .collect();
+    let keyed_total: rust_decimal::Decimal = keyed
+        .iter()
+        .map(|x| {
+            x["amount"]
+                .as_str()
+                .unwrap()
+                .parse::<rust_decimal::Decimal>()
+                .unwrap()
+        })
+        .sum();
+    assert_eq!(keyed_total, rust_decimal::Decimal::new(15000, 2));
+
+    // Total settled is exactly 200 + 150 — never the full available.
+    assert_eq!(
+        open_remaining(&test, &cookie, shareholder, a_id).await,
+        "150.00"
+    );
+    let ledger = credit_ledger(&test, &cookie, shareholder).await;
+    assert_eq!(ledger["summary"]["available"], "150.00");
+    assert_eq!(ledger["summary"]["totalApplied"], "350.00");
+}
