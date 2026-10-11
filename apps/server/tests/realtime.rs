@@ -40,6 +40,7 @@ use kooperatif_server::config::{AuthConfig, ARGON2_M_COST_FLOOR};
 use kooperatif_server::db as app_db;
 use kooperatif_server::http::{cors_layer, router, AppState};
 use kooperatif_server::realtime;
+use kooperatif_server::tenant::repo;
 
 /// The fan-out hub is process-global by design (one per server
 /// process); tests therefore serialize so one test's commits cannot
@@ -227,6 +228,17 @@ async fn ws_connect(
     cookie: Option<&str>,
     origin: Option<&str>,
 ) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    ws_connect_scoped(app, cookie, origin, None).await
+}
+
+/// `cookie` expects a full `name=value` pair; `coop` is sent verbatim
+/// as `x-cooperative-id` (None = headerless bootstrap pinning).
+async fn ws_connect_scoped(
+    app: &TestApp,
+    cookie: Option<&str>,
+    origin: Option<&str>,
+    coop: Option<&str>,
+) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
     let mut request = format!("ws://{}/api/realtime", app.addr)
         .into_client_request()
         .unwrap();
@@ -237,7 +249,44 @@ async fn ws_connect(
     if let Some(origin) = origin {
         headers.insert("origin", origin.parse().unwrap());
     }
+    if let Some(coop) = coop {
+        headers.insert("x-cooperative-id", coop.parse().unwrap());
+    }
     Ok(tokio_tungstenite::connect_async(request).await?.0)
+}
+
+/// Role + assignment fixture. `coop` Some writes composite-FK-consistent
+/// scoped rows (the membership row must already exist); None writes the
+/// legacy NULL-attributed lane.
+async fn grant_role(pool: &PgPool, user: Uuid, name: &str, coop: Option<Uuid>, perms: &[&str]) {
+    let role: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (name, cooperative_id) VALUES ($1, $2) RETURNING id")
+            .bind(name)
+            .bind(coop)
+            .fetch_one(pool)
+            .await
+            .expect("role");
+    for key in perms {
+        sqlx::query(
+            "INSERT INTO role_permissions (role_id, permission_id) \
+             SELECT $1, id FROM permissions WHERE key = $2",
+        )
+        .bind(role)
+        .bind(key)
+        .execute(pool)
+        .await
+        .expect("perm");
+    }
+    sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role_id, cooperative_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(user)
+    .bind(role)
+    .bind(coop)
+    .execute(pool)
+    .await
+    .expect("assignment");
 }
 
 async fn subscribe(ws: &mut Ws, scopes: &[&str]) -> Value {
@@ -580,5 +629,292 @@ async fn event_envelope_is_minimal() {
         keys,
         ["domain", "occurredAt", "type"],
         "envelope must stay minimal"
+    );
+}
+
+// ---- M1-P1-c3a — cooperative-scoped realtime authorization ----
+//
+// Signals are bootstrap-scoped invalidations: authorization resolves in
+// the VERIFIED bootstrap cooperative (x-cooperative-id is honored but
+// only the bootstrap UUID is accepted, exactly like the HTTP extractor).
+// A foreign cooperative's roles must never grant or deliver signals;
+// membership in the bootstrap cooperative is required to open a socket
+// and is re-verified on every signal and heartbeat.
+
+#[tokio::test]
+async fn foreign_cooperative_roles_never_authorize_bootstrap_signals() {
+    let Some(app) = setup().await else {
+        panic!("KOOPERATIF_TEST_DATABASE_URL required")
+    };
+    let coop_a = repo::bootstrap_initial_cooperative(&app.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap")
+        .0;
+    let coop_b = repo::create_cooperative(&app.pool, "B Kooperatifi", None)
+        .await
+        .expect("B")
+        .id;
+    let user = create_user(&app.pool, "rt-scope", &[]).await;
+
+    // B member with B-scoped periods.read but NO bootstrap membership —
+    // the handshake itself is rejected (membership verified at upgrade).
+    repo::add_member(&app.pool, "B Kooperatifi", user, None)
+        .await
+        .expect("B member");
+    grant_role(
+        &app.pool,
+        user,
+        "b-izleyici",
+        Some(coop_b),
+        &["periods.read"],
+    )
+    .await;
+    let cookie = login(&app, "rt-scope").await;
+    assert!(
+        ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.is_err(),
+        "no bootstrap membership must reject the handshake"
+    );
+
+    // Member of A AND B, rights only in B: the socket opens but B's
+    // periods.read must neither grant nor deliver.
+    repo::add_member(&app.pool, "A Kooperatifi", user, None)
+        .await
+        .expect("A member");
+    let mut ws = ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.unwrap();
+    let ack = subscribe(&mut ws, &["periods.read"]).await;
+    assert_eq!(ack["granted"], json!([]));
+    commit_period(&app.pool, "foreign-scope").await;
+    assert_eq!(next_domain(&mut ws, SILENCE_TIMEOUT).await, None);
+
+    // The same permission key scoped to the bootstrap cooperative
+    // authorizes normally — proving scoping, not the key, drives access.
+    grant_role(
+        &app.pool,
+        user,
+        "a-izleyici",
+        Some(coop_a),
+        &["periods.read"],
+    )
+    .await;
+    let ack = subscribe(&mut ws, &["periods.read"]).await;
+    assert_eq!(ack["granted"], json!(["periods.read"]));
+    commit_period(&app.pool, "bootstrap-scope").await;
+    assert_eq!(
+        next_domain(&mut ws, EVENT_TIMEOUT).await.as_deref(),
+        Some("periods")
+    );
+}
+
+#[tokio::test]
+async fn header_rules_apply_to_realtime_upgrade() {
+    let Some(app) = setup().await else {
+        panic!("KOOPERATIF_TEST_DATABASE_URL required")
+    };
+    let coop_a = repo::bootstrap_initial_cooperative(&app.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap")
+        .0;
+    let coop_b = repo::create_cooperative(&app.pool, "B Kooperatifi", None)
+        .await
+        .expect("B")
+        .id;
+    let user = create_user(&app.pool, "rt-hdr", &["periods.read"]).await;
+    repo::add_member(&app.pool, "A Kooperatifi", user, None)
+        .await
+        .expect("A member");
+    let cookie = login(&app, "rt-hdr").await;
+
+    // Malformed UUID → extractor rejects before upgrade.
+    assert!(
+        ws_connect_scoped(&app, Some(&cookie), Some(ORIGIN), Some("bogus"))
+            .await
+            .is_err(),
+        "malformed cooperative header must reject"
+    );
+    // Explicit non-bootstrap cooperative → reject, never silently
+    // fall back to bootstrap.
+    assert!(
+        ws_connect_scoped(&app, Some(&cookie), Some(ORIGIN), Some(&coop_b.to_string()))
+            .await
+            .is_err(),
+        "non-bootstrap cooperative header must reject"
+    );
+    // Explicit bootstrap header pins the same verified scope — accepted.
+    ws_connect_scoped(&app, Some(&cookie), Some(ORIGIN), Some(&coop_a.to_string()))
+        .await
+        .expect("bootstrap cooperative header must be accepted");
+    // Unknown-but-well-formed UUID → unknown cooperative rejection.
+    assert!(
+        ws_connect_scoped(
+            &app,
+            Some(&cookie),
+            Some(ORIGIN),
+            Some(&Uuid::new_v4().to_string())
+        )
+        .await
+        .is_err(),
+        "unknown cooperative header must reject"
+    );
+}
+
+#[tokio::test]
+async fn membership_suspension_stops_delivery_and_reconnect() {
+    let Some(app) = setup().await else {
+        panic!("KOOPERATIF_TEST_DATABASE_URL required")
+    };
+    let coop_a = repo::bootstrap_initial_cooperative(&app.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap")
+        .0;
+    let user = create_user(&app.pool, "rt-susp", &[]).await;
+    repo::add_member(&app.pool, "A Kooperatifi", user, None)
+        .await
+        .expect("A member");
+    grant_role(
+        &app.pool,
+        user,
+        "a-izleyici",
+        Some(coop_a),
+        &["periods.read"],
+    )
+    .await;
+    let cookie = login(&app, "rt-susp").await;
+    let mut ws = ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.unwrap();
+    let ack = subscribe(&mut ws, &["periods.read"]).await;
+    assert_eq!(ack["granted"], json!(["periods.read"]));
+    commit_period(&app.pool, "before-suspend").await;
+    assert_eq!(
+        next_domain(&mut ws, EVENT_TIMEOUT).await.as_deref(),
+        Some("periods")
+    );
+
+    // Suspend the bootstrap membership mid-connection: the next signal
+    // fails scoped authorization and the socket is closed.
+    sqlx::query(
+        "UPDATE cooperative_memberships SET status = 'suspended' \
+         WHERE user_id = $1 AND cooperative_id = $2",
+    )
+    .bind(user)
+    .bind(coop_a)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    commit_period(&app.pool, "after-suspend").await;
+    let closed = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Close(_))) | None => return true,
+                Some(Ok(Message::Text(t))) => {
+                    assert_ne!(
+                        serde_json::from_str::<Value>(&t).unwrap()["type"],
+                        "data-changed",
+                        "no signal may be delivered after suspension"
+                    );
+                }
+                Some(_) => continue,
+            }
+        }
+    })
+    .await
+    .expect("socket must close after membership suspension");
+    assert!(closed);
+
+    // Reconnect while suspended: the handshake itself refuses.
+    assert!(
+        ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.is_err(),
+        "suspended membership must reject reconnection"
+    );
+}
+
+#[tokio::test]
+async fn scoped_role_revocation_stops_delivery_mid_connection() {
+    let Some(app) = setup().await else {
+        panic!("KOOPERATIF_TEST_DATABASE_URL required")
+    };
+    let coop_a = repo::bootstrap_initial_cooperative(&app.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap")
+        .0;
+    let user = create_user(&app.pool, "rt-scoperev", &[]).await;
+    repo::add_member(&app.pool, "A Kooperatifi", user, None)
+        .await
+        .expect("A member");
+    grant_role(
+        &app.pool,
+        user,
+        "a-izleyici",
+        Some(coop_a),
+        &["periods.read"],
+    )
+    .await;
+    let cookie = login(&app, "rt-scoperev").await;
+    let mut ws = ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.unwrap();
+    let ack = subscribe(&mut ws, &["periods.read"]).await;
+    assert_eq!(ack["granted"], json!(["periods.read"]));
+
+    // Revoke the scoped permission mid-connection — delivery must stop.
+    sqlx::query(
+        "DELETE FROM role_permissions WHERE role_id IN \
+         (SELECT role_id FROM user_role_assignments WHERE user_id = $1 \
+          AND cooperative_id = $2)",
+    )
+    .bind(user)
+    .bind(coop_a)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    commit_period(&app.pool, "after-scoped-revoke").await;
+    assert_eq!(
+        next_domain(&mut ws, SILENCE_TIMEOUT).await,
+        None,
+        "revoked scoped permission must stop delivery mid-connection"
+    );
+}
+
+#[tokio::test]
+async fn null_attributed_legacy_role_authorizes_in_bootstrap() {
+    let Some(app) = setup().await else {
+        panic!("KOOPERATIF_TEST_DATABASE_URL required")
+    };
+    repo::bootstrap_initial_cooperative(&app.pool, "A Kooperatifi")
+        .await
+        .expect("bootstrap");
+    // create_user writes NULL-cooperative role + assignment (legacy
+    // lane); with active bootstrap membership the resolver attributes
+    // them — the migration keeps legacy grants working.
+    let user = create_user(&app.pool, "rt-null", &["periods.read"]).await;
+    repo::add_member(&app.pool, "A Kooperatifi", user, None)
+        .await
+        .expect("A member");
+    let cookie = login(&app, "rt-null").await;
+    let mut ws = ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.unwrap();
+    let ack = subscribe(&mut ws, &["periods.read"]).await;
+    assert_eq!(ack["granted"], json!(["periods.read"]));
+    commit_period(&app.pool, "null-attributed").await;
+    assert_eq!(
+        next_domain(&mut ws, EVENT_TIMEOUT).await.as_deref(),
+        Some("periods")
+    );
+}
+
+#[tokio::test]
+async fn reconnect_after_session_revocation_is_rejected() {
+    let Some(app) = setup().await else {
+        panic!("KOOPERATIF_TEST_DATABASE_URL required")
+    };
+    create_user(&app.pool, "rt-reconnrev", &["periods.read"]).await;
+    let cookie = login(&app, "rt-reconnrev").await;
+    let ws = ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.unwrap();
+    sqlx::query(
+        "UPDATE user_sessions SET revoked_at = now() \
+         WHERE user_id = (SELECT id FROM users WHERE username = 'rt-reconnrev')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    drop(ws);
+    assert!(
+        ws_connect(&app, Some(&cookie), Some(ORIGIN)).await.is_err(),
+        "revoked session must not open a new socket"
     );
 }

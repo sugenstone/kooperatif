@@ -242,6 +242,47 @@ pub async fn active_role_summaries_in_cooperative(
     .await
 }
 
+/// Bootstrap-scoped role summaries (id + display name) — the `me`
+/// counterpart of `effective_permissions_in_bootstrap` (M1-P1-c3a):
+/// bootstrap-owned plus NULL-attributed legacy rows, but ONLY through
+/// an active bootstrap membership and ONLY when `$2` resolves as the
+/// marker-consistent bootstrap cooperative inside the query itself. A
+/// foreign-cooperative role can never appear in this list.
+pub async fn active_role_summaries_in_bootstrap(
+    pool: &PgPool,
+    user_id: Uuid,
+    bootstrap_id: Uuid,
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT r.id, r.name \
+         FROM user_role_assignments ura \
+         JOIN roles r ON r.id = ura.role_id AND r.status = 'active' \
+                      AND (r.cooperative_id = $2 \
+                           OR (r.cooperative_id IS NULL AND EXISTS( \
+                               SELECT 1 FROM installation_state s \
+                               JOIN cooperatives c \
+                                 ON c.id = s.bootstrap_cooperative_id \
+                                AND c.is_bootstrap \
+                               WHERE s.bootstrap_cooperative_id = $2))) \
+         JOIN cooperative_memberships m \
+           ON m.cooperative_id = $2 AND m.user_id = ura.user_id \
+          AND m.status = 'active' \
+         WHERE ura.user_id = $1 \
+           AND (ura.cooperative_id = $2 \
+                OR (ura.cooperative_id IS NULL AND EXISTS( \
+                    SELECT 1 FROM installation_state s \
+                    JOIN cooperatives c \
+                      ON c.id = s.bootstrap_cooperative_id \
+                     AND c.is_bootstrap \
+                    WHERE s.bootstrap_cooperative_id = $2))) \
+         ORDER BY r.name",
+    )
+    .bind(user_id)
+    .bind(bootstrap_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// Cooperative-scoped permission enforcement (P1-b, P1-K2).
 ///
 /// Accepts a server-verified `TenantCtx` — never a raw request header —

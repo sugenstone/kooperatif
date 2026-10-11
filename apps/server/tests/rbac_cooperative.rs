@@ -1772,3 +1772,128 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
 
     test.cleanup().await;
 }
+
+// ---- M1-P1-c3a — /api/auth/me bootstrap-scoped hints ----
+
+#[tokio::test]
+async fn me_returns_bootstrap_scoped_authorization_hints() {
+    let Some(test) = setup().await else { return };
+    let (_, coop) = bootstrap_admin(&test.pool, "me_admin").await;
+    let coop_b = repo::create_cooperative(&test.pool, "B Kooperatifi", None)
+        .await
+        .expect("B")
+        .id;
+
+    // Dual member: viewer in bootstrap A, full administrator in B.
+    // me must report ONLY the bootstrap-attributable hints — a B-scoped
+    // role can never imply authority over A's business surface.
+    let dual = create_user(&test.pool, "cift_uye").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", dual, None)
+        .await
+        .expect("A member");
+    repo::add_member(&test.pool, "B Kooperatifi", dual, None)
+        .await
+        .expect("B member");
+    let a_role = grant_role(&test.pool, dual, "a-izleyici", Some(coop), &["roles.read"]).await;
+    let b_role = grant_role(&test.pool, dual, "b-admin", Some(coop_b), ADMIN_PERMS).await;
+
+    let (cookie, _) = login(&test.app, test.peer, "cift_uye").await;
+    let (status, body) = request_json(
+        &test,
+        Method::GET,
+        "/api/auth/me",
+        &cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let body: Value = serde_json::from_str(&body).expect("json");
+    let perms: Vec<String> = body["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(perms.contains(&"roles.read".to_string()), "{perms:?}");
+    assert!(
+        !perms.contains(&"roles.manage".to_string()),
+        "B-scoped admin permission must not appear in hints: {perms:?}"
+    );
+    assert!(
+        !perms.contains(&"users.manage".to_string()),
+        "B-scoped permission must not appear in hints: {perms:?}"
+    );
+    let role_ids: Vec<String> = body["roles"]
+        .as_array()
+        .expect("roles array")
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(role_ids.contains(&a_role.to_string()));
+    assert!(
+        !role_ids.contains(&b_role.to_string()),
+        "B role must not appear in me hints: {role_ids:?}"
+    );
+
+    // B-only member: hints are empty but the cooperatives list still
+    // reports the membership — the contract shape is unchanged.
+    let b_only = create_user(&test.pool, "sadece_b").await;
+    repo::add_member(&test.pool, "B Kooperatifi", b_only, None)
+        .await
+        .expect("B member");
+    grant_role(&test.pool, b_only, "b-admin-2", Some(coop_b), ADMIN_PERMS).await;
+    let (b_cookie, _) = login(&test.app, test.peer, "sadece_b").await;
+    let (b_status, b_body) = request_json(
+        &test,
+        Method::GET,
+        "/api/auth/me",
+        &b_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(b_status, StatusCode::OK, "{b_body}");
+    let b_body: Value = serde_json::from_str(&b_body).expect("json");
+    assert_eq!(b_body["permissions"].as_array().unwrap().len(), 0);
+    assert_eq!(b_body["roles"].as_array().unwrap().len(), 0);
+    assert!(
+        !b_body["cooperatives"].as_array().unwrap().is_empty(),
+        "memberships must still be reported"
+    );
+
+    // NULL-attributed legacy role: resolvable inside the verified
+    // bootstrap scope — legacy grants keep working after bootstrap.
+    let legacy = create_user(&test.pool, "miras").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", legacy, None)
+        .await
+        .expect("A member");
+    grant_role(&test.pool, legacy, "miras-rol", None, ADMIN_PERMS).await;
+    let (l_cookie, _) = login(&test.app, test.peer, "miras").await;
+    let (l_status, l_body) = request_json(
+        &test,
+        Method::GET,
+        "/api/auth/me",
+        &l_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(l_status, StatusCode::OK, "{l_body}");
+    let l_body: Value = serde_json::from_str(&l_body).expect("json");
+    let l_perms: Vec<String> = l_body["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        l_perms.contains(&"roles.manage".to_string()),
+        "NULL-attributed legacy grant must still resolve: {l_perms:?}"
+    );
+
+    test.cleanup().await;
+}

@@ -306,12 +306,7 @@ pub async fn login(
         state.auth.config.session_absolute_ttl_secs,
     );
 
-    let (permissions, roles) = authorization_context(pool, user.id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "authorization context failed at login");
-            ApiError::Internal
-        })?;
+    let (permissions, roles) = authorization_context(pool, user.id).await?;
     let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, user.id)
         .await
         .map_err(|error| {
@@ -343,17 +338,58 @@ pub async fn login(
 /// Effective permission keys + safe active-role summaries for the
 /// authorization context (STEP-003 §21). Errors propagate: an auth
 /// context answer must never silently report an empty permission set.
+///
+/// M1-P1-c3a: after bootstrap the hint set resolves in the VERIFIED
+/// bootstrap scope (NULL-attribution included, active bootstrap
+/// membership required) — these hints describe exactly what backend
+/// business authorization would grant, so a foreign-cooperative role
+/// can never imply authority here. The global set is retained only for
+/// the provably never-bootstrapped lane; tenant residue without a
+/// bootstrap marker is a broken state and fails loud rather than
+/// overstating authority.
 async fn authorization_context(
     pool: &sqlx::PgPool,
     user_id: Uuid,
-) -> Result<(Vec<String>, Vec<RoleSummaryDto>), sqlx::Error> {
-    let mut permissions: Vec<String> = crate::auth::authz::effective_permissions(pool, user_id)
-        .await?
-        .into_iter()
-        .collect();
+) -> Result<(Vec<String>, Vec<RoleSummaryDto>), ApiError> {
+    let internal = |context: &'static str| {
+        move |error: sqlx::Error| {
+            tracing::error!(error = %error, context);
+            ApiError::Internal
+        }
+    };
+    let bootstrap = crate::tenant::repo::resolve_bootstrap(pool)
+        .await
+        .map_err(internal("bootstrap lookup failed"))?;
+    let (permissions, roles) = match bootstrap {
+        Some((cooperative_id, _)) => (
+            crate::auth::authz::effective_permissions_in_bootstrap(pool, user_id, cooperative_id)
+                .await
+                .map_err(internal("scoped permission resolution failed"))?,
+            crate::auth::authz::active_role_summaries_in_bootstrap(pool, user_id, cooperative_id)
+                .await
+                .map_err(internal("scoped role resolution failed"))?,
+        ),
+        None => {
+            if !crate::tenant::repo::never_bootstrapped(pool)
+                .await
+                .map_err(internal("never-bootstrapped check failed"))?
+            {
+                tracing::warn!("authorization context: tenant residue without bootstrap marker");
+                return Err(ApiError::Internal);
+            }
+            (
+                crate::auth::authz::effective_permissions(pool, user_id)
+                    .await
+                    .map_err(internal("permission resolution failed"))?,
+                crate::auth::authz::active_role_summaries(pool, user_id)
+                    .await
+                    .map_err(internal("role resolution failed"))?,
+            )
+        }
+    };
+    let mut permissions: Vec<String> = permissions.into_iter().collect();
     permissions.sort();
-    let roles: Vec<RoleSummaryDto> = crate::auth::authz::active_role_summaries(pool, user_id)
-        .await?
+    let roles = roles
         .into_iter()
         .map(|(id, name)| RoleSummaryDto { id, name })
         .collect();
@@ -365,13 +401,7 @@ pub async fn me(
     auth: CurrentAuth,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
-    let (permissions, roles) =
-        authorization_context(pool, auth.user_id)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "authorization context failed");
-                ApiError::Internal
-            })?;
+    let (permissions, roles) = authorization_context(pool, auth.user_id).await?;
     let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, auth.user_id)
         .await
         .map_err(|error| {

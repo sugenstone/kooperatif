@@ -1,15 +1,23 @@
 //! `/api/realtime` — authenticated WebSocket endpoint (STEP-016).
 //!
 //! Security posture (docs/22, §8–§10):
-//! * Handshake uses the SAME session cookie pipeline as every API —
-//!   `CurrentAuth` runs full classify/touch before upgrade.
+//! * Handshake uses the SAME session cookie pipeline as every API,
+//!   wrapped in `BusinessAuth` (M1-P1-c3a): the verified
+//!   bootstrap-pinned context runs full classify/touch plus
+//!   cooperative membership verification before upgrade — a suspended
+//!   member cannot even open a socket, and a malformed or
+//!   non-bootstrap `x-cooperative-id` is rejected like on every other
+//!   business endpoint.
 //! * Origin is enforced unconditionally here (a WS upgrade is GET, so
 //!   the CSRF layer's safe-method exemption does not apply).
 //! * No token is ever accepted in the URL or query string.
 //! * Subscriptions are permission-scoped server-side; permissions are
-//!   RE-READ from PostgreSQL for every delivered signal, and session
-//!   validity is re-checked per signal and per heartbeat tick — a
-//!   revoked/expired session or lost permission terminates delivery
+//!   RE-READ from PostgreSQL for every delivered signal, resolved in
+//!   the VERIFIED cooperative scope — a role owned by another
+//!   cooperative can never grant a bootstrap signal — and session
+//!   validity PLUS bootstrap membership are re-checked per signal and
+//!   per heartbeat tick — a revoked/expired session, a suspended
+//!   membership, or a lost permission terminates delivery
 //!   (close 1008), it never rides a stale socket.
 
 use std::collections::HashSet;
@@ -30,11 +38,11 @@ use uuid::Uuid;
 
 use crate::auth::authz;
 use crate::auth::cookies;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::session::{self, SessionRejection};
 use crate::auth::token;
 use crate::http::{error::ApiError, AppState};
 use crate::realtime::{hub, known_scopes, HubSignal};
+use crate::tenant::extractor::BusinessAuth;
 
 /// Client → server subscription request. `scopes` are permission keys
 /// (`payments.read`, `reports.read`, …); the server intersects the
@@ -88,7 +96,7 @@ async fn websocket_upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Response, ApiError> {
     if state.db.is_none() {
         return Err(ApiError::DependencyUnavailable);
@@ -110,19 +118,47 @@ async fn websocket_upgrade(
     let raw_token =
         cookies::extract_session_token(&headers).ok_or(ApiError::AuthenticationRequired)?;
     let token_hash = token::hash_token(&raw_token);
+    let scope = ctx.cooperative_id();
     Ok(ws
-        .on_upgrade(move |socket| run_connection(state, socket, auth.user_id, token_hash))
+        .on_upgrade(move |socket| {
+            run_connection(state, socket, ctx.auth.user_id, token_hash, scope)
+        })
         .into_response())
 }
 
-/// Re-checks session validity AND fresh effective permissions — one
-/// round-trip pair per delivered signal. Returns `None` when the
-/// session is no longer valid (revoked/expired/disabled).
+/// Verified-scope permission resolution for signal delivery
+/// (M1-P1-c3a): a bootstrap scope resolves through
+/// `effective_permissions_in_bootstrap` — NULL-attribution included,
+/// active bootstrap membership required — so a role owned by another
+/// cooperative can never grant a bootstrap signal and a suspended
+/// membership resolves to an empty set. `None` is the provably
+/// never-bootstrapped lane (legacy global set).
+async fn scoped_permissions(
+    pool: &PgPool,
+    user_id: Uuid,
+    scope: Option<Uuid>,
+) -> Result<HashSet<String>, sqlx::Error> {
+    match scope {
+        Some(cooperative_id) => {
+            authz::effective_permissions_in_bootstrap(pool, user_id, cooperative_id).await
+        }
+        None => authz::effective_permissions(pool, user_id).await,
+    }
+}
+
+/// Re-checks session validity, verified-scope membership, and fresh
+/// scoped effective permissions — one round-trip set per delivered
+/// signal. Returns `None` when the session is no longer valid
+/// (revoked/expired/disabled) OR when the cooperative context no
+/// longer holds (membership suspended/ended, cooperative
+/// deactivated/business gate closed) — the socket terminates rather
+/// than riding a stale authorization.
 async fn revalidate(
     pool: &PgPool,
     token_hash: [u8; 32],
     user_id: Uuid,
     now: OffsetDateTime,
+    scope: Option<Uuid>,
 ) -> Option<HashSet<String>> {
     match session::classify_session(pool, token_hash, now).await {
         Ok(Ok(_)) => {}
@@ -140,7 +176,31 @@ async fn revalidate(
             return None;
         }
     }
-    match authz::effective_permissions(pool, user_id).await {
+    // Membership in the verified cooperative is part of the
+    // authorization decision — an empty permission set alone cannot
+    // distinguish "no grants" from "membership suspended", so the
+    // membership itself is re-verified and its loss closes the socket.
+    if let Some(cooperative_id) = scope {
+        if let Err(error) =
+            crate::tenant::extractor::verify_business_membership(pool, user_id, cooperative_id)
+                .await
+        {
+            match error {
+                ApiError::CooperativeAccessDenied | ApiError::CooperativeNotReady => {
+                    tracing::info!(
+                        user_id = %user_id,
+                        cooperative_id = %cooperative_id,
+                        "realtime membership verification lost — closing socket"
+                    );
+                }
+                _ => {
+                    tracing::error!(error = ?error, "realtime membership check failed");
+                }
+            }
+            return None;
+        }
+    }
+    match scoped_permissions(pool, user_id, scope).await {
         Ok(perms) => Some(perms),
         Err(error) => {
             tracing::error!(error = %error, "realtime permission lookup failed");
@@ -154,6 +214,7 @@ async fn run_connection(
     socket: axum::extract::ws::WebSocket,
     user_id: Uuid,
     token_hash: [u8; 32],
+    scope: Option<Uuid>,
 ) {
     let Some(pool) = state.db.clone() else { return };
     let (mut sink, mut stream) = socket.split();
@@ -170,7 +231,7 @@ async fn run_connection(
                 Some(Ok(Message::Text(text))) => {
                     let Ok(request) = serde_json::from_str::<SubscribeRequest>(&text) else { continue };
                     let known = known_scopes();
-                    let Ok(effective) = authz::effective_permissions(&pool, user_id).await else {
+                    let Ok(effective) = scoped_permissions(&pool, user_id, scope).await else {
                         close(&mut sink, 1011, "internal").await;
                         return;
                     };
@@ -194,7 +255,9 @@ async fn run_connection(
                 Ok(HubSignal::Changed(domain)) => {
                     let now = state.auth.clock.now();
                     // Fresh session + fresh permission for THIS delivery.
-                    let Some(effective) = revalidate(&pool, token_hash, user_id, now).await else {
+                    let Some(effective) =
+                        revalidate(&pool, token_hash, user_id, now, scope).await
+                    else {
                         close(&mut sink, 1008, "session").await;
                         return;
                     };
@@ -228,7 +291,10 @@ async fn run_connection(
             _ = heartbeat.tick() => {
                 // Session revocation/expiry/disable must terminate a
                 // live socket even while no domain events flow.
-                if revalidate(&pool, token_hash, user_id, state.auth.clock.now()).await.is_none() {
+                if revalidate(&pool, token_hash, user_id, state.auth.clock.now(), scope)
+                    .await
+                    .is_none()
+                {
                     close(&mut sink, 1008, "session").await;
                     return;
                 }

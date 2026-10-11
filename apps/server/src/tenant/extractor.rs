@@ -72,11 +72,12 @@ impl FromRequestParts<AppState> for TenantCtx {
 }
 
 /// Shared membership/cooperative verification for tenant-bearing
-/// contexts (TenantCtx and BusinessAuth). Returns the cooperative name
-/// on success. Unknown cooperative, non-member and non-active
-/// membership/cooperative are denied identically — the response never
-/// distinguishes them (docs/21:86 spirit).
-async fn verify_business_membership(
+/// contexts (TenantCtx and BusinessAuth) and realtime revalidation
+/// (M1-P1-c3a). Returns the cooperative name on success. Unknown
+/// cooperative, non-member and non-active membership/cooperative are
+/// denied identically — the response never distinguishes them
+/// (docs/21:86 spirit).
+pub(crate) async fn verify_business_membership(
     pool: &sqlx::PgPool,
     user_id: Uuid,
     cooperative_id: Uuid,
