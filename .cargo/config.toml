@@ -1,0 +1,6 @@
+# M1-INFRA-001: bound rustc codegen/link parallelism — the default
+# (num_cpus) oversubscribed this machine's pagefile during parallel
+# test-binary builds and corrupted compiler metadata
+# (STATUS_STACK_BUFFER_OVERRUN followed by E0282 cascades).
+[build]
+jobs = 4
