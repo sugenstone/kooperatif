@@ -16,7 +16,7 @@
 //! enforce permissions server-side (STEP-003 semantics).
 //!
 //! M1-P1-c3b: every handler extracts `BusinessAuth` — the verified
-//! bootstrap-pinned cooperative context — and resolves permissions via
+//! session-scoped cooperative context (M1-P6 B4) — and resolves permissions via
 //! `require_business`; a foreign cooperative's role can never
 //! authorize a parties operation and audit events are
 //! cooperative-attributed.
@@ -365,26 +365,41 @@ pub async fn list_shareholders(
 ) -> Result<Json<PaginatedDto<ShareholderListItemDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = party_repo::list_shareholders(
-        pool,
-        query.search.as_deref(),
-        query.default_account_id,
-        page,
-        page_size,
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!(error = %error, "shareholder listing failed");
-        ApiError::Internal
-    })?;
-    let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(list_item_dto).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = party_repo::list_shareholders(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
+            query.default_account_id,
+            page,
+            page_size,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "shareholder listing failed");
+            ApiError::Internal
+        })?;
+        let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(list_item_dto).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn duplicate_check(
@@ -394,19 +409,34 @@ pub async fn duplicate_check(
 ) -> Result<Json<Vec<ShareholderListItemDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
-    let first = query.search.as_deref().unwrap_or_default();
-    // Reuse `search` as "firstName lastName" for the duplicate probe.
-    let (last_name, remainder) = first
-        .rsplit_once(' ')
-        .map(|(rest, last)| (last.to_string(), rest.to_string()))
-        .unwrap_or((String::new(), first.to_string()));
-    let rows = party_repo::duplicate_candidates(pool, &remainder, &last_name)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "duplicate check failed");
-            ApiError::Internal
-        })?;
-    Ok(Json(rows.iter().map(list_item_dto).collect()))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let first = query.search.as_deref().unwrap_or_default();
+        // Reuse `search` as "firstName lastName" for the duplicate probe.
+        let (last_name, remainder) = first
+            .rsplit_once(' ')
+            .map(|(rest, last)| (last.to_string(), rest.to_string()))
+            .unwrap_or((String::new(), first.to_string()));
+        let rows =
+            party_repo::duplicate_candidates(&mut tx, ctx.cooperative_id(), &remainder, &last_name)
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = %error, "duplicate check failed");
+                    ApiError::Internal
+                })?;
+        Ok(Json(rows.iter().map(list_item_dto).collect()))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 type ResolvedPersonRef = (Option<Uuid>, Option<String>, Option<String>);
@@ -476,6 +506,8 @@ pub async fn create_shareholder(
         authz::catalog::SHAREHOLDERS_MANAGE,
         &Method::POST
     );
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
 
     let (existing_person_id, person_first, person_last) =
         resolve_person_ref(&body.person, "person")?;
@@ -499,7 +531,8 @@ pub async fn create_shareholder(
 
     let now = state.auth.clock.now();
     let created = party_repo::create_shareholder(
-        pool,
+        &mut tx,
+        ctx.cooperative_id(),
         ctx.auth.user_id,
         party_repo::CreateShareholder {
             person_first_name: person_first,
@@ -537,66 +570,42 @@ pub async fn create_shareholder(
     // only, no unnecessary duplication of personal payloads. Events
     // carry the verified cooperative attribution (M1-P1-c3b).
     if created.created_person {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::PersonCreated,
-            ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({ "person_id": created.person_id }),
-        )
-        .await;
+        // R4: audit row minted by the DB transition trigger.
     }
     if created.created_guardian_person {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::PersonCreated,
-            ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({ "person_id": created.guardian_person_id, "role": "guardian" }),
-        )
-        .await;
+        // R4: audit row minted by the DB transition trigger.
     }
     if created.created_family {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::FamilyCreated,
-            ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({ "family_id": created.family_id, "source": "shareholder_create" }),
-        )
-        .await;
+        // R4: audit row minted by the DB transition trigger.
     }
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareholderCreated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "shareholder_id": created.shareholder_id,
-            "person_id": created.person_id,
-            "guardian_person_id": created.guardian_person_id,
-            "family_id": created.family_id,
-            "default_collection_account_id": body.default_collection_account_id
-        }),
-    )
-    .await;
+    // R4: audit row minted by the DB transition trigger.
     tracing::info!(outcome = "shareholder_created", id = %created.shareholder_id, actor = %ctx.auth.user_id);
 
-    let detail = load_detail(pool, created.shareholder_id)
+    let detail = load_detail(&mut tx,
+        ctx.cooperative_id(), created.shareholder_id)
         .await?
         .ok_or(ApiError::Internal)?;
     Ok((StatusCode::CREATED, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 async fn load_detail(
-    pool: &sqlx::PgPool,
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<ShareholderDetailDto>, ApiError> {
-    let Some(row) = party_repo::find_shareholder(pool, id)
+    let Some(row) = party_repo::find_shareholder(&mut *db, cooperative_id, id)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "shareholder load failed");
@@ -605,7 +614,7 @@ async fn load_detail(
     else {
         return Ok(None);
     };
-    let history = party_repo::membership_history(pool, id)
+    let history = party_repo::membership_history(&mut *db, cooperative_id, id)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "membership history failed");
@@ -638,10 +647,24 @@ pub async fn get_shareholder(
 ) -> Result<Json<ShareholderDetailDto>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
-    load_detail(pool, id)
-        .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .map(Json)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn update_shareholder(
@@ -658,9 +681,11 @@ pub async fn update_shareholder(
         authz::catalog::SHAREHOLDERS_MANAGE,
         &Method::PATCH
     );
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
 
-    let mut tx = pool.begin().await.map_err(|error| {
-        tracing::error!(error = %error, "update tx failed");
+    let mut upd_tx = sqlx::Acquire::begin(&mut tx).await.map_err(|error| {
+        tracing::error!(error = %error, "update upd_tx failed");
         ApiError::Internal
     })?;
 
@@ -676,16 +701,17 @@ pub async fn update_shareholder(
         "SELECT s.id, p.first_name, p.last_name, s.guardian_person_id, \
              s.default_collection_account_id, s.updated_at \
          FROM shareholders s JOIN persons p ON p.id = s.person_id \
-         WHERE s.id = $1 FOR UPDATE OF s",
+         WHERE s.id = $1 AND s.cooperative_id = $2 FOR UPDATE OF s",
     )
     .bind(id)
-    .fetch_optional(tx.as_mut())
+    .bind(ctx.cooperative_id())
+    .fetch_optional(upd_tx.as_mut())
     .await
     .map_err(|error| {
         tracing::error!(error = %error, "shareholder load failed");
         ApiError::Internal
     })?;
-    let Some((person_id, old_first, old_last, old_guardian, old_default_account, updated_at)) =
+    let Some((person_id, _old_first, _old_last, _old_guardian, old_default_account, updated_at)) =
         current
     else {
         return Err(ApiError::NotFound);
@@ -699,31 +725,20 @@ pub async fn update_shareholder(
         let last = party_model::validate_name(last).map_err(|_| ApiError::ValidationFailed)?;
         sqlx::query(
             "UPDATE persons SET first_name = $2, last_name = $3, \
-             search_name = $4, updated_at = now() WHERE id = $1",
+             search_name = $4, updated_at = now() WHERE id = $1 AND cooperative_id = $5",
         )
         .bind(person_id)
         .bind(&first)
         .bind(&last)
         .bind(party_model::fold_search(&format!("{first} {last}")))
-        .execute(tx.as_mut())
+        .bind(ctx.cooperative_id())
+        .execute(upd_tx.as_mut())
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "person update failed");
             ApiError::Internal
         })?;
-        audit::record_scoped(
-            pool,
-            SecurityEventType::PersonUpdated,
-            ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "person_id": person_id,
-                "before": { "first": old_first, "last": old_last },
-                "after": { "first": first, "last": last }
-            }),
-        )
-        .await;
+        // R4: audit row minted by the DB transition trigger.
     }
 
     if let Some(guardian_request) = &body.guardian {
@@ -732,9 +747,10 @@ pub async fn update_shareholder(
                 let (existing_id, first, last) = resolve_person_ref(reference, "guardian")?;
                 if let Some(existing_id) = existing_id {
                     let exists: Option<Uuid> =
-                        sqlx::query_scalar("SELECT id FROM persons WHERE id = $1")
+                        sqlx::query_scalar("SELECT id FROM persons WHERE id = $1 AND cooperative_id = $2")
                             .bind(existing_id)
-                            .fetch_optional(tx.as_mut())
+                            .bind(ctx.cooperative_id())
+                            .fetch_optional(upd_tx.as_mut())
                             .await
                             .map_err(|error| {
                                 tracing::error!(error = %error, "guardian check failed");
@@ -746,27 +762,20 @@ pub async fn update_shareholder(
                     let last = last.ok_or(ApiError::ValidationFailed)?;
                     let search = party_model::fold_search(&format!("{first} {last}"));
                     let created: Uuid = sqlx::query_scalar(
-                        "INSERT INTO persons (first_name, last_name, search_name) \
-                         VALUES ($1, $2, $3) RETURNING id",
+                        "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+                         VALUES ($1, $2, $3, $4) RETURNING id",
                     )
                     .bind(&first)
                     .bind(&last)
                     .bind(&search)
-                    .fetch_one(tx.as_mut())
+                    .bind(ctx.cooperative_id())
+                    .fetch_one(upd_tx.as_mut())
                     .await
                     .map_err(|error| {
                         tracing::error!(error = %error, "guardian person create failed");
                         ApiError::Internal
                     })?;
-                    audit::record_scoped(
-                        pool,
-                        SecurityEventType::PersonCreated,
-                        ctx.cooperative_id(),
-                        Some(ctx.auth.user_id),
-                        None,
-                        serde_json::json!({ "person_id": created, "role": "guardian" }),
-                    )
-                    .await;
+                    // R4: audit row minted by the DB transition trigger.
                     created
                 }
             }
@@ -777,10 +786,11 @@ pub async fn update_shareholder(
         }
         if new_guardian == Uuid::nil() {
             sqlx::query(
-                "UPDATE shareholders SET guardian_person_id = NULL, updated_at = now() WHERE id = $1",
+                "UPDATE shareholders SET guardian_person_id = NULL, updated_at = now()                  WHERE id = $1 AND cooperative_id = $2",
             )
             .bind(id)
-            .execute(tx.as_mut())
+            .bind(ctx.cooperative_id())
+            .execute(upd_tx.as_mut())
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "guardian clear failed");
@@ -788,31 +798,19 @@ pub async fn update_shareholder(
             })?;
         } else {
             sqlx::query(
-                "UPDATE shareholders SET guardian_person_id = $2, updated_at = now() WHERE id = $1",
+                "UPDATE shareholders SET guardian_person_id = $2, updated_at = now()                  WHERE id = $1 AND cooperative_id = $3",
             )
             .bind(id)
             .bind(new_guardian)
-            .execute(tx.as_mut())
+            .bind(ctx.cooperative_id())
+            .execute(upd_tx.as_mut())
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "guardian update failed");
                 ApiError::Internal
             })?;
         }
-        audit::record_scoped(
-            pool,
-            SecurityEventType::ShareholderUpdated,
-            ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "shareholder_id": id,
-                "change": "guardian",
-                "before": old_guardian,
-                "after": if new_guardian == Uuid::nil() { None } else { Some(new_guardian) }
-            }),
-        )
-        .await;
+        // R4: audit row minted by the DB transition trigger.
     }
 
     // FUNC-FIX-002: default collection account change/clear. Absent
@@ -823,10 +821,11 @@ pub async fn update_shareholder(
     if let Some(new_default) = &body.default_collection_account_id {
         if let Some(account_id) = new_default {
             let status: Option<String> = sqlx::query_scalar(
-                "SELECT status FROM financial_accounts WHERE id = $1 FOR UPDATE",
+                "SELECT status FROM financial_accounts WHERE id = $1 AND cooperative_id = $2 FOR UPDATE",
             )
             .bind(account_id)
-            .fetch_optional(tx.as_mut())
+            .bind(ctx.cooperative_id())
+            .fetch_optional(upd_tx.as_mut())
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "default account check failed");
@@ -839,41 +838,43 @@ pub async fn update_shareholder(
         if *new_default != old_default_account {
             sqlx::query(
                 "UPDATE shareholders SET default_collection_account_id = $2, \
-                 updated_at = now() WHERE id = $1",
+                 updated_at = now() WHERE id = $1 AND cooperative_id = $3",
             )
             .bind(id)
             .bind(*new_default)
-            .execute(tx.as_mut())
+            .bind(ctx.cooperative_id())
+            .execute(upd_tx.as_mut())
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "default account update failed");
                 ApiError::Internal
             })?;
-            audit::record_scoped(
-                pool,
-                SecurityEventType::ShareholderDefaultAccountChanged,
-                ctx.cooperative_id(),
-                Some(ctx.auth.user_id),
-                None,
-                serde_json::json!({
-                    "shareholder_id": id,
-                    "before": old_default_account,
-                    "after": *new_default
-                }),
-            )
-            .await;
+            // R4: audit row minted by the DB transition trigger.
         }
     }
 
-    tx.commit().await.map_err(|error| {
+    upd_tx.commit().await.map_err(|error| {
         tracing::error!(error = %error, "update commit failed");
         ApiError::Internal
     })?;
 
-    load_detail(pool, id)
+    load_detail(&mut tx,
+        ctx.cooperative_id(), id)
         .await?
         .map(Json)
         .ok_or(ApiError::Internal)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn status_change(
@@ -890,67 +891,49 @@ pub async fn status_change(
         authz::catalog::SHAREHOLDERS_MANAGE,
         &Method::POST
     );
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let target =
+            party_model::ShareholderStatus::parse(&body.to).ok_or(ApiError::ValidationFailed)?;
 
-    let target =
-        party_model::ShareholderStatus::parse(&body.to).ok_or(ApiError::ValidationFailed)?;
-
-    // Load + transition validation + update under a row lock so two
-    // concurrent transitions serialize: the second observes the
-    // committed predecessor, not a stale one (docs/16, §49).
-    let mut tx = pool.begin().await.map_err(|error| {
-        tracing::error!(error = %error, "status tx failed");
-        ApiError::Internal
-    })?;
-    let old: Option<String> =
-        sqlx::query_scalar("SELECT status FROM shareholders WHERE id = $1 FOR UPDATE")
+        // R3C: one atomic definer — row lock, transition table, the flip
+        // and the mandatory 'shareholder_status_changed' security event
+        // are indivisible; the audit row can no longer evaporate while
+        // the transition commits.
+        sqlx::query("SELECT public.app_shareholder_set_status_tx($1, $2, $3, $4, $5)")
             .bind(id)
-            .fetch_optional(tx.as_mut())
+            .bind(target.as_str())
+            .bind(&body.reason)
+            .bind(ctx.auth.user_id)
+            .bind(ctx.cooperative_id())
+            .execute(tx.as_mut())
             .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "status load failed");
+            .map_err(|error| match crate::db::package_error_token(&error) {
+                Some("not_found") => ApiError::NotFound,
+                Some("invalid_transition") => {
+                    tracing::info!(outcome = "invalid_status_transition", to = body.to);
+                    ApiError::ValidationFailed
+                }
+                _ => {
+                    tracing::error!(error = %error, "status update failed");
+                    ApiError::Internal
+                }
+            })?;
+        tracing::info!(outcome = "shareholder_status_changed", id = %id, to = target.as_str());
+
+        Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
                 ApiError::Internal
             })?;
-    let Some(old) = old else {
-        return Err(ApiError::NotFound);
-    };
-    let old_status = party_model::ShareholderStatus::parse(&old).ok_or(ApiError::Internal)?;
-    if !old_status.can_transition_to(target) {
-        tracing::info!(
-            outcome = "invalid_status_transition",
-            from = old,
-            to = body.to
-        );
-        return Err(ApiError::ValidationFailed);
+            Ok(v)
+        }
+        Err(e) => Err(e),
     }
-
-    sqlx::query("UPDATE shareholders SET status = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(target.as_str())
-        .execute(tx.as_mut())
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "status update failed");
-            ApiError::Internal
-        })?;
-    tx.commit().await.map_err(|error| {
-        tracing::error!(error = %error, "status commit failed");
-        ApiError::Internal
-    })?;
-
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareholderStatusChanged,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "shareholder_id": id, "from": old, "to": target.as_str(), "reason": body.reason
-        }),
-    )
-    .await;
-    tracing::info!(outcome = "shareholder_status_changed", id = %id, from = old, to = target.as_str());
-
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub async fn family_change(
@@ -967,6 +950,8 @@ pub async fn family_change(
         authz::catalog::FAMILIES_MANAGE,
         &Method::POST
     );
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
 
     let target = match body.family.mode.as_str() {
         "existing" => party_repo::FamilyChangeTarget::Existing(
@@ -985,7 +970,8 @@ pub async fn family_change(
 
     let now = state.auth.clock.now();
     let (new_family_id, old_sequence, new_sequence) = party_repo::change_family(
-        pool,
+        &mut tx,
+        ctx.cooperative_id(),
         ctx.auth.user_id,
         id,
         target,
@@ -1005,24 +991,33 @@ pub async fn family_change(
         }
     })?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareholderFamilyChanged,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
+    audit::record_tx(
+            &mut tx,
+            SecurityEventType::ShareholderFamilyChanged,
+            serde_json::json!({
             "shareholder_id": id,
             "from_family_sequence": old_sequence,
             "to_family_sequence": new_sequence,
             "to_family_id": new_family_id,
             "reason": body.reason
         }),
-    )
-    .await;
+        )
+    .await?;
     tracing::info!(outcome = "shareholder_family_changed", id = %id, from = old_sequence, to = new_sequence, actor = %ctx.auth.user_id);
 
     Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn list_persons(
@@ -1032,24 +1027,38 @@ pub async fn list_persons(
 ) -> Result<Json<Vec<PersonDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHAREHOLDERS_READ).await?;
     let pool = pool_of(&state)?;
-    let search = query.search.as_deref().unwrap_or_default();
-    let rows = party_repo::search_persons(pool, search, 20)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "person search failed");
-            ApiError::Internal
-        })?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|row| PersonDto {
-                id: row.id,
-                first_name: row.first_name,
-                last_name: row.last_name,
-                shareholder_id: row.shareholder_id,
-                shareholder_status: row.shareholder_status,
-            })
-            .collect(),
-    ))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let search = query.search.as_deref().unwrap_or_default();
+        let rows = party_repo::search_persons(&mut tx, ctx.cooperative_id(), search, 20)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "person search failed");
+                ApiError::Internal
+            })?;
+        Ok(Json(
+            rows.into_iter()
+                .map(|row| PersonDto {
+                    id: row.id,
+                    first_name: row.first_name,
+                    last_name: row.last_name,
+                    shareholder_id: row.shareholder_id,
+                    shareholder_status: row.shareholder_status,
+                })
+                .collect(),
+        ))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn list_families(
@@ -1059,27 +1068,47 @@ pub async fn list_families(
 ) -> Result<Json<PaginatedDto<FamilyListItemDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FAMILIES_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = party_repo::list_families(pool, query.search.as_deref(), page, page_size)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = party_repo::list_families(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
+            page,
+            page_size,
+        )
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "family listing failed");
             ApiError::Internal
         })?;
-    let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows
-            .into_iter()
-            .map(|row| FamilyListItemDto {
-                id: row.id,
-                sequence_number: row.sequence_number,
-                member_count: row.member_count,
-            })
-            .collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+        let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows
+                .into_iter()
+                .map(|row| FamilyListItemDto {
+                    id: row.id,
+                    sequence_number: row.sequence_number,
+                    member_count: row.member_count,
+                })
+                .collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn create_family(
@@ -1095,52 +1124,60 @@ pub async fn create_family(
         authz::catalog::FAMILIES_MANAGE,
         &Method::POST
     );
-    let sequence = party_model::validate_family_sequence(body.sequence_number)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let sequence = party_model::validate_family_sequence(body.sequence_number)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let id: Uuid =
-        sqlx::query_scalar("INSERT INTO families (sequence_number) VALUES ($1) RETURNING id")
-            .bind(sequence)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| match error {
-                sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
-                    tracing::info!(outcome = "family_sequence_conflict", sequence);
-                    ApiError::Conflict
-                }
-                other => {
-                    tracing::error!(error = %other, "family creation failed");
-                    ApiError::Internal
-                }
-            })?;
-
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FamilyCreated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "family_id": id, "sequence_number": sequence, "source": "api" }),
-    )
-    .await;
-    tracing::info!(outcome = "family_created", id = %id, sequence, actor = %ctx.auth.user_id);
-
-    let row = party_repo::find_family(pool, id)
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO families (sequence_number, cooperative_id) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(sequence)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "family reload failed");
-            ApiError::Internal
-        })?
-        .ok_or(ApiError::Internal)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(FamilyListItemDto {
-            id: row.id,
-            sequence_number: row.sequence_number,
-            member_count: row.member_count,
-        }),
-    )
-        .into_response())
+        .map_err(|error| match error {
+            sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+                tracing::info!(outcome = "family_sequence_conflict", sequence);
+                ApiError::Conflict
+            }
+            other => {
+                tracing::error!(error = %other, "family creation failed");
+                ApiError::Internal
+            }
+        })?;
+
+        // R4: audit row minted by the DB transition trigger.
+        tracing::info!(outcome = "family_created", id = %id, sequence, actor = %ctx.auth.user_id);
+
+        let row = party_repo::find_family(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "family reload failed");
+                ApiError::Internal
+            })?
+            .ok_or(ApiError::Internal)?;
+        Ok((
+            StatusCode::CREATED,
+            Json(FamilyListItemDto {
+                id: row.id,
+                sequence_number: row.sequence_number,
+                member_count: row.member_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_family(
@@ -1150,36 +1187,49 @@ pub async fn get_family(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FAMILIES_READ).await?;
     let pool = pool_of(&state)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let family = party_repo::find_family(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "family load failed");
+                ApiError::Internal
+            })?
+            .ok_or(ApiError::NotFound)?;
 
-    let family = party_repo::find_family(pool, id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "family load failed");
-            ApiError::Internal
-        })?
-        .ok_or(ApiError::NotFound)?;
+        // Current members with full identity context (one query, no N+1).
+        let members = party_repo::list_shareholders_by_family(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "family members load failed");
+                ApiError::Internal
+            })?;
 
-    // Current members with full identity context (one query, no N+1).
-    let members = party_repo::list_shareholders_by_family(pool, id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "family members load failed");
-            ApiError::Internal
-        })?;
-
-    #[derive(Debug, Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct FamilyDetailDto {
-        id: Uuid,
-        sequence_number: i64,
-        member_count: i64,
-        members: Vec<ShareholderListItemDto>,
+        #[derive(Debug, Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FamilyDetailDto {
+            id: Uuid,
+            sequence_number: i64,
+            member_count: i64,
+            members: Vec<ShareholderListItemDto>,
+        }
+        Ok(Json(FamilyDetailDto {
+            id: family.id,
+            sequence_number: family.sequence_number,
+            member_count: family.member_count,
+            members: members.iter().map(list_item_dto).collect(),
+        })
+        .into_response())
     }
-    Ok(Json(FamilyDetailDto {
-        id: family.id,
-        sequence_number: family.sequence_number,
-        member_count: family.member_count,
-        members: members.iter().map(list_item_dto).collect(),
-    })
-    .into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

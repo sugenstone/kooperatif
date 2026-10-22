@@ -22,7 +22,6 @@
 //! strictly before it (docs/10 cutoff; STEP-006 temporal eligibility).
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -68,8 +67,10 @@ const RETURN_LIST_SELECT: &str = "SELECT r.id, r.return_number, r.share_id, r.sh
 
 /// Bounded return list (ADR-010). `search` covers owner name, share
 /// number and return number.
+#[allow(clippy::too_many_arguments)]
 pub async fn list_returns(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     status: Option<ReturnStatus>,
     share_id: Option<Uuid>,
     shareholder_id: Option<Uuid>,
@@ -77,6 +78,7 @@ pub async fn list_returns(
     page: i64,
     page_size: i64,
 ) -> Result<Vec<ReturnListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let pattern = search
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -87,7 +89,8 @@ pub async fn list_returns(
         .filter(|n| *n > 0);
     sqlx::query_as::<_, ReturnListRow>(&format!(
         "{RETURN_LIST_SELECT} \
-         WHERE ($1::text IS NULL OR r.status = $1) \
+         WHERE r.cooperative_id IS NOT DISTINCT FROM $8 \
+           AND ($1::text IS NULL OR r.status = $1) \
            AND ($2::uuid IS NULL OR r.share_id = $2) \
            AND ($3::uuid IS NULL OR r.shareholder_id = $3) \
            AND ($4::text IS NULL OR lower(r.owner_display_name) LIKE $4) \
@@ -101,7 +104,8 @@ pub async fn list_returns(
     .bind(number)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -126,16 +130,23 @@ pub struct ReturnRow {
     pub updated_at: OffsetDateTime,
 }
 
-pub async fn get_return(pool: &PgPool, id: Uuid) -> Result<Option<ReturnRow>, sqlx::Error> {
+pub async fn get_return(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<ReturnRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, ReturnRow>(
         "SELECT r.id, r.return_number, r.share_id, r.share_number, sh.status AS share_status, \
             r.shareholder_id, r.owner_display_name, r.ownership_started_at, r.requested_at, \
             r.effective_return_date, r.reason, r.status, r.finalized_at, r.cancelled_at, \
             r.cancellation_reason, r.created_at, r.updated_at \
-         FROM share_returns r JOIN shares sh ON sh.id = r.share_id WHERE r.id = $1",
+         FROM share_returns r JOIN shares sh ON sh.id = r.share_id \
+         WHERE r.id = $1 AND r.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
@@ -188,21 +199,27 @@ const ENTITLEMENT_SELECT: &str = "SELECT e.id, e.entitlement_number, e.share_ret
 
 /// Entitlements of one return case (detail surface).
 pub async fn list_entitlements_of_return(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     share_return_id: Uuid,
 ) -> Result<Vec<EntitlementRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, EntitlementRow>(&format!(
-        "{ENTITLEMENT_SELECT} WHERE e.share_return_id = $1 ORDER BY e.entitlement_number"
+        "{ENTITLEMENT_SELECT} WHERE e.share_return_id = $1 \
+         AND e.cooperative_id IS NOT DISTINCT FROM $2 ORDER BY e.entitlement_number"
     ))
     .bind(share_return_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
 /// Bounded entitlement list (shareholder statements / receivable
 /// views): filter by type, status, beneficiary, return.
+#[allow(clippy::too_many_arguments)]
 pub async fn list_entitlements(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     entitlement_type: Option<EntitlementType>,
     status: Option<EntitlementStatus>,
     beneficiary_shareholder_id: Option<Uuid>,
@@ -210,9 +227,11 @@ pub async fn list_entitlements(
     page: i64,
     page_size: i64,
 ) -> Result<Vec<EntitlementRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, EntitlementRow>(&format!(
         "{ENTITLEMENT_SELECT} \
-         WHERE ($1::text IS NULL OR e.entitlement_type = $1) \
+         WHERE e.cooperative_id IS NOT DISTINCT FROM $7 \
+           AND ($1::text IS NULL OR e.entitlement_type = $1) \
            AND ($2::text IS NULL OR e.status = $2) \
            AND ($3::uuid IS NULL OR e.beneficiary_shareholder_id = $3) \
            AND ($4::uuid IS NULL OR e.share_return_id = $4) \
@@ -224,18 +243,25 @@ pub async fn list_entitlements(
     .bind(share_return_id)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
 pub async fn get_entitlement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<EntitlementRow>, sqlx::Error> {
-    sqlx::query_as::<_, EntitlementRow>(&format!("{ENTITLEMENT_SELECT} WHERE e.id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    let mut conn = db.conn().await?;
+    sqlx::query_as::<_, EntitlementRow>(&format!(
+        "{ENTITLEMENT_SELECT} WHERE e.id = $1 \
+         AND e.cooperative_id IS NOT DISTINCT FROM $2"
+    ))
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
+    .await
 }
 
 /// One settlement with resolved labels and the bound movement's live
@@ -273,22 +299,35 @@ const SETTLEMENT_SELECT: &str = "SELECT s.id, s.settlement_number, s.entitlement
     JOIN account_movements m ON m.id = s.account_movement_id";
 
 pub async fn list_settlements_of_return(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     share_return_id: Uuid,
 ) -> Result<Vec<SettlementRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, SettlementRow>(&format!(
-        "{SETTLEMENT_SELECT} WHERE e.share_return_id = $1 ORDER BY s.settlement_number"
+        "{SETTLEMENT_SELECT} WHERE e.share_return_id = $1 \
+         AND s.cooperative_id IS NOT DISTINCT FROM $2 ORDER BY s.settlement_number"
     ))
     .bind(share_return_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
-pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Option<SettlementRow>, sqlx::Error> {
-    sqlx::query_as::<_, SettlementRow>(&format!("{SETTLEMENT_SELECT} WHERE s.id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+pub async fn get_settlement(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<SettlementRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
+    sqlx::query_as::<_, SettlementRow>(&format!(
+        "{SETTLEMENT_SELECT} WHERE s.id = $1 \
+         AND s.cooperative_id IS NOT DISTINCT FROM $2"
+    ))
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
+    .await
 }
 
 // ------------------------------------------------------------------
@@ -378,22 +417,25 @@ const ISTANBUL_DAY_START: &str = "($1::timestamp AT TIME ZONE 'Europe/Istanbul')
 /// Ownership is NOT touched — the owner still owns the Share until
 /// finalization fixes the economic cutoff.
 pub async fn initiate_return(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: InitiateReturn,
     now: OffsetDateTime,
 ) -> Result<ReturnOutcome, ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
 
-    // 1. Idempotent replay short-circuit.
+    // 1. Idempotent replay short-circuit (scoped: a foreign row under
+    //    the global key is indistinguishable — C3/C5).
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, return_number, idempotency_fingerprint FROM share_returns \
-         WHERE idempotency_key = $1",
+         WHERE idempotency_key = $1 AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -411,13 +453,17 @@ pub async fn initiate_return(
         });
     }
 
-    // 2. Lock the Share: only an `active` Share may enter the flow.
-    let share: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, share_number FROM shares WHERE id = $1 FOR UPDATE")
-            .bind(command.share_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
+    // 2. Lock the Share: only an `active` Share IN SCOPE may enter the
+    //    flow — a foreign id is indistinguishable from absence.
+    let share: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status, share_number FROM shares WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(command.share_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(ShareReturnCommandError::Database)?;
     let Some((share_status, share_number)) = share else {
         return Err(ShareReturnCommandError::NotFound);
     };
@@ -427,10 +473,11 @@ pub async fn initiate_return(
 
     // 3. Lock the live ownership interval — the snapshot source.
     let ownership: Option<(Uuid, Uuid, OffsetDateTime)> = sqlx::query_as(
-        "SELECT id, shareholder_id, started_at FROM share_ownerships \
-         WHERE share_id = $1 AND ended_at IS NULL FOR UPDATE",
+        "SELECT id, shareholder_id, started_at \
+         FROM public.app_lock_share_ownership($1, $2)",
     )
     .bind(command.share_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -471,25 +518,28 @@ pub async fn initiate_return(
          LEFT JOIN shareholder_family_memberships m \
              ON m.shareholder_id = s.id AND m.ended_at IS NULL \
          LEFT JOIN families f ON f.id = m.family_id \
-         WHERE s.id = $1",
+         WHERE s.id = $1 AND s.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(owner_id)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
 
-    // 6. Business event + case + lifecycle — one transaction.
+    // 6. Business event + case + lifecycle — one transaction, all
+    //    carrying the verified cooperative scope (C3).
     sqlx::query(
         "INSERT INTO share_events \
              (share_id, event_type, occurred_at, from_shareholder_id, \
-              status_from, status_to, reason, actor_user_id) \
-         VALUES ($1, 'return_requested', $2, $3, 'active', 'return_pending', $4, $5)",
+              status_from, status_to, reason, actor_user_id, cooperative_id) \
+         VALUES ($1, 'return_requested', $2, $3, 'active', 'return_pending', $4, $5, $6)",
     )
     .bind(command.share_id)
     .bind(now)
     .bind(owner_id)
     .bind(&command.reason)
     .bind(actor)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -498,9 +548,11 @@ pub async fn initiate_return(
         "INSERT INTO share_returns \
             (share_id, shareholder_id, owner_display_name, share_number, \
              ownership_started_at, requested_at, effective_return_date, reason, \
-             status, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             status, idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             return_number) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, $12, \
+             allocate_document_number($12, 'share_returns.return_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, return_number",
     )
     .bind(command.share_id)
@@ -514,11 +566,13 @@ pub async fn initiate_return(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await;
 
     let inserted = match inserted {
         Ok(row) => row,
+        Err(ref error) if crate::db::is_idempotency_unique_violation(error) => None,
         Err(sqlx::Error::Database(db))
             if db
                 .constraint()
@@ -530,17 +584,18 @@ pub async fn initiate_return(
     };
     let Some((return_id, return_number)) = inserted else {
         // Concurrent replay under the same idempotency key.
+        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
+            "SELECT id, return_number, idempotency_fingerprint FROM share_returns \
+             WHERE idempotency_key = $1 AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(&command.idempotency_key)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(ShareReturnCommandError::Database)?;
         tx.rollback()
             .await
             .map_err(ShareReturnCommandError::Database)?;
-        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
-            "SELECT id, return_number, idempotency_fingerprint FROM share_returns \
-             WHERE idempotency_key = $1",
-        )
-        .bind(&command.idempotency_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(ShareReturnCommandError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(ShareReturnCommandError::NotFound);
         };
@@ -554,9 +609,12 @@ pub async fn initiate_return(
         });
     };
 
-    sqlx::query("UPDATE shares SET status = 'return_pending', updated_at = $2 WHERE id = $1")
+    // R3C: the mark definer refuses a naked flip — the pending case
+    // and its 'return_requested' event written above must exist.
+    sqlx::query("SELECT public.app_share_return_mark_pending_tx($1, $2, $3)")
         .bind(command.share_id)
         .bind(now)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(ShareReturnCommandError::Database)?;
@@ -575,78 +633,35 @@ pub async fn initiate_return(
 /// never closed so nothing is "restored" — the interval simply keeps
 /// running. History keeps the request + the cancellation (docs/19).
 pub async fn cancel_return(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     return_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
 
-    // Lock order: share -> return case.
-    let share_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT share_id FROM share_returns WHERE id = $1")
+    // R3C: one atomic definer — share -> case lock order, pending
+    // checks, the 'return_cancelled' event and both flips are
+    // indivisible.
+    let return_number: i64 =
+        sqlx::query_scalar("SELECT public.app_share_return_cancel_tx($1, $2, $3, $4, $5)")
             .bind(return_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
-    let Some(share_id) = share_id else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-    let share_status: String =
-        sqlx::query_scalar("SELECT status FROM shares WHERE id = $1 FOR UPDATE")
-            .bind(share_id)
+            .bind(now)
+            .bind(actor)
+            .bind(&reason)
+            .bind(cooperative_id)
             .fetch_one(tx.as_mut())
             .await
-            .map_err(ShareReturnCommandError::Database)?;
-
-    let case: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, return_number FROM share_returns WHERE id = $1 FOR UPDATE")
-            .bind(return_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
-    let Some((status, return_number)) = case else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-    if status != ReturnStatus::Pending.as_str() || share_status != "return_pending" {
-        return Err(ShareReturnCommandError::InvalidState);
-    }
-
-    sqlx::query(
-        "INSERT INTO share_events \
-             (share_id, event_type, occurred_at, status_from, status_to, reason, actor_user_id) \
-         VALUES ($1, 'return_cancelled', $2, 'return_pending', 'active', $3, $4)",
-    )
-    .bind(share_id)
-    .bind(now)
-    .bind(&reason)
-    .bind(actor)
-    .execute(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-
-    sqlx::query(
-        "UPDATE share_returns SET status = 'cancelled', cancelled_at = $2, cancelled_by = $3, \
-            cancellation_reason = $4, updated_at = $2 WHERE id = $1",
-    )
-    .bind(return_id)
-    .bind(now)
-    .bind(actor)
-    .bind(&reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-
-    sqlx::query("UPDATE shares SET status = 'active', updated_at = $2 WHERE id = $1")
-        .bind(share_id)
-        .bind(now)
-        .execute(tx.as_mut())
-        .await
-        .map_err(ShareReturnCommandError::Database)?;
+            .map_err(|error| match crate::db::package_error_token(&error) {
+                Some("not_found") => ShareReturnCommandError::NotFound,
+                Some("invalid_state") => ShareReturnCommandError::InvalidState,
+                _ => ShareReturnCommandError::Database(error),
+            })?;
 
     tx.commit()
         .await
@@ -673,118 +688,82 @@ pub struct FinalizeOutcome {
 /// effective cutoff, closes the Share, and crystallizes every supplied
 /// entitlement — all in ONE transaction. ZERO money moves.
 pub async fn finalize_return(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     return_id: Uuid,
     expected_updated_at: OffsetDateTime,
     entitlements: &[EntitlementSpec],
     now: OffsetDateTime,
 ) -> Result<FinalizeOutcome, ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
 
-    // Lock order: share -> return case -> ownership interval.
-    let share_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT share_id FROM share_returns WHERE id = $1")
-            .bind(return_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
-    let Some(share_id) = share_id else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-    let share_status: String =
-        sqlx::query_scalar("SELECT status FROM shares WHERE id = $1 FOR UPDATE")
-            .bind(share_id)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
-
-    let case: Option<(String, i64, Uuid, OffsetDateTime, Date)> = sqlx::query_as(
-        "SELECT status, return_number, shareholder_id, updated_at, effective_return_date \
-         FROM share_returns WHERE id = $1 FOR UPDATE",
+    // R3C: the complete finalization package — share -> return lock
+    // order, optimistic-concurrency + pending checks, duplicate-type
+    // rejection, ownership-interval close at the economic cutoff, the
+    // share event, both status flips and every entitlement
+    // crystallization — runs as ONE permission-checked definer call.
+    let specs = serde_json::Value::Array(
+        entitlements
+            .iter()
+            .map(|spec| {
+                serde_json::json!({
+                    "type": spec.entitlement_type.as_str(),
+                    "amount": spec.amount.map(|a| a.to_string()),
+                    "due_date": spec.due_date.map(|d| {
+                        d.format(&time::macros::format_description!(
+                            "[year]-[month]-[day]"
+                        ))
+                        .unwrap_or_default()
+                    }),
+                    "policy_reference": spec.policy_reference,
+                    "description": spec.description,
+                })
+            })
+            .collect(),
+    );
+    let (return_number, entitlement_ids): (i64, Vec<Uuid>) = sqlx::query_as(
+        "SELECT return_number, entitlement_ids \
+         FROM public.app_share_return_finalize_tx($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(return_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-    let Some((status, return_number, owner_id, updated_at, effective_return_date)) = case else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-    if updated_at != expected_updated_at {
-        return Err(ShareReturnCommandError::StaleState);
-    }
-    if status != ReturnStatus::Pending.as_str() || share_status != "return_pending" {
-        return Err(ShareReturnCommandError::InvalidState);
-    }
-
-    // One right per type per case — reject duplicate input up front.
-    let mut seen = std::collections::HashSet::new();
-    for spec in entitlements {
-        if !seen.insert(spec.entitlement_type) {
-            return Err(ShareReturnCommandError::EntitlementExists);
-        }
-    }
-
-    // Close the ownership interval at the economic cutoff: ended_at =
-    // effective_return_date 00:00 Europe/Istanbul (first non-owned day).
-    let ended: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE share_ownerships SET ended_at = ($2::timestamp AT TIME ZONE 'Europe/Istanbul') \
-         WHERE id = (SELECT id FROM share_ownerships \
-             WHERE share_id = $1 AND ended_at IS NULL FOR UPDATE) \
-         RETURNING id",
-    )
-    .bind(share_id)
-    .bind(effective_return_date)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-    if ended.is_none() {
-        return Err(ShareReturnCommandError::ShareNotEligible);
-    }
-
-    sqlx::query(
-        "INSERT INTO share_events \
-             (share_id, event_type, occurred_at, from_shareholder_id, \
-              status_from, status_to, reason, actor_user_id) \
-         VALUES ($1, 'return_finalized', $2, $3, 'return_pending', 'closed', $4, $5)",
-    )
-    .bind(share_id)
-    .bind(now)
-    .bind(owner_id)
-    .bind(&None::<String>)
-    .bind(actor)
-    .execute(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-
-    sqlx::query(
-        "UPDATE share_returns SET status = 'finalized', finalized_at = $2, finalized_by = $3, \
-            updated_at = $2 WHERE id = $1",
-    )
-    .bind(return_id)
-    .bind(now)
-    .bind(actor)
-    .execute(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-
-    sqlx::query("UPDATE shares SET status = 'closed', updated_at = $2 WHERE id = $1")
-        .bind(share_id)
-        .bind(now)
-        .execute(tx.as_mut())
+    .bind(expected_updated_at)
+    .bind(
+        sqlx::query_scalar::<_, Date>(
+            "SELECT effective_return_date FROM share_returns WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(return_id)
+        .bind(cooperative_id)
+        .fetch_optional(tx.as_mut())
         .await
-        .map_err(ShareReturnCommandError::Database)?;
-
-    // Crystallize each right — snapshot amount + due date + policy
-    // evidence; a later policy change can never move these rows.
-    let mut entitlement_ids = Vec::with_capacity(entitlements.len());
-    for spec in entitlements {
-        let id: Uuid = insert_entitlement(&mut tx, actor, return_id, owner_id, spec, now).await?;
-        entitlement_ids.push(id);
-    }
+        .map_err(ShareReturnCommandError::Database)?
+        .ok_or(ShareReturnCommandError::NotFound)?,
+    )
+    .bind(&specs)
+    .bind(now)
+    .bind(actor)
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
+    .await
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => ShareReturnCommandError::NotFound,
+        Some("stale_state") => ShareReturnCommandError::StaleState,
+        Some("invalid_state") => ShareReturnCommandError::InvalidState,
+        Some("entitlement_exists") => ShareReturnCommandError::EntitlementExists,
+        Some("share_not_eligible") => ShareReturnCommandError::ShareNotEligible,
+        _ => match &error {
+            sqlx::Error::Database(db)
+                if db.constraint().is_some_and(|c| c.contains("one_per_right")) =>
+            {
+                ShareReturnCommandError::EntitlementExists
+            }
+            _ => ShareReturnCommandError::Database(error),
+        },
+    })?;
 
     tx.commit()
         .await
@@ -797,6 +776,7 @@ pub async fn finalize_return(
 
 async fn insert_entitlement(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     return_id: Uuid,
     beneficiary_id: Uuid,
@@ -807,9 +787,10 @@ async fn insert_entitlement(
         "INSERT INTO share_return_entitlements \
             (share_return_id, entitlement_type, beneficiary_shareholder_id, \
              amount, due_date, policy_reference, description, recognized_at, \
-             determined_at, status, created_by) \
+             determined_at, status, created_by, cooperative_id, entitlement_number) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 CASE WHEN $4::numeric IS NULL THEN NULL ELSE $8 END, 'open', $9) \
+                 CASE WHEN $4::numeric IS NULL THEN NULL ELSE $8 END, 'open', $9, $10, \
+             allocate_document_number($10, 'share_return_entitlements.entitlement_number')) \
          RETURNING id",
     )
     .bind(return_id)
@@ -821,6 +802,7 @@ async fn insert_entitlement(
     .bind(&spec.description)
     .bind(now)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await;
     match result {
@@ -838,23 +820,27 @@ async fn insert_entitlement(
 /// quantified years later). Only on finalized cases; one live
 /// entitlement per type per case (partial UNIQUE).
 pub async fn recognize_entitlement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     return_id: Uuid,
     spec: EntitlementSpec,
     now: OffsetDateTime,
 ) -> Result<Uuid, ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
 
-    let case: Option<(String, Uuid)> =
-        sqlx::query_as("SELECT status, shareholder_id FROM share_returns WHERE id = $1 FOR UPDATE")
-            .bind(return_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
+    let case: Option<(String, Uuid)> = sqlx::query_as(
+        "SELECT status, shareholder_id \
+         FROM public.app_lock_share_return($1, $2)",
+    )
+    .bind(return_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(ShareReturnCommandError::Database)?;
     let Some((status, beneficiary_id)) = case else {
         return Err(ShareReturnCommandError::NotFound);
     };
@@ -862,7 +848,16 @@ pub async fn recognize_entitlement(
         return Err(ShareReturnCommandError::InvalidState);
     }
 
-    let id = insert_entitlement(&mut tx, actor, return_id, beneficiary_id, &spec, now).await?;
+    let id = insert_entitlement(
+        &mut tx,
+        cooperative_id,
+        actor,
+        return_id,
+        beneficiary_id,
+        &spec,
+        now,
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(ShareReturnCommandError::Database)?;
@@ -875,7 +870,8 @@ pub async fn recognize_entitlement(
 /// amount is never overwritten (base right immutability, docs/10).
 #[allow(clippy::too_many_arguments)]
 pub async fn determine_entitlement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     _actor: Uuid,
     entitlement_id: Uuid,
     amount: Decimal,
@@ -885,15 +881,16 @@ pub async fn determine_entitlement(
     expected_updated_at: OffsetDateTime,
     now: OffsetDateTime,
 ) -> Result<i64, ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
     let row: Option<(Option<Decimal>, i64, String, OffsetDateTime)> = sqlx::query_as(
         "SELECT amount, entitlement_number, status, updated_at \
-         FROM share_return_entitlements WHERE id = $1 FOR UPDATE",
+         FROM public.app_lock_share_return_entitlement($1, $2)",
     )
     .bind(entitlement_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -906,22 +903,17 @@ pub async fn determine_entitlement(
     if status != EntitlementStatus::Open.as_str() || existing_amount.is_some() {
         return Err(ShareReturnCommandError::InvalidState);
     }
-    sqlx::query(
-        "UPDATE share_return_entitlements SET amount = $2, \
-            due_date = COALESCE($3, due_date), \
-            policy_reference = COALESCE($4, policy_reference), \
-            description = COALESCE($5, description), \
-            determined_at = $6, updated_at = $6 WHERE id = $1",
-    )
-    .bind(entitlement_id)
-    .bind(amount)
-    .bind(due_date)
-    .bind(&policy_reference)
-    .bind(&description)
-    .bind(now)
-    .execute(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
+    sqlx::query("SELECT public.app_share_return_entitlement_determine($1, $2, $3, $4, $5, $6, $7)")
+        .bind(entitlement_id)
+        .bind(amount)
+        .bind(due_date)
+        .bind(&policy_reference)
+        .bind(&description)
+        .bind(now)
+        .bind(cooperative_id)
+        .execute(tx.as_mut())
+        .await
+        .map_err(ShareReturnCommandError::Database)?;
     tx.commit()
         .await
         .map_err(ShareReturnCommandError::Database)?;
@@ -932,52 +924,36 @@ pub async fn determine_entitlement(
 /// settlements — a settled right is corrected by reversing settlements,
 /// never by erasing the obligation (docs/19).
 pub async fn cancel_entitlement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     entitlement_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<i64, ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT status, entitlement_number FROM share_return_entitlements \
-         WHERE id = $1 FOR UPDATE",
-    )
-    .bind(entitlement_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-    let Some((status, number)) = row else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-    if status != EntitlementStatus::Open.as_str() {
-        return Err(ShareReturnCommandError::InvalidState);
-    }
-    let posted: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM share_return_settlements \
-         WHERE entitlement_id = $1 AND status = 'posted'",
-    )
-    .bind(entitlement_id)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-    if posted > 0 {
-        return Err(ShareReturnCommandError::HasSettlements);
-    }
-    sqlx::query(
-        "UPDATE share_return_entitlements SET status = 'cancelled', cancelled_at = $2, \
-            cancelled_by = $3, cancellation_reason = $4, updated_at = $2 WHERE id = $1",
+
+    // R3C: one atomic definer — entitlement lock, open-status and
+    // zero-posted-settlements guards and the flip are indivisible.
+    let number: i64 = sqlx::query_scalar(
+        "SELECT public.app_share_return_entitlement_cancel_tx($1, $2, $3, $4, $5)",
     )
     .bind(entitlement_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(ShareReturnCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => ShareReturnCommandError::NotFound,
+        Some("invalid_state") => ShareReturnCommandError::InvalidState,
+        Some("has_settlements") => ShareReturnCommandError::HasSettlements,
+        _ => ShareReturnCommandError::Database(error),
+    })?;
     tx.commit()
         .await
         .map_err(ShareReturnCommandError::Database)?;
@@ -1004,21 +980,25 @@ pub struct SettlementOutcome {
 /// moves only here. The account must fund the outflow under its row
 /// lock; the entitlement must have a determined amount with remaining.
 pub async fn post_settlement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: PostSettlement,
 ) -> Result<SettlementOutcome, ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
 
-    // 1. Idempotent replay short-circuit.
+    // 1. Idempotent replay short-circuit (scoped: a foreign row under
+    //    the global key is indistinguishable — C3/C5).
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, settlement_number, idempotency_fingerprint \
-         FROM share_return_settlements WHERE idempotency_key = $1",
+         FROM share_return_settlements WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -1040,9 +1020,15 @@ pub async fn post_settlement(
     let locked = account_repo::lock_accounts(&mut tx, &[command.financial_account_id])
         .await
         .map_err(account_to_return_error)?;
-    let Some((account_status, _currency)) = locked.get(&command.financial_account_id) else {
+    let Some((account_status, _currency, account_coop)) = locked.get(&command.financial_account_id)
+    else {
         return Err(ShareReturnCommandError::NotFound);
     };
+    // C3: the settlement account must belong to the authenticated
+    // scope — a foreign account id is indistinguishable from absence.
+    if *account_coop != cooperative_id {
+        return Err(ShareReturnCommandError::NotFound);
+    }
     if *account_status != AccountStatus::Active.as_str() {
         return Err(ShareReturnCommandError::InactiveAccount);
     }
@@ -1050,12 +1036,11 @@ pub async fn post_settlement(
     // 3. Lock the entitlement: must be settleable — determined amount
     //    and open/partially_settled; its return must be finalized.
     let entitlement: Option<(String, Option<Decimal>, i64)> = sqlx::query_as(
-        "SELECT e.status, e.amount, e.entitlement_number \
-         FROM share_return_entitlements e \
-         JOIN share_returns r ON r.id = e.share_return_id AND r.status = 'finalized' \
-         WHERE e.id = $1 FOR UPDATE OF e",
+        "SELECT status, amount, entitlement_number \
+         FROM public.app_lock_finalized_entitlement($1, $2)",
     )
     .bind(command.entitlement_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -1076,9 +1061,11 @@ pub async fn post_settlement(
     //    settlements + this one must not exceed the crystallized right.
     let settled: Decimal = sqlx::query_scalar(
         "SELECT COALESCE(sum(amount), 0) FROM share_return_settlements \
-         WHERE entitlement_id = $1 AND status = 'posted'",
+         WHERE entitlement_id = $1 AND status = 'posted' \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(command.entitlement_id)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(ShareReturnCommandError::Database)?;
@@ -1090,15 +1077,20 @@ pub async fn post_settlement(
     //    PILOT-FIX-001 hard reservation: a settlement is an ordinary
     //    outflow — it may only consume the UNRESTRICTED portion of
     //    the physical balance, never Social Aid reservations.
-    let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
-        .await
-        .map_err(account_to_return_error)?;
+    let balance =
+        account_repo::locked_balance(&mut tx, *account_coop, command.financial_account_id)
+            .await
+            .map_err(account_to_return_error)?;
     if command.amount > balance {
         return Err(ShareReturnCommandError::InsufficientFunds);
     }
-    let reserved = account_repo::locked_reserved_social_aid(&mut tx, command.financial_account_id)
-        .await
-        .map_err(account_to_return_error)?;
+    let reserved = account_repo::locked_reserved_social_aid(
+        &mut tx,
+        cooperative_id,
+        command.financial_account_id,
+    )
+    .await
+    .map_err(account_to_return_error)?;
     if command.amount > balance - reserved {
         return Err(ShareReturnCommandError::InsufficientUnrestrictedFunds);
     }
@@ -1116,6 +1108,8 @@ pub async fn post_settlement(
             source_id: settlement_id,
             occurred_at: command.settled_at,
             actor,
+            // C3: the movement lives in its account's cooperative.
+            cooperative_id: *account_coop,
         },
     )
     .await
@@ -1125,9 +1119,11 @@ pub async fn post_settlement(
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO share_return_settlements \
             (id, entitlement_id, financial_account_id, amount, currency, settled_at, \
-             account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, 'posted', $7, $8, $9) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             account_movement_id, status, idempotency_key, idempotency_fingerprint, created_by, \
+             cooperative_id, settlement_number) \
+         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, 'posted', $7, $8, $9, $10, \
+             allocate_document_number($10, 'share_return_settlements.settlement_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, settlement_number",
     )
     .bind(settlement_id)
@@ -1139,22 +1135,32 @@ pub async fn post_settlement(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(ShareReturnCommandError::Database)?;
 
     let Some((id, number)) = inserted else {
+        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
+            "SELECT id, settlement_number, idempotency_fingerprint \
+             FROM share_return_settlements WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(&command.idempotency_key)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(ShareReturnCommandError::Database)?;
         tx.rollback()
             .await
             .map_err(ShareReturnCommandError::Database)?;
-        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
-            "SELECT id, settlement_number, idempotency_fingerprint \
-             FROM share_return_settlements WHERE idempotency_key = $1",
-        )
-        .bind(&command.idempotency_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(ShareReturnCommandError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(ShareReturnCommandError::NotFound);
         };
@@ -1168,7 +1174,7 @@ pub async fn post_settlement(
         });
     };
 
-    refresh_entitlement_status(&mut tx, command.entitlement_id).await?;
+    refresh_entitlement_status(&mut tx, command.entitlement_id, cooperative_id).await?;
 
     tx.commit()
         .await
@@ -1186,20 +1192,14 @@ pub async fn post_settlement(
 async fn refresh_entitlement_status(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entitlement_id: Uuid,
+    cooperative_id: Option<Uuid>,
 ) -> Result<(), ShareReturnCommandError> {
-    sqlx::query(
-        "UPDATE share_return_entitlements e SET status = CASE \
-            WHEN e.amount IS NOT NULL AND settled.s >= e.amount THEN 'settled' \
-            WHEN settled.s > 0 THEN 'partially_settled' \
-            ELSE 'open' END, updated_at = now() \
-         FROM (SELECT COALESCE(sum(amount), 0) AS s FROM share_return_settlements \
-               WHERE entitlement_id = $1 AND status = 'posted') settled \
-         WHERE e.id = $1 AND e.status <> 'cancelled'",
-    )
-    .bind(entitlement_id)
-    .execute(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
+    sqlx::query("SELECT public.app_share_return_entitlement_refresh($1, $2)")
+        .bind(entitlement_id)
+        .bind(cooperative_id)
+        .execute(tx.as_mut())
+        .await
+        .map_err(ShareReturnCommandError::Database)?;
     Ok(())
 }
 
@@ -1208,87 +1208,39 @@ async fn refresh_entitlement_status(
 /// the settlement, and recomputes the entitlement. Replays are safe;
 /// the original row always survives.
 pub async fn reverse_settlement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     settlement_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), ShareReturnCommandError> {
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(ShareReturnCommandError::Database)?;
 
-    // Resolve the immutable FK targets first, then lock in the shared
-    // order: account -> entitlement -> settlement.
-    let ids: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT entitlement_id, financial_account_id FROM share_return_settlements \
-         WHERE id = $1",
-    )
-    .bind(settlement_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-    let Some((entitlement_id, account_id)) = ids else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-
-    account_repo::lock_accounts(&mut tx, &[account_id])
-        .await
-        .map_err(account_to_return_error)?;
-    sqlx::query("SELECT id FROM share_return_entitlements WHERE id = $1 FOR UPDATE")
-        .bind(entitlement_id)
-        .fetch_one(tx.as_mut())
-        .await
-        .map_err(ShareReturnCommandError::Database)?;
-
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT status, settlement_number FROM share_return_settlements \
-         WHERE id = $1 FOR UPDATE",
-    )
-    .bind(settlement_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(ShareReturnCommandError::Database)?;
-    let Some((status, settlement_number)) = row else {
-        return Err(ShareReturnCommandError::NotFound);
-    };
-    if status != "posted" {
-        tx.rollback()
-            .await
-            .map_err(ShareReturnCommandError::Database)?;
-        return Ok((true, settlement_number));
-    }
-
-    // Reversal neutralizes the movement (outflow -> reversed restores
-    // the balance — always mechanically safe under the account lock).
-    account_repo::reverse_movements_of_source(
-        &mut tx,
-        crate::financial_accounts::model::MovementSource::ShareReturnSettlement,
-        settlement_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await
-    .map_err(account_to_return_error)?;
-
-    sqlx::query(
-        "UPDATE share_return_settlements SET status = 'reversed', reversed_at = $2, \
-            reversed_by = $3, reversal_reason = $4, updated_at = $2 WHERE id = $1",
+    // R3C: one atomic definer — canonical account -> entitlement ->
+    // settlement lock order, movement reversal, settlement flip and
+    // the derived entitlement recompute are indivisible.
+    let (replayed, settlement_number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, settlement_number \
+         FROM public.app_share_return_settlement_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(settlement_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(ShareReturnCommandError::Database)?;
-
-    refresh_entitlement_status(&mut tx, entitlement_id).await?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => ShareReturnCommandError::NotFound,
+        _ => ShareReturnCommandError::Database(error),
+    })?;
 
     tx.commit()
         .await
         .map_err(ShareReturnCommandError::Database)?;
-    Ok((false, settlement_number))
+    Ok((replayed, settlement_number))
 }

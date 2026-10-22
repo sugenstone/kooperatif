@@ -30,7 +30,6 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
 use crate::auth::routes::csrf_rejection_to_api_error;
@@ -327,22 +326,23 @@ fn settlement_dto(row: &return_repo::SettlementRow) -> SettlementDto {
 }
 
 async fn load_detail(
-    pool: &sqlx::PgPool,
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<ShareReturnDetailDto>, ApiError> {
-    let Some(row) = return_repo::get_return(pool, id)
+    let Some(row) = return_repo::get_return(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("get return failed"))?
     else {
         return Ok(None);
     };
-    let entitlements = return_repo::list_entitlements_of_return(pool, id)
+    let entitlements = return_repo::list_entitlements_of_return(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("return entitlements failed"))?
         .iter()
         .map(entitlement_dto)
         .collect();
-    let settlements = return_repo::list_settlements_of_return(pool, id)
+    let settlements = return_repo::list_settlements_of_return(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("return settlements failed"))?
         .iter()
@@ -392,50 +392,66 @@ pub async fn list_returns(
 ) -> Result<Json<PaginatedDto<ShareReturnListItemDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHARE_RETURNS_READ).await?;
     let pool = pool_of(&state)?;
-    let status = query
-        .status
-        .as_deref()
-        .map(|s| return_model::ReturnStatus::parse(s).ok_or(ApiError::ValidationFailed))
-        .transpose()?;
-    let (page, page_size) = crate::parties::routes::page_of(&crate::parties::routes::ListQuery {
-        search: None,
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let rows = return_repo::list_returns(
-        pool,
-        status,
-        query.share_id,
-        query.shareholder_id,
-        query.search.as_deref(),
-        page,
-        page_size,
-    )
-    .await
-    .map_err(db_err("return listing failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows
-            .iter()
-            .map(|r| ShareReturnListItemDto {
-                id: r.id,
-                return_number: r.return_number,
-                share_id: r.share_id,
-                share_number: r.share_number,
-                shareholder_id: r.shareholder_id,
-                owner_display_name: r.owner_display_name.clone(),
-                requested_at: r.requested_at,
-                effective_return_date: r.effective_return_date,
-                status: r.status.clone(),
-                entitlement_count: r.entitlement_count,
-                outstanding_amount: canonical_opt(r.outstanding_amount),
-            })
-            .collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let status = query
+            .status
+            .as_deref()
+            .map(|s| return_model::ReturnStatus::parse(s).ok_or(ApiError::ValidationFailed))
+            .transpose()?;
+        let (page, page_size) =
+            crate::parties::routes::page_of(&crate::parties::routes::ListQuery {
+                search: None,
+                page: query.page,
+                page_size: query.page_size,
+                default_account_id: None,
+            })?;
+        let rows = return_repo::list_returns(
+            &mut tx,
+            ctx.cooperative_id(),
+            status,
+            query.share_id,
+            query.shareholder_id,
+            query.search.as_deref(),
+            page,
+            page_size,
+        )
+        .await
+        .map_err(db_err("return listing failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows
+                .iter()
+                .map(|r| ShareReturnListItemDto {
+                    id: r.id,
+                    return_number: r.return_number,
+                    share_id: r.share_id,
+                    share_number: r.share_number,
+                    shareholder_id: r.shareholder_id,
+                    owner_display_name: r.owner_display_name.clone(),
+                    requested_at: r.requested_at,
+                    effective_return_date: r.effective_return_date,
+                    status: r.status.clone(),
+                    entitlement_count: r.entitlement_count,
+                    outstanding_amount: canonical_opt(r.outstanding_amount),
+                })
+                .collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_return(
@@ -445,11 +461,25 @@ pub async fn get_return(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHARE_RETURNS_READ).await?;
     let pool = pool_of(&state)?;
-    load_detail(pool, id)
-        .await?
-        .map(Json)
-        .map(IntoResponse::into_response)
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .map(Json)
+            .map(IntoResponse::into_response)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,60 +509,62 @@ pub async fn initiate_return(
     Json(body): Json<InitiateReturnRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let effective_return_date = parse_business_date(&body.effective_return_date)?;
-    let reason = return_model::validate_reason(body.reason.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = return_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint =
-        return_model::initiate_fingerprint(body.share_id, effective_return_date, &reason);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let effective_return_date = parse_business_date(&body.effective_return_date)?;
+        let reason = return_model::validate_reason(body.reason.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = return_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint =
+            return_model::initiate_fingerprint(body.share_id, effective_return_date, &reason);
 
-    let outcome = return_repo::initiate_return(
-        pool,
-        ctx.auth.user_id,
-        return_repo::InitiateReturn {
-            share_id: body.share_id,
-            effective_return_date,
-            reason,
-            idempotency_key,
-            fingerprint,
-        },
-        now,
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::ShareReturnRequested,
+        let outcome = return_repo::initiate_return(
+            &mut tx,
             ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "returnId": outcome.return_id,
-                "returnNumber": outcome.return_number,
-                "shareId": body.share_id,
-                "effectiveReturnDate": effective_return_date,
-            }),
+            ctx.auth.user_id,
+            return_repo::InitiateReturn {
+                share_id: body.share_id,
+                effective_return_date,
+                reason,
+                idempotency_key,
+                fingerprint,
+            },
+            now,
         )
-        .await;
-        tracing::info!(
-            outcome = "share_return_initiated", id = %outcome.return_id,
-            number = outcome.return_number, actor = %ctx.auth.user_id
-        );
-    }
+        .await
+        .map_err(command_error)?;
 
-    let detail = load_detail(pool, outcome.return_id)
-        .await?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "share_return_initiated", id = %outcome.return_id,
+                number = outcome.return_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), outcome.return_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,44 +626,49 @@ pub async fn finalize_return(
     Json(body): Json<FinalizeReturnRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let specs: Vec<return_repo::EntitlementSpec> = body
-        .entitlements
-        .iter()
-        .map(parse_entitlement_spec)
-        .collect::<Result<_, _>>()?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let specs: Vec<return_repo::EntitlementSpec> = body
+            .entitlements
+            .iter()
+            .map(parse_entitlement_spec)
+            .collect::<Result<_, _>>()?;
 
-    let outcome = return_repo::finalize_return(
-        pool,
-        ctx.auth.user_id,
-        id,
-        body.expected_updated_at,
-        &specs,
-        now,
-    )
-    .await
-    .map_err(command_error)?;
+        let outcome = return_repo::finalize_return(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            body.expected_updated_at,
+            &specs,
+            now,
+        )
+        .await
+        .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareReturnFinalized,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "returnId": id,
-            "returnNumber": outcome.return_number,
-            "entitlementIds": outcome.entitlement_ids,
-        }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+        tracing::info!(
+            outcome = "share_return_finalized", id = %id,
+            number = outcome.return_number, actor = %ctx.auth.user_id
+        );
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
     .await;
-    tracing::info!(
-        outcome = "share_return_finalized", id = %id,
-        number = outcome.return_number, actor = %ctx.auth.user_id
-    );
-
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -650,35 +687,45 @@ pub async fn cancel_return(
     Json(body): Json<CancelReturnRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let reason = return_model::validate_required_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let now = state.auth.clock.now();
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = return_model::validate_required_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let now = state.auth.clock.now();
 
-    let (_replayed, return_number) =
-        return_repo::cancel_return(pool, ctx.auth.user_id, id, reason.clone(), now)
-            .await
-            .map_err(command_error)?;
+        let (_replayed, return_number) = return_repo::cancel_return(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason.clone(),
+            now,
+        )
+        .await
+        .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareReturnCancelled,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "returnId": id,
-            "returnNumber": return_number,
-            "reason": reason,
-        }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+        tracing::info!(
+            outcome = "share_return_cancelled", id = %id,
+            number = return_number, actor = %ctx.auth.user_id
+        );
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
     .await;
-    tracing::info!(
-        outcome = "share_return_cancelled", id = %id,
-        number = return_number, actor = %ctx.auth.user_id
-    );
-
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Recognize an additional right on a FINALIZED return — e.g. the
@@ -691,32 +738,41 @@ pub async fn recognize_entitlement(
     Json(body): Json<EntitlementSpecRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let spec = parse_entitlement_spec(&body)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let spec = parse_entitlement_spec(&body)?;
 
-    let entitlement_id = return_repo::recognize_entitlement(pool, ctx.auth.user_id, id, spec, now)
+        let entitlement_id = return_repo::recognize_entitlement(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            spec,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareReturnEntitlementRecognized,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "returnId": id,
-            "entitlementId": entitlement_id,
-            "entitlementType": body.entitlement_type,
-        }),
-    )
-    .await;
+        // R4: audit row minted by the DB transition trigger.
 
-    let row = return_repo::get_entitlement(pool, entitlement_id)
-        .await
-        .map_err(db_err("get entitlement failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::CREATED, Json(entitlement_dto(&row))).into_response())
+        let row = return_repo::get_entitlement(&mut tx, ctx.cooperative_id(), entitlement_id)
+            .await
+            .map_err(db_err("get entitlement failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::CREATED, Json(entitlement_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -737,40 +793,56 @@ pub async fn list_entitlements(
 ) -> Result<Json<PaginatedDto<EntitlementDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::SHARE_RETURNS_READ).await?;
     let pool = pool_of(&state)?;
-    let entitlement_type = query
-        .entitlement_type
-        .as_deref()
-        .map(|t| return_model::EntitlementType::parse(t).ok_or(ApiError::ValidationFailed))
-        .transpose()?;
-    let status = query
-        .status
-        .as_deref()
-        .map(|s| return_model::EntitlementStatus::parse(s).ok_or(ApiError::ValidationFailed))
-        .transpose()?;
-    let (page, page_size) = crate::parties::routes::page_of(&crate::parties::routes::ListQuery {
-        search: None,
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let rows = return_repo::list_entitlements(
-        pool,
-        entitlement_type,
-        status,
-        query.beneficiary_shareholder_id,
-        query.share_return_id,
-        page,
-        page_size,
-    )
-    .await
-    .map_err(db_err("entitlement listing failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(entitlement_dto).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let entitlement_type = query
+            .entitlement_type
+            .as_deref()
+            .map(|t| return_model::EntitlementType::parse(t).ok_or(ApiError::ValidationFailed))
+            .transpose()?;
+        let status = query
+            .status
+            .as_deref()
+            .map(|s| return_model::EntitlementStatus::parse(s).ok_or(ApiError::ValidationFailed))
+            .transpose()?;
+        let (page, page_size) =
+            crate::parties::routes::page_of(&crate::parties::routes::ListQuery {
+                search: None,
+                page: query.page,
+                page_size: query.page_size,
+                default_account_id: None,
+            })?;
+        let rows = return_repo::list_entitlements(
+            &mut tx,
+            ctx.cooperative_id(),
+            entitlement_type,
+            status,
+            query.beneficiary_shareholder_id,
+            query.share_return_id,
+            page,
+            page_size,
+        )
+        .await
+        .map_err(db_err("entitlement listing failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(entitlement_dto).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -795,54 +867,57 @@ pub async fn determine_entitlement(
     Json(body): Json<DetermineEntitlementRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let amount = return_model::validate_entitlement_amount(Some(&body.amount))
-        .map_err(|_| ApiError::ValidationFailed)?
-        .ok_or(ApiError::ValidationFailed)?;
-    let due_date = body
-        .due_date
-        .as_deref()
-        .map(parse_business_date)
-        .transpose()?;
-    let policy_reference =
-        return_model::validate_policy_reference(body.policy_reference.as_deref())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let amount = return_model::validate_entitlement_amount(Some(&body.amount))
+            .map_err(|_| ApiError::ValidationFailed)?
+            .ok_or(ApiError::ValidationFailed)?;
+        let due_date = body
+            .due_date
+            .as_deref()
+            .map(parse_business_date)
+            .transpose()?;
+        let policy_reference =
+            return_model::validate_policy_reference(body.policy_reference.as_deref())
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let description = return_model::validate_description(body.description.as_deref())
             .map_err(|_| ApiError::ValidationFailed)?;
-    let description = return_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
 
-    let number = return_repo::determine_entitlement(
-        pool,
-        ctx.auth.user_id,
-        id,
-        amount,
-        due_date,
-        policy_reference,
-        description,
-        body.expected_updated_at,
-        now,
-    )
-    .await
-    .map_err(command_error)?;
-
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareReturnEntitlementDetermined,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "entitlementId": id,
-            "entitlementNumber": number,
-            "amount": canonical(amount),
-        }),
-    )
-    .await;
-
-    let row = return_repo::get_entitlement(pool, id)
+        let _number = return_repo::determine_entitlement(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            amount,
+            due_date,
+            policy_reference,
+            description,
+            body.expected_updated_at,
+            now,
+        )
         .await
-        .map_err(db_err("get entitlement failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(entitlement_dto(&row))).into_response())
+        .map_err(command_error)?;
+
+        // R4: audit row minted by the DB transition trigger.
+
+        let row = return_repo::get_entitlement(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("get entitlement failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(entitlement_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -861,33 +936,42 @@ pub async fn cancel_entitlement(
     Json(body): Json<CancelEntitlementRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let reason = return_model::validate_required_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let now = state.auth.clock.now();
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = return_model::validate_required_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let now = state.auth.clock.now();
 
-    let number = return_repo::cancel_entitlement(pool, ctx.auth.user_id, id, reason.clone(), now)
+        let _number = return_repo::cancel_entitlement(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason.clone(),
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::ShareReturnEntitlementCancelled,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "entitlementId": id,
-            "entitlementNumber": number,
-            "reason": reason,
-        }),
-    )
-    .await;
+        // R4: audit row minted by the DB transition trigger.
 
-    let row = return_repo::get_entitlement(pool, id)
-        .await
-        .map_err(db_err("get entitlement failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(entitlement_dto(&row))).into_response())
+        let row = return_repo::get_entitlement(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("get entitlement failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(entitlement_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -912,75 +996,75 @@ pub async fn post_settlement(
     Json(body): Json<PostSettlementRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let amount = return_model::validate_settlement_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let settled_at = match &body.settled_at {
-        Some(raw) => {
-            OffsetDateTime::parse(raw.trim(), &Rfc3339).map_err(|_| ApiError::ValidationFailed)?
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let amount = return_model::validate_settlement_amount(&body.amount)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let settled_at = match &body.settled_at {
+            Some(raw) => OffsetDateTime::parse(raw.trim(), &Rfc3339)
+                .map_err(|_| ApiError::ValidationFailed)?,
+            None => now,
+        };
+        if settled_at > now {
+            return Err(ApiError::ValidationFailed);
         }
-        None => now,
-    };
-    if settled_at > now {
-        return Err(ApiError::ValidationFailed);
-    }
-    let settled_at_intent = body.settled_at.is_some().then_some(settled_at);
-    let idempotency_key = return_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = return_model::settlement_fingerprint(
-        id,
-        body.financial_account_id,
-        amount,
-        settled_at_intent,
-    );
-
-    let outcome = return_repo::post_settlement(
-        pool,
-        ctx.auth.user_id,
-        return_repo::PostSettlement {
-            entitlement_id: id,
-            financial_account_id: body.financial_account_id,
+        let settled_at_intent = body.settled_at.is_some().then_some(settled_at);
+        let idempotency_key = return_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = return_model::settlement_fingerprint(
+            id,
+            body.financial_account_id,
             amount,
-            settled_at,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::ShareReturnSettlementPosted,
-            ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "settlementId": outcome.settlement_id,
-                "settlementNumber": outcome.settlement_number,
-                "entitlementId": id,
-                "financialAccountId": body.financial_account_id,
-                "amount": canonical(amount),
-            }),
-        )
-        .await;
-        tracing::info!(
-            outcome = "share_return_settled", id = %outcome.settlement_id,
-            number = outcome.settlement_number, actor = %ctx.auth.user_id
+            settled_at_intent,
         );
-    }
 
-    let row = return_repo::get_settlement(pool, outcome.settlement_id)
+        let outcome = return_repo::post_settlement(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            return_repo::PostSettlement {
+                entitlement_id: id,
+                financial_account_id: body.financial_account_id,
+                amount,
+                settled_at,
+                idempotency_key,
+                fingerprint,
+            },
+        )
         .await
-        .map_err(db_err("get settlement failed"))?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(settlement_dto(&row))).into_response())
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "share_return_settled", id = %outcome.settlement_id,
+                number = outcome.settlement_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let row = return_repo::get_settlement(&mut tx, ctx.cooperative_id(), outcome.settlement_id)
+            .await
+            .map_err(db_err("get settlement failed"))?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(settlement_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -999,34 +1083,42 @@ pub async fn reverse_settlement(
     Json(body): Json<ReverseSettlementRequest>,
 ) -> Result<Response, ApiError> {
     let pool = returns_mutation!(&state, &headers, &ctx, &Method::POST);
-    let reason = return_model::validate_required_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let now = state.auth.clock.now();
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = return_model::validate_required_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let now = state.auth.clock.now();
 
-    let (replayed, number) =
-        return_repo::reverse_settlement(pool, ctx.auth.user_id, id, reason.clone(), now)
-            .await
-            .map_err(command_error)?;
-
-    if !replayed {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::ShareReturnSettlementReversed,
+        let (replayed, _number) = return_repo::reverse_settlement(
+            &mut tx,
             ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "settlementId": id,
-                "settlementNumber": number,
-                "reason": reason,
-            }),
+            ctx.auth.user_id,
+            id,
+            reason.clone(),
+            now,
         )
-        .await;
-    }
-
-    let row = return_repo::get_settlement(pool, id)
         .await
-        .map_err(db_err("get settlement failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(settlement_dto(&row))).into_response())
+        .map_err(command_error)?;
+
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+
+        let row = return_repo::get_settlement(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("get settlement failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(settlement_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

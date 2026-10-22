@@ -22,7 +22,7 @@
 //! Money fields are decimal STRINGS (ADR-004).
 //!
 //! M1-P1-c3c1: every handler extracts `BusinessAuth` — the verified
-//! bootstrap-pinned cooperative context — and resolves permissions via
+//! session-scoped cooperative context (M1-P6 B4) — and resolves permissions via
 //! `require_business`; a foreign cooperative's role can never
 //! authorize an income/expense operation and audit events are
 //! cooperative-attributed.
@@ -38,7 +38,6 @@ use time::format_description::FormatItem;
 use time::{format_description::well_known::Rfc3339, Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
 use crate::auth::routes::csrf_rejection_to_api_error;
@@ -263,41 +262,56 @@ pub async fn list_categories(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let category_type = match query.category_type.as_deref() {
-        None | Some("") => None,
-        Some(value) => Some(CategoryType::parse(value).ok_or(ApiError::ValidationFailed)?),
-    };
-    let status = match query.status.as_deref() {
-        None | Some("") => None,
-        Some(value) => Some(CategoryStatus::parse(value).ok_or(ApiError::ValidationFailed)?),
-    };
-    let rows = entry_repo::list_categories(
-        pool,
-        category_type,
-        status,
-        query.search.as_deref(),
-        page,
-        page_size,
-    )
-    .await
-    .map_err(db_err("category list failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items: rows.iter().map(category_dto).collect::<Vec<_>>(),
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        })?;
+        let category_type = match query.category_type.as_deref() {
+            None | Some("") => None,
+            Some(value) => Some(CategoryType::parse(value).ok_or(ApiError::ValidationFailed)?),
+        };
+        let status = match query.status.as_deref() {
+            None | Some("") => None,
+            Some(value) => Some(CategoryStatus::parse(value).ok_or(ApiError::ValidationFailed)?),
+        };
+        let rows = entry_repo::list_categories(
+            &mut tx,
+            ctx.cooperative_id(),
+            category_type,
+            status,
+            query.search.as_deref(),
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(db_err("category list failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items: rows.iter().map(category_dto).collect::<Vec<_>>(),
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Active categories of one type for entry forms (`?type=income`).
@@ -308,16 +322,30 @@ pub async fn category_options(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
-    let category_type = CategoryType::parse(query.category_type.as_deref().unwrap_or_default())
-        .ok_or(ApiError::ValidationFailed)?;
-    let rows = entry_repo::list_category_options(pool, category_type)
-        .await
-        .map_err(db_err("category options failed"))?;
-    Ok((
-        StatusCode::OK,
-        Json(rows.iter().map(category_dto).collect::<Vec<_>>()),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let category_type = CategoryType::parse(query.category_type.as_deref().unwrap_or_default())
+            .ok_or(ApiError::ValidationFailed)?;
+        let rows = entry_repo::list_category_options(&mut tx, ctx.cooperative_id(), category_type)
+            .await
+            .map_err(db_err("category options failed"))?;
+        Ok((
+            StatusCode::OK,
+            Json(rows.iter().map(category_dto).collect::<Vec<_>>()),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,40 +364,48 @@ pub async fn create_category(
     Json(body): Json<CreateCategoryRequest>,
 ) -> Result<Response, ApiError> {
     let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
-    let category_type =
-        CategoryType::parse(&body.category_type).ok_or(ApiError::ValidationFailed)?;
-    let name = entry_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let description = entry_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let category_type =
+            CategoryType::parse(&body.category_type).ok_or(ApiError::ValidationFailed)?;
+        let name =
+            entry_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let description = entry_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let id = entry_repo::create_category(
-        pool,
-        ctx.auth.user_id,
-        entry_repo::CreateCategory {
-            category_type,
-            name,
-            description,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FinancialCategoryCreated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "categoryId": id, "categoryType": category_type.as_str() }),
-    )
-    .await;
-    let row = entry_repo::get_category(pool, id)
+        let id = entry_repo::create_category(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            entry_repo::CreateCategory {
+                category_type,
+                name,
+                description,
+            },
+        )
         .await
-        .map_err(db_err("get category failed"))?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::CREATED, Json(category_dto(&row))).into_response())
+        .map_err(command_error)?;
+
+        // R4: audit row minted by the DB transition trigger.
+        let row = entry_repo::get_category(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("get category failed"))?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::CREATED, Json(category_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,30 +428,44 @@ pub async fn update_category(
     Json(body): Json<UpdateCategoryRequest>,
 ) -> Result<Response, ApiError> {
     let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::PATCH);
-    let name = entry_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let description = entry_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let name =
+            entry_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let description = entry_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    entry_repo::update_category(pool, id, name, description, body.expected_updated_at)
+        entry_repo::update_category(
+            &mut tx,
+            ctx.cooperative_id(),
+            id,
+            name,
+            description,
+            body.expected_updated_at,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FinancialCategoryUpdated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "categoryId": id }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+        let row = entry_repo::get_category(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("get category failed"))?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::OK, Json(category_dto(&row))).into_response())
+    }
     .await;
-    let row = entry_repo::get_category(pool, id)
-        .await
-        .map_err(db_err("get category failed"))?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::OK, Json(category_dto(&row))).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -433,26 +483,32 @@ pub async fn change_category_status(
     Json(body): Json<CategoryStatusChangeRequest>,
 ) -> Result<Response, ApiError> {
     let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
-    let target = CategoryStatus::parse(&body.status).ok_or(ApiError::ValidationFailed)?;
-    entry_repo::change_category_status(pool, id, target)
-        .await
-        .map_err(command_error)?;
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FinancialCategoryStatusChanged,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "categoryId": id, "status": target.as_str() }),
-    )
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let target = CategoryStatus::parse(&body.status).ok_or(ApiError::ValidationFailed)?;
+        entry_repo::change_category_status(&mut tx, ctx.cooperative_id(), id, target)
+            .await
+            .map_err(command_error)?;
+        // R4: audit row minted by the DB transition trigger.
+        let row = entry_repo::get_category(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("get category failed"))?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::OK, Json(category_dto(&row))).into_response())
+    }
     .await;
-    let row = entry_repo::get_category(pool, id)
-        .await
-        .map_err(db_err("get category failed"))?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::OK, Json(category_dto(&row))).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -526,27 +582,48 @@ async fn list_entries_of(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let filter = entry_filter(&query)?;
-    let rows = entry_repo::list_entries(pool, kind, &filter, page, page_size)
-        .await
-        .map_err(db_err("entry list failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items: rows.iter().map(entry_dto).collect::<Vec<_>>(),
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        })?;
+        let filter = entry_filter(&query)?;
+        let rows = entry_repo::list_entries(
+            &mut tx,
+            ctx.cooperative_id(),
+            kind,
+            &filter,
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(db_err("entry list failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items: rows.iter().map(entry_dto).collect::<Vec<_>>(),
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn list_incomes(
@@ -573,13 +650,27 @@ async fn get_entry_of(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
-    let row = entry_repo::get_entry(pool, kind, id)
-        .await
-        .map_err(db_err("get entry failed"))?;
-    let Some(row) = row else {
-        return Err(ApiError::NotFound);
-    };
-    Ok((StatusCode::OK, Json(entry_dto(&row))).into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let row = entry_repo::get_entry(&mut tx, ctx.cooperative_id(), kind, id)
+            .await
+            .map_err(db_err("get entry failed"))?;
+        let Some(row) = row else {
+            return Err(ApiError::NotFound);
+        };
+        Ok((StatusCode::OK, Json(entry_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_income(
@@ -626,95 +717,92 @@ async fn post_entry_of(
     body: PostEntryRequest,
 ) -> Result<Response, ApiError> {
     let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let amount = entry_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let occurred_at = match &body.occurred_at {
-        Some(raw) => {
-            OffsetDateTime::parse(raw.trim(), &Rfc3339).map_err(|_| ApiError::ValidationFailed)?
-        }
-        None => now,
-    };
-    entry_model::validate_occurred_at(occurred_at, now).map_err(|_| ApiError::ValidationFailed)?;
-    // Idempotency covers CLIENT INTENT: an omitted occurredAt must not
-    // enter the fingerprint as the server-generated default, or a
-    // retry-after-timeout would collide as a false 409 (F4).
-    let occurred_at_intent = body.occurred_at.is_some().then_some(occurred_at);
-    let description = entry_model::validate_entry_description(&body.description)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let counterparty = entry_model::validate_counterparty(body.counterparty.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let reference_no = entry_model::validate_reference_no(body.reference_no.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = entry_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = entry_model::entry_fingerprint(&entry_model::EntryFingerprint {
-        financial_account_id: body.financial_account_id,
-        category_id: body.category_id,
-        amount,
-        occurred_at: occurred_at_intent,
-        description: description.clone(),
-        counterparty: counterparty.clone(),
-        reference_no: reference_no.clone(),
-    });
-
-    let outcome = entry_repo::post_entry(
-        pool,
-        ctx.auth.user_id,
-        kind,
-        entry_repo::PostEntry {
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let amount = entry_model::validate_positive_amount(&body.amount)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let occurred_at = match &body.occurred_at {
+            Some(raw) => OffsetDateTime::parse(raw.trim(), &Rfc3339)
+                .map_err(|_| ApiError::ValidationFailed)?,
+            None => now,
+        };
+        entry_model::validate_occurred_at(occurred_at, now)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        // Idempotency covers CLIENT INTENT: an omitted occurredAt must not
+        // enter the fingerprint as the server-generated default, or a
+        // retry-after-timeout would collide as a false 409 (F4).
+        let occurred_at_intent = body.occurred_at.is_some().then_some(occurred_at);
+        let description = entry_model::validate_entry_description(&body.description)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let counterparty = entry_model::validate_counterparty(body.counterparty.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let reference_no = entry_model::validate_reference_no(body.reference_no.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = entry_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = entry_model::entry_fingerprint(&entry_model::EntryFingerprint {
             financial_account_id: body.financial_account_id,
             category_id: body.category_id,
             amount,
-            occurred_at,
-            description,
-            counterparty,
-            reference_no,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+            occurred_at: occurred_at_intent,
+            description: description.clone(),
+            counterparty: counterparty.clone(),
+            reference_no: reference_no.clone(),
+        });
 
-    if !outcome.replayed {
-        audit::record_scoped(
-            pool,
-            match kind {
-                EntryKind::Income => SecurityEventType::IncomePosted,
-                EntryKind::Expense => SecurityEventType::ExpensePosted,
-            },
+        let outcome = entry_repo::post_entry(
+            &mut tx,
             ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "entryId": outcome.entry_id,
-                "entryNumber": outcome.entry_number,
-                "kind": kind.as_str(),
-                "financialAccountId": body.financial_account_id,
-                "categoryId": body.category_id,
-                "amount": canonical(amount),
-            }),
+            ctx.auth.user_id,
+            kind,
+            entry_repo::PostEntry {
+                financial_account_id: body.financial_account_id,
+                category_id: body.category_id,
+                amount,
+                occurred_at,
+                description,
+                counterparty,
+                reference_no,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-        tracing::info!(
-            outcome = "entry_posted", kind = kind.as_str(),
-            id = %outcome.entry_id, number = outcome.entry_number, actor = %ctx.auth.user_id
-        );
-    }
-
-    let row = entry_repo::get_entry(pool, kind, outcome.entry_id)
         .await
-        .map_err(db_err("get entry failed"))?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(entry_dto(&row))).into_response())
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "entry_posted", kind = kind.as_str(),
+                id = %outcome.entry_id, number = outcome.entry_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let row = entry_repo::get_entry(&mut tx, ctx.cooperative_id(), kind, outcome.entry_id)
+            .await
+            .map_err(db_err("get entry failed"))?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(entry_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn post_income(
@@ -754,38 +842,44 @@ async fn reverse_entry_of(
     body: ReverseEntryRequest,
 ) -> Result<Response, ApiError> {
     let pool = income_expense_mutation!(&state, &headers, &ctx, &Method::POST);
-    let reason = entry_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let now = state.auth.clock.now();
-    let (replayed, entry_number) =
-        entry_repo::reverse_entry(pool, ctx.auth.user_id, kind, id, reason, now)
-            .await
-            .map_err(command_error)?;
-    if !replayed {
-        audit::record_scoped(
-            pool,
-            match kind {
-                EntryKind::Income => SecurityEventType::IncomeReversed,
-                EntryKind::Expense => SecurityEventType::ExpenseReversed,
-            },
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = entry_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let now = state.auth.clock.now();
+        let (replayed, _entry_number) = entry_repo::reverse_entry(
+            &mut tx,
             ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "entryId": id,
-                "entryNumber": entry_number,
-                "kind": kind.as_str(),
-            }),
+            ctx.auth.user_id,
+            kind,
+            id,
+            reason,
+            now,
         )
-        .await;
-    }
-    let row = entry_repo::get_entry(pool, kind, id)
         .await
-        .map_err(db_err("get entry failed"))?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::OK, Json(entry_dto(&row))).into_response())
+        .map_err(command_error)?;
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+        let row = entry_repo::get_entry(&mut tx, ctx.cooperative_id(), kind, id)
+            .await
+            .map_err(db_err("get entry failed"))?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::OK, Json(entry_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn reverse_income(
@@ -817,21 +911,35 @@ pub async fn operational_summary(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::INCOME_EXPENSE_READ).await?;
     let pool = pool_of(&state)?;
-    let filter = entry_filter(&query)?;
-    let summary = entry_repo::operational_summary(pool, &filter)
-        .await
-        .map_err(db_err("summary failed"))?;
-    let net = summary.income_total - summary.expense_total;
-    Ok((
-        StatusCode::OK,
-        Json(OperationalSummaryDto {
-            income_total: canonical(summary.income_total),
-            income_count: summary.income_count,
-            expense_total: canonical(summary.expense_total),
-            expense_count: summary.expense_count,
-            net: canonical(net),
-            currency: "TRY".to_string(),
-        }),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let filter = entry_filter(&query)?;
+        let summary = entry_repo::operational_summary(&mut tx, ctx.cooperative_id(), &filter)
+            .await
+            .map_err(db_err("summary failed"))?;
+        let net = summary.income_total - summary.expense_total;
+        Ok((
+            StatusCode::OK,
+            Json(OperationalSummaryDto {
+                income_total: canonical(summary.income_total),
+                income_count: summary.income_count,
+                expense_total: canonical(summary.expense_total),
+                expense_count: summary.expense_count,
+                net: canonical(net),
+                currency: "TRY".to_string(),
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

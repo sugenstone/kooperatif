@@ -24,7 +24,6 @@
 //! into cooperative finance (docs/11 core rule).
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -96,9 +95,11 @@ pub struct FundListRow {
 /// Server-side list (ADR-010): status/search filters, stable
 /// `fund_number DESC` ordering, derived restricted totals.
 pub async fn list_funds(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &FundFilter,
 ) -> Result<Vec<FundListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, FundListRow>(&format!(
         "SELECT f.id, f.fund_number, f.name, f.status, \
                 COALESCE((SELECT sum(d.amount) FROM social_aid_donations d \
@@ -115,7 +116,8 @@ pub async fn list_funds(
                 f.created_at, \
                 count(*) OVER () AS total_count \
          FROM social_aid_funds f \
-         WHERE ($1::text IS NULL OR f.status = $1) \
+         WHERE f.cooperative_id IS NOT DISTINCT FROM $3 \
+           AND ($1::text IS NULL OR f.status = $1) \
            AND ($2::text IS NULL OR f.name ILIKE '%' || $2 || '%' \
                 OR f.fund_number::text = $2) \
          ORDER BY f.fund_number DESC \
@@ -125,7 +127,8 @@ pub async fn list_funds(
     ))
     .bind(&filter.status)
     .bind(&filter.search)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -233,35 +236,50 @@ pub struct DonationFilter {
 }
 
 pub async fn list_donations(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &DonationFilter,
 ) -> Result<(Vec<DonationRow>, i64), sqlx::Error> {
+    let mut conn = db.conn().await?;
     let rows = sqlx::query_as::<_, DonationRow>(&format!(
         "{DONATION_SELECT} \
-         WHERE ($1::uuid IS NULL OR d.fund_id = $1) \
+         WHERE d.cooperative_id IS NOT DISTINCT FROM $2 \
+           AND ($1::uuid IS NULL OR d.fund_id = $1) \
          ORDER BY d.donation_number DESC \
          LIMIT {} OFFSET {}",
         filter.page_size,
         (filter.page - 1) * filter.page_size
     ))
     .bind(filter.fund_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     let total: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM social_aid_donations d \
-         WHERE ($1::uuid IS NULL OR d.fund_id = $1)",
+         WHERE d.cooperative_id IS NOT DISTINCT FROM $2 \
+           AND ($1::uuid IS NULL OR d.fund_id = $1)",
     )
     .bind(filter.fund_id)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await?;
     Ok((rows, total))
 }
 
-pub async fn get_donation(pool: &PgPool, id: Uuid) -> Result<Option<DonationRow>, sqlx::Error> {
-    sqlx::query_as::<_, DonationRow>(&format!("{DONATION_SELECT} WHERE d.id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+pub async fn get_donation(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<DonationRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
+    sqlx::query_as::<_, DonationRow>(&format!(
+        "{DONATION_SELECT} WHERE d.id = $1 \
+         AND d.cooperative_id IS NOT DISTINCT FROM $2"
+    ))
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
+    .await
 }
 
 pub struct DisbursementFilter {
@@ -271,38 +289,50 @@ pub struct DisbursementFilter {
 }
 
 pub async fn list_disbursements(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &DisbursementFilter,
 ) -> Result<(Vec<DisbursementRow>, i64), sqlx::Error> {
+    let mut conn = db.conn().await?;
     let rows = sqlx::query_as::<_, DisbursementRow>(&format!(
         "{DISBURSEMENT_SELECT} \
-         WHERE ($1::uuid IS NULL OR b.fund_id = $1) \
+         WHERE b.cooperative_id IS NOT DISTINCT FROM $2 \
+           AND ($1::uuid IS NULL OR b.fund_id = $1) \
          ORDER BY b.disbursement_number DESC \
          LIMIT {} OFFSET {}",
         filter.page_size,
         (filter.page - 1) * filter.page_size
     ))
     .bind(filter.fund_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     let total: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM social_aid_disbursements b \
-         WHERE ($1::uuid IS NULL OR b.fund_id = $1)",
+         WHERE b.cooperative_id IS NOT DISTINCT FROM $2 \
+           AND ($1::uuid IS NULL OR b.fund_id = $1)",
     )
     .bind(filter.fund_id)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await?;
     Ok((rows, total))
 }
 
 pub async fn get_disbursement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<DisbursementRow>, sqlx::Error> {
-    sqlx::query_as::<_, DisbursementRow>(&format!("{DISBURSEMENT_SELECT} WHERE b.id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    let mut conn = db.conn().await?;
+    sqlx::query_as::<_, DisbursementRow>(&format!(
+        "{DISBURSEMENT_SELECT} WHERE b.id = $1 \
+         AND b.cooperative_id IS NOT DISTINCT FROM $2"
+    ))
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
+    .await
 }
 
 pub struct FundDetail {
@@ -313,15 +343,22 @@ pub struct FundDetail {
     pub disbursements: Vec<DisbursementRow>,
 }
 
-pub async fn get_fund_detail(pool: &PgPool, id: Uuid) -> Result<Option<FundDetail>, sqlx::Error> {
+pub async fn get_fund_detail(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<FundDetail>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let fund: Option<FundRow> = sqlx::query_as(
         "SELECT id, fund_number, name, description, starts_on, ends_on, \
                 status, closed_at, cancelled_at, cancellation_reason, \
                 created_at, updated_at \
-         FROM social_aid_funds WHERE id = $1",
+         FROM social_aid_funds WHERE id = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some(fund) = fund else {
         return Ok(None);
@@ -353,7 +390,7 @@ pub async fn get_fund_detail(pool: &PgPool, id: Uuid) -> Result<Option<FundDetai
          ORDER BY a.id",
     )
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let donations = sqlx::query_as::<_, DonationRow>(&format!(
@@ -361,7 +398,7 @@ pub async fn get_fund_detail(pool: &PgPool, id: Uuid) -> Result<Option<FundDetai
          ORDER BY d.donation_number DESC"
     ))
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let disbursements = sqlx::query_as::<_, DisbursementRow>(&format!(
@@ -369,7 +406,7 @@ pub async fn get_fund_detail(pool: &PgPool, id: Uuid) -> Result<Option<FundDetai
          ORDER BY b.disbursement_number DESC"
     ))
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     Ok(Some(FundDetail {
@@ -402,16 +439,20 @@ pub struct FundOutcome {
 /// Fund creation moves ZERO money — the row is purpose/restriction
 /// metadata only.
 pub async fn create_fund(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateFund,
 ) -> Result<FundOutcome, SocialAidError> {
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, fund_number, idempotency_fingerprint \
-         FROM social_aid_funds WHERE idempotency_key = $1",
+         FROM social_aid_funds WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(SocialAidError::Database)?;
     if let Some((id, number, fingerprint)) = existing {
@@ -425,12 +466,17 @@ pub async fn create_fund(
         });
     }
 
+    // M1-P3-B6: the allocator runs inside the INSERT's own transaction
+    // — a concurrent idempotency loser rolls its allocation back with
+    // the tx, so a replay never consumes a document number.
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO social_aid_funds \
             (name, description, starts_on, ends_on, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             fund_number) \
+         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, \
+             allocate_document_number($8, 'social_aid_funds.fund_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, fund_number",
     )
     .bind(&command.name)
@@ -440,19 +486,30 @@ pub async fn create_fund(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(SocialAidError::Database)?;
 
     let Some((id, number)) = inserted else {
         let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
             "SELECT id, fund_number, idempotency_fingerprint \
-             FROM social_aid_funds WHERE idempotency_key = $1",
+             FROM social_aid_funds WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
         )
         .bind(&command.idempotency_key)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(SocialAidError::Database)?;
+        tx.rollback().await.map_err(SocialAidError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(SocialAidError::NotFound);
         };
@@ -466,6 +523,7 @@ pub async fn create_fund(
         });
     };
 
+    tx.commit().await.map_err(SocialAidError::Database)?;
     Ok(FundOutcome {
         fund_id: id,
         fund_number: number,
@@ -478,11 +536,13 @@ pub async fn create_fund(
 /// restricted-availability mutations for this fund).
 async fn lock_fund(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     fund_id: Uuid,
 ) -> Result<String, SocialAidError> {
     let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM social_aid_funds WHERE id = $1 FOR UPDATE")
+        sqlx::query_scalar("SELECT status FROM public.app_lock_social_aid_fund($1, $2)")
             .bind(fund_id)
+            .bind(cooperative_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(SocialAidError::Database)?;
@@ -518,56 +578,31 @@ async fn locked_restricted_available(
 /// (fund, account) restricted availability is non-zero — restricted
 /// money must never become ownerless (docs/11 §restricted funds).
 pub async fn close_fund(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     fund_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<i64, SocialAidError> {
-    let mut tx = pool.begin().await.map_err(SocialAidError::Database)?;
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
 
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, fund_number FROM social_aid_funds WHERE id = $1 FOR UPDATE")
-            .bind(fund_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(SocialAidError::Database)?;
-    let Some((status, number)) = row else {
-        return Err(SocialAidError::NotFound);
-    };
-    if status != model::FundStatus::Active.as_str() {
-        tx.rollback().await.map_err(SocialAidError::Database)?;
-        return Ok(number);
-    }
-
-    let remaining: Option<Decimal> = sqlx::query_scalar(
-        "SELECT sum(available) FROM ( \
-            SELECT financial_account_id, sum(amount) AS available FROM ( \
-                SELECT financial_account_id, amount FROM social_aid_donations \
-                 WHERE fund_id = $1 AND status = 'posted' \
-                UNION ALL \
-                SELECT financial_account_id, -amount FROM social_aid_disbursements \
-                 WHERE fund_id = $1 AND status = 'posted' \
-            ) s GROUP BY financial_account_id \
-        ) t WHERE available <> 0",
-    )
-    .bind(fund_id)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(SocialAidError::Database)?;
-    if remaining.unwrap_or_default() != Decimal::ZERO {
-        return Err(SocialAidError::HasRestrictedBalance);
-    }
-
-    sqlx::query(
-        "UPDATE social_aid_funds SET status = 'closed', closed_at = $2, \
-            closed_by = $3, updated_at = $2 WHERE id = $1",
+    // R3C: one atomic definer — fund lock, the zero-restricted-
+    // availability guard and the flip are indivisible.
+    let (_replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, fund_number \
+         FROM public.app_social_aid_fund_close_tx($1, $2, $3, $4)",
     )
     .bind(fund_id)
     .bind(now)
     .bind(actor)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(SocialAidError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => SocialAidError::NotFound,
+        Some("has_restricted_balance") => SocialAidError::HasRestrictedBalance,
+        _ => SocialAidError::Database(error),
+    })?;
 
     tx.commit().await.map_err(SocialAidError::Database)?;
     Ok(number)
@@ -576,52 +611,33 @@ pub async fn close_fund(
 /// Cancellation is identity-only: possible only while the fund has
 /// never carried a financial event (no donations, no disbursements).
 pub async fn cancel_fund(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     fund_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<i64, SocialAidError> {
-    let mut tx = pool.begin().await.map_err(SocialAidError::Database)?;
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
 
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, fund_number FROM social_aid_funds WHERE id = $1 FOR UPDATE")
-            .bind(fund_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(SocialAidError::Database)?;
-    let Some((status, number)) = row else {
-        return Err(SocialAidError::NotFound);
-    };
-    if status != model::FundStatus::Active.as_str() {
-        tx.rollback().await.map_err(SocialAidError::Database)?;
-        return Ok(number);
-    }
-
-    let has_events: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM social_aid_donations WHERE fund_id = $1) \
-            OR EXISTS (SELECT 1 FROM social_aid_disbursements WHERE fund_id = $1)",
-    )
-    .bind(fund_id)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(SocialAidError::Database)?;
-    if has_events {
-        return Err(SocialAidError::HasRestrictedBalance);
-    }
-
-    sqlx::query(
-        "UPDATE social_aid_funds SET status = 'cancelled', cancelled_at = $2, \
-            cancelled_by = $3, cancellation_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: one atomic definer — fund lock, the no-financial-events
+    // guard and the flip are indivisible.
+    let (_replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, fund_number \
+         FROM public.app_social_aid_fund_cancel_tx($1, $2, $3, $4, $5)",
     )
     .bind(fund_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(SocialAidError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => SocialAidError::NotFound,
+        Some("has_restricted_balance") => SocialAidError::HasRestrictedBalance,
+        _ => SocialAidError::Database(error),
+    })?;
 
     tx.commit().await.map_err(SocialAidError::Database)?;
     Ok(number)
@@ -658,18 +674,21 @@ pub struct EventOutcome {
 /// least one of person/display name) is enforced by callers and a DB
 /// CHECK.
 pub async fn post_donation(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: PostDonation,
 ) -> Result<EventOutcome, SocialAidError> {
-    let mut tx = pool.begin().await.map_err(SocialAidError::Database)?;
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
 
     // 1. Idempotent replay short-circuit.
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, donation_number, idempotency_fingerprint \
-         FROM social_aid_donations WHERE idempotency_key = $1",
+         FROM social_aid_donations WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(SocialAidError::Database)?;
@@ -686,7 +705,7 @@ pub async fn post_donation(
     }
 
     // 2. Lock the Fund: donations only to an ACTIVE fund.
-    let status = lock_fund(&mut tx, command.fund_id).await?;
+    let status = lock_fund(&mut tx, cooperative_id, command.fund_id).await?;
     if status != model::FundStatus::Active.as_str() {
         return Err(SocialAidError::InvalidState);
     }
@@ -695,9 +714,14 @@ pub async fn post_donation(
     let locked = account_repo::lock_accounts(&mut tx, &[command.financial_account_id])
         .await
         .map_err(account_to_error)?;
-    let Some((account_status, _currency)) = locked.get(&command.financial_account_id) else {
+    let Some((account_status, _currency, account_coop)) = locked.get(&command.financial_account_id)
+    else {
         return Err(SocialAidError::NotFound);
     };
+    // Same-cooperative only: a foreign account resolves as absent.
+    if *account_coop != cooperative_id {
+        return Err(SocialAidError::NotFound);
+    }
     if *account_status != AccountStatus::Active.as_str() {
         return Err(SocialAidError::InactiveAccount);
     }
@@ -705,12 +729,15 @@ pub async fn post_donation(
     // 4. Donor identity: a linked person must exist (defense in depth —
     //    routes validate first, the FK enforces it in the DB).
     if let Some(person_id) = command.donor_person_id {
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM persons WHERE id = $1)")
-                .bind(person_id)
-                .fetch_one(tx.as_mut())
-                .await
-                .map_err(SocialAidError::Database)?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM persons WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2)",
+        )
+        .bind(person_id)
+        .bind(cooperative_id)
+        .fetch_one(tx.as_mut())
+        .await
+        .map_err(SocialAidError::Database)?;
         if !exists {
             return Err(SocialAidError::NotFound);
         }
@@ -728,6 +755,8 @@ pub async fn post_donation(
             source_id: donation_id,
             occurred_at: command.occurred_at,
             actor,
+            // C3: the movement lives in its account's cooperative.
+            cooperative_id: *account_coop,
         },
     )
     .await
@@ -738,9 +767,11 @@ pub async fn post_donation(
             (id, fund_id, donor_person_id, donor_display_name, \
              financial_account_id, amount, currency, occurred_at, \
              reference, note, account_movement_id, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'TRY', $7, $8, $9, $10, 'posted', $11, $12, $13) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             donation_number) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'TRY', $7, $8, $9, $10, 'posted', $11, $12, $13, $14, \
+             allocate_document_number($14, 'social_aid_donations.donation_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, donation_number",
     )
     .bind(donation_id)
@@ -756,13 +787,22 @@ pub async fn post_donation(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(SocialAidError::Database)?;
 
     let Some((id, number)) = inserted else {
+        let replayed = replay_existing_donation(&mut tx, cooperative_id, &command).await;
         tx.rollback().await.map_err(SocialAidError::Database)?;
-        return replay_existing_donation(pool, &command).await;
+        return replayed;
     };
 
     tx.commit().await.map_err(SocialAidError::Database)?;
@@ -774,15 +814,18 @@ pub async fn post_donation(
 }
 
 async fn replay_existing_donation(
-    pool: &PgPool,
+    executor: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     command: &PostDonation,
 ) -> Result<EventOutcome, SocialAidError> {
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, donation_number, idempotency_fingerprint \
-         FROM social_aid_donations WHERE idempotency_key = $1",
+         FROM social_aid_donations WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *executor)
     .await
     .map_err(SocialAidError::Database)?;
     let Some((id, number, fingerprint)) = existing else {
@@ -804,77 +847,40 @@ async fn replay_existing_donation(
 /// account (docs/11: restricted money already spent cannot be
 /// invalidated by a reversal).
 pub async fn reverse_donation(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     donation_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), SocialAidError> {
-    let mut tx = pool.begin().await.map_err(SocialAidError::Database)?;
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
 
-    let row: Option<(String, i64, Uuid, Uuid, Decimal)> = sqlx::query_as(
-        "SELECT status, donation_number, fund_id, financial_account_id, amount \
-         FROM social_aid_donations WHERE id = $1 FOR UPDATE",
-    )
-    .bind(donation_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(SocialAidError::Database)?;
-    let Some((status, number, fund_id, account_id, amount)) = row else {
-        return Err(SocialAidError::NotFound);
-    };
-    if status != model::PostedStatus::Posted.as_str() {
-        tx.rollback().await.map_err(SocialAidError::Database)?;
-        return Ok((true, number));
-    }
-
-    // Canonical lock prefix: fund row first, then the account row.
-    lock_fund(&mut tx, fund_id).await?;
-    account_repo::lock_accounts(&mut tx, &[account_id])
-        .await
-        .map_err(account_to_error)?;
-
-    // Restricted availability must still cover the donation: already
-    // consumed restricted money cannot be invalidated.
-    let restricted = locked_restricted_available(&mut tx, fund_id, account_id).await?;
-    if restricted < amount {
-        return Err(SocialAidError::InsufficientRestricted);
-    }
-
-    // Physical balance must survive the reversal (never negative).
-    let balance = account_repo::locked_balance(&mut tx, account_id)
-        .await
-        .map_err(account_to_error)?;
-    if balance < amount {
-        return Err(SocialAidError::InsufficientFunds);
-    }
-
-    account_repo::reverse_movements_of_source(
-        &mut tx,
-        MovementSource::SocialAidDonation,
-        donation_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await
-    .map_err(account_to_error)?;
-
-    sqlx::query(
-        "UPDATE social_aid_donations SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: one atomic definer — donation lock + status, canonical
+    // fund -> account lock prefix, restricted-availability and
+    // physical-balance checks and the compensating movement flip are
+    // indivisible. Restricted money can never be invalidated after
+    // it has been consumed (docs/11, docs/15).
+    let (replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, donation_number \
+         FROM public.app_social_aid_donation_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(donation_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(SocialAidError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => SocialAidError::NotFound,
+        Some("insufficient_restricted") => SocialAidError::InsufficientRestricted,
+        Some("insufficient_funds") => SocialAidError::InsufficientFunds,
+        _ => SocialAidError::Database(error),
+    })?;
 
     tx.commit().await.map_err(SocialAidError::Database)?;
-    Ok((false, number))
+    Ok((replayed, number))
 }
 
 // ------------------------------------------------------------------
@@ -901,18 +907,21 @@ pub struct PostDisbursement {
 /// can never be spent merely because unrelated cooperative cash or
 /// another account's restricted balance exists (docs/11, docs/15).
 pub async fn post_disbursement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: PostDisbursement,
 ) -> Result<EventOutcome, SocialAidError> {
-    let mut tx = pool.begin().await.map_err(SocialAidError::Database)?;
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
 
     // 1. Idempotent replay short-circuit.
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, disbursement_number, idempotency_fingerprint \
-         FROM social_aid_disbursements WHERE idempotency_key = $1",
+         FROM social_aid_disbursements WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(SocialAidError::Database)?;
@@ -929,7 +938,7 @@ pub async fn post_disbursement(
     }
 
     // 2. Lock the Fund: disbursements only from an ACTIVE fund.
-    let status = lock_fund(&mut tx, command.fund_id).await?;
+    let status = lock_fund(&mut tx, cooperative_id, command.fund_id).await?;
     if status != model::FundStatus::Active.as_str() {
         return Err(SocialAidError::InvalidState);
     }
@@ -938,21 +947,29 @@ pub async fn post_disbursement(
     let locked = account_repo::lock_accounts(&mut tx, &[command.financial_account_id])
         .await
         .map_err(account_to_error)?;
-    let Some((account_status, _currency)) = locked.get(&command.financial_account_id) else {
+    let Some((account_status, _currency, account_coop)) = locked.get(&command.financial_account_id)
+    else {
         return Err(SocialAidError::NotFound);
     };
+    // Same-cooperative only: a foreign account resolves as absent.
+    if *account_coop != cooperative_id {
+        return Err(SocialAidError::NotFound);
+    }
     if *account_status != AccountStatus::Active.as_str() {
         return Err(SocialAidError::InactiveAccount);
     }
 
     // 4. Beneficiary identity: a linked person must exist.
     if let Some(person_id) = command.beneficiary_person_id {
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM persons WHERE id = $1)")
-                .bind(person_id)
-                .fetch_one(tx.as_mut())
-                .await
-                .map_err(SocialAidError::Database)?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM persons WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2)",
+        )
+        .bind(person_id)
+        .bind(cooperative_id)
+        .fetch_one(tx.as_mut())
+        .await
+        .map_err(SocialAidError::Database)?;
         if !exists {
             return Err(SocialAidError::NotFound);
         }
@@ -966,9 +983,10 @@ pub async fn post_disbursement(
     }
 
     // 6. Physical account balance under the account row lock.
-    let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
-        .await
-        .map_err(account_to_error)?;
+    let balance =
+        account_repo::locked_balance(&mut tx, *account_coop, command.financial_account_id)
+            .await
+            .map_err(account_to_error)?;
     if command.amount > balance {
         return Err(SocialAidError::InsufficientFunds);
     }
@@ -985,6 +1003,8 @@ pub async fn post_disbursement(
             source_id: disbursement_id,
             occurred_at: command.occurred_at,
             actor,
+            // C3: the movement lives in its account's cooperative.
+            cooperative_id: *account_coop,
         },
     )
     .await
@@ -995,9 +1015,11 @@ pub async fn post_disbursement(
             (id, fund_id, beneficiary_person_id, beneficiary_display_name, \
              financial_account_id, amount, currency, occurred_at, \
              reason, reference, account_movement_id, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'TRY', $7, $8, $9, $10, 'posted', $11, $12, $13) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             disbursement_number) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'TRY', $7, $8, $9, $10, 'posted', $11, $12, $13, $14, \
+             allocate_document_number($14, 'social_aid_disbursements.disbursement_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, disbursement_number",
     )
     .bind(disbursement_id)
@@ -1013,13 +1035,22 @@ pub async fn post_disbursement(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(SocialAidError::Database)?;
 
     let Some((id, number)) = inserted else {
+        let replayed = replay_existing_disbursement(&mut tx, cooperative_id, &command).await;
         tx.rollback().await.map_err(SocialAidError::Database)?;
-        return replay_existing_disbursement(pool, &command).await;
+        return replayed;
     };
 
     tx.commit().await.map_err(SocialAidError::Database)?;
@@ -1031,15 +1062,18 @@ pub async fn post_disbursement(
 }
 
 async fn replay_existing_disbursement(
-    pool: &PgPool,
+    executor: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     command: &PostDisbursement,
 ) -> Result<EventOutcome, SocialAidError> {
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, disbursement_number, idempotency_fingerprint \
-         FROM social_aid_disbursements WHERE idempotency_key = $1",
+         FROM social_aid_disbursements WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *executor)
     .await
     .map_err(SocialAidError::Database)?;
     let Some((id, number, fingerprint)) = existing else {
@@ -1061,60 +1095,34 @@ async fn replay_existing_disbursement(
 /// pair that funded the payment. Reversal stays allowed on a closed
 /// fund: it is a correction of recorded history, never a new spend.
 pub async fn reverse_disbursement(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     disbursement_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), SocialAidError> {
-    let mut tx = pool.begin().await.map_err(SocialAidError::Database)?;
+    let mut tx = db.begin().await.map_err(SocialAidError::Database)?;
 
-    let row: Option<(String, i64, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT status, disbursement_number, fund_id, financial_account_id \
-         FROM social_aid_disbursements WHERE id = $1 FOR UPDATE",
-    )
-    .bind(disbursement_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(SocialAidError::Database)?;
-    let Some((status, number, fund_id, account_id)) = row else {
-        return Err(SocialAidError::NotFound);
-    };
-    if status != model::PostedStatus::Posted.as_str() {
-        tx.rollback().await.map_err(SocialAidError::Database)?;
-        return Ok((true, number));
-    }
-
-    // Canonical lock prefix: fund row first, then the account row.
-    lock_fund(&mut tx, fund_id).await?;
-    account_repo::lock_accounts(&mut tx, &[account_id])
-        .await
-        .map_err(account_to_error)?;
-
-    account_repo::reverse_movements_of_source(
-        &mut tx,
-        MovementSource::SocialAidDisbursement,
-        disbursement_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await
-    .map_err(account_to_error)?;
-
-    sqlx::query(
-        "UPDATE social_aid_disbursements SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: one atomic definer — disbursement lock + status,
+    // canonical fund -> account lock prefix and the compensating
+    // movement flip are indivisible.
+    let (replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, disbursement_number \
+         FROM public.app_social_aid_disbursement_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(disbursement_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(SocialAidError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => SocialAidError::NotFound,
+        _ => SocialAidError::Database(error),
+    })?;
 
     tx.commit().await.map_err(SocialAidError::Database)?;
-    Ok((false, number))
+    Ok((replayed, number))
 }

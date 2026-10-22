@@ -77,7 +77,16 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("db");
-    app_db::run_migrations(&pool).await.expect("migrations");
+    app_db::run_test_migrations(&pool)
+        .await
+        .expect("migrations");
+    // C5-3: cooperative_id is NOT NULL on every business table — the
+    // NULL legacy lane is closed. Bootstrap up front so fixtures and
+    // API writes land in the bootstrap cooperative; user helpers add
+    // memberships explicitly.
+    let _ = kooperatif_server::tenant::repo::bootstrap_initial_cooperative(&pool, "Ana Kooperatif")
+        .await
+        .expect("bootstrap cooperative");
 
     let config = AuthConfig {
         allowed_origins: vec![ORIGIN.to_string()],
@@ -133,12 +142,21 @@ async fn create_admin(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    let user = users::create_user(pool, username, "Test", &hash)
+    let user = users::create_user(pool, username, "Test", &hash, TEST_PASSWORD)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO user_role_assignments (user_id, role_id) \
                  SELECT $1, id FROM roles WHERE name = 'Sistem Yöneticisi'",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Post-C5-3: suites run inside the bootstrap cooperative —
+    // membership is required for the business lane.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status)          SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
     )
     .bind(user.id)
     .execute(pool)
@@ -154,10 +172,19 @@ async fn create_plain_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    users::create_user(pool, username, "Plain", &hash)
+    let user = users::create_user(pool, username, "Plain", &hash, TEST_PASSWORD)
         .await
-        .unwrap()
-        .id
+        .unwrap();
+    // Active member with no roles — cooperative lane resolves, the
+    // business permission check still denies.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status)          SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    user.id
 }
 
 async fn login(app: &axum::Router, peer: SocketAddr, username: &str) -> (String, String) {
@@ -1253,4 +1280,660 @@ async fn get_open_period(test: &TestApp, cookie: &str) -> Value {
         .find(|p| p["status"] == "open")
         .unwrap()
         .clone()
+}
+
+// ======================================================================
+// M1-P4-B1 — representative payment flows on the REAL restricted
+// runtime lane. The rest of this suite exercises the owner pool;
+// here the router's entire state pool is `kooperatif_app`, so every
+// handler runs the sealed context, the guarded writes, the definer
+// lock helpers and the deferred integrity checks end to end.
+// ======================================================================
+
+const APP_ROLE: &str = "kooperatif_app";
+/// Restricted-principal password: `KOOPERATIF_APP_TEST_PASSWORD`
+/// overrides for CI; otherwise the documented local dev password.
+fn app_password() -> String {
+    app_db::test_app_role_password()
+}
+
+fn app_url(admin_url: &str) -> String {
+    let (scheme, rest) = admin_url.split_once("://").expect("url scheme");
+    let at = rest.find('@').expect("userinfo in url");
+    format!("{scheme}://{APP_ROLE}:{}{}", app_password(), &rest[at..])
+}
+
+#[tokio::test]
+async fn b1_payment_flows_on_restricted_app_lane() {
+    let Some(test) = setup().await else { return };
+
+    // A second router whose ONLY database connection is the real
+    // restricted principal — the production principal separation.
+    let url = test_database_url().unwrap();
+    let base = url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap();
+    let app_pool = app_db::connect(&app_url(&format!("{base}/{}", test._database_name)))
+        .await
+        .expect("kooperatif_app pool");
+    let config = AuthConfig {
+        allowed_origins: vec![ORIGIN.to_string()],
+        cookie_secure: false,
+        session_absolute_ttl_secs: 3600,
+        session_idle_ttl_secs: 600,
+        argon2_m_cost: ARGON2_M_COST_FLOOR,
+        argon2_t_cost: 1,
+        argon2_p_cost: 1,
+        login_window_secs: 60,
+        login_username_max_attempts: 100,
+        login_ip_max_attempts: 100_000,
+        forwarded_ip: false,
+    };
+    let clock = Arc::new(MutableClock::new(
+        OffsetDateTime::parse(
+            "2026-01-01T00:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("epoch"),
+    ));
+    let lane = router(
+        AppState {
+            db: Some(app_pool.clone()),
+            auth: Arc::new(AuthRuntime::new(config, clock)),
+        },
+        cors_layer(&[]),
+    );
+
+    let admin_name = format!("adm.{}", Uuid::new_v4().simple());
+    let admin_id = create_admin(&test.pool, &admin_name).await;
+    let (cookie, csrf) = login(&lane, test.peer(), &admin_name).await;
+
+    // Selected physical cashbox — created on the restricted lane.
+    let (status, detail) = send(
+        &lane,
+        req(
+            "POST",
+            "/api/financial-accounts",
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "name": "B1 Kasa", "accountType": "cash" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "account create: {detail}");
+    let account: Uuid = detail["id"].as_str().unwrap().parse().unwrap();
+
+    // Unapplied payment — zero allocations is a supported state.
+    let (status, created) = send(
+        &lane,
+        req(
+            "POST",
+            "/api/payments",
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "payerFirstName": "Kısıtlı",
+                "payerLastName": "Kulvar",
+                "amount": "100.00",
+                "method": "cash",
+                "destinationAccountId": account,
+                "idempotencyKey": "b1-http-unapplied",
+                "allocations": []
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "payment create: {created}");
+    assert_eq!(created["replayed"], json!(false));
+    let payment_id: Uuid = created["payment"]["id"].as_str().unwrap().parse().unwrap();
+
+    // The DB rows carry the sealed actor and exactly one cash leg.
+    let (created_by, legs): (Uuid, i64) = sqlx::query_as(
+        "SELECT p.created_by, \
+                (SELECT count(*) FROM account_movements m \
+                  WHERE m.source_type='payment' AND m.source_id=p.id \
+                    AND m.status='active' AND m.account_id=p.destination_account_id \
+                    AND m.amount=p.amount) \
+         FROM payments p WHERE p.id = $1",
+    )
+    .bind(payment_id)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(created_by, admin_id, "actor attribution is seal-derived");
+    assert_eq!(legs, 1, "exactly one matching inflow leg");
+
+    // Idempotent replay over HTTP — same key returns the original.
+    let (status, replayed) = send(
+        &lane,
+        req(
+            "POST",
+            "/api/payments",
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "payerFirstName": "Kısıtlı",
+                "payerLastName": "Kulvar",
+                "amount": "100.00",
+                "method": "cash",
+                "destinationAccountId": account,
+                "idempotencyKey": "b1-http-unapplied",
+                "allocations": []
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "replay: {replayed}");
+    assert_eq!(replayed["replayed"], json!(true));
+
+    // Debtor chain on the owner lane: shareholder + period + assessment.
+    let coop: Uuid = sqlx::query_scalar("SELECT id FROM cooperatives WHERE is_bootstrap")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    let person: Uuid = sqlx::query_scalar(
+        "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+         VALUES ('B1','Borclu','borclu',$1) RETURNING id",
+    )
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    let shareholder: Uuid = sqlx::query_scalar(
+        "INSERT INTO shareholders (person_id, status, cooperative_id) \
+         VALUES ($1,'active',$2) RETURNING id",
+    )
+    .bind(person)
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    let period: Uuid = sqlx::query_scalar(
+        "INSERT INTO periods (name, collection_start_date, due_date, cooperative_id, period_number) \
+         VALUES ('B1HttpPer','2026-06-01','2026-06-30',$1, \
+                 (SELECT COALESCE(max(period_number),0)+1 FROM periods \
+                   WHERE cooperative_id = $1)) RETURNING id",
+    )
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    let assessment: Uuid = sqlx::query_scalar(
+        "INSERT INTO assessments \
+         (period_id, shareholder_id, rule_type, base_amount, amount, currency, \
+          assessment_effective_date, generated_by, cooperative_id) \
+         VALUES ($1,$2,'per_share',50,50,'TRY','2026-06-01',$3,$4) RETURNING id",
+    )
+    .bind(period)
+    .bind(shareholder)
+    .bind(admin_id)
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+
+    // Partial allocation over HTTP — remainder stays on the payment.
+    let (status, allocated) = send(
+        &lane,
+        req(
+            "POST",
+            "/api/payments",
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "payerPersonId": person,
+                "amount": "80.00",
+                "method": "bank_transfer",
+                "destinationAccountId": account,
+                "idempotencyKey": "b1-http-partial",
+                "allocations": [{ "assessmentId": assessment, "amount": "30.00" }]
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "partial: {allocated}");
+    let partial_id: Uuid = allocated["payment"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(allocated["payment"]["unallocatedAmount"], json!("50.00"));
+
+    // Overpayment remainder -> shareholder credit over HTTP.
+    let (status, credit) = send(
+        &lane,
+        req(
+            "POST",
+            &format!("/api/payments/{partial_id}/credits"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({
+                "shareholderId": shareholder,
+                "amount": "50.00",
+                "idempotencyKey": "b1-http-credit"
+            })),
+        ),
+    )
+    .await;
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::OK,
+        "credit assign: {status} {credit}"
+    );
+
+    // Reconciliation: every posted payment in scope — exactly one
+    // matching leg, non-negative remainder, no over-settled debt.
+    let violations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM payments p \
+         WHERE p.status = 'posted' AND ( \
+           (SELECT count(*) FROM account_movements m \
+             WHERE m.source_type='payment' AND m.source_id=p.id \
+               AND m.status='active' AND m.direction='inflow' \
+               AND m.account_id=p.destination_account_id \
+               AND m.amount=p.amount) <> 1 \
+           OR (SELECT COALESCE(sum(a.amount),0) FROM payment_allocations a \
+                WHERE a.payment_id=p.id AND a.status='active') \
+            + (SELECT COALESCE(sum(c.amount),0) FROM shareholder_credits c \
+                WHERE c.source_payment_id=p.id AND c.status='active') \
+              > p.amount \
+         )",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(violations, 0, "ledger invariants hold on the app lane");
+
+    // Audit: exactly one payment_posted per payment, seal-attributed.
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM security_events \
+         WHERE event_type = 'payment_posted' AND user_id = $1 \
+           AND metadata->>'payment_id' = $2::text",
+    )
+    .bind(admin_id)
+    .bind(payment_id.to_string())
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1, "mandatory audit minted once");
+
+    app_pool.close().await;
+}
+
+/// M1-P4-B6: representative domain workflows on the REAL restricted
+/// principal — the whole router runs on a `kooperatif_app` pool, so a
+/// lock-privilege or grant regression anywhere fails the request.
+#[tokio::test]
+async fn b6_restricted_lane_domain_flows() {
+    let Some(test) = setup().await else { return };
+
+    let url = test_database_url().unwrap();
+    let base = url.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap();
+    let app_pool = app_db::connect(&app_url(&format!("{base}/{}", test._database_name)))
+        .await
+        .expect("kooperatif_app pool");
+    let config = AuthConfig {
+        allowed_origins: vec![ORIGIN.to_string()],
+        cookie_secure: false,
+        session_absolute_ttl_secs: 3600,
+        session_idle_ttl_secs: 600,
+        argon2_m_cost: ARGON2_M_COST_FLOOR,
+        argon2_t_cost: 1,
+        argon2_p_cost: 1,
+        login_window_secs: 60,
+        login_username_max_attempts: 100,
+        login_ip_max_attempts: 100_000,
+        forwarded_ip: false,
+    };
+    let clock = Arc::new(MutableClock::new(
+        OffsetDateTime::parse(
+            "2026-03-01T00:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("epoch"),
+    ));
+    let lane = router(
+        AppState {
+            db: Some(app_pool.clone()),
+            auth: Arc::new(AuthRuntime::new(config, clock)),
+        },
+        cors_layer(&[]),
+    );
+
+    let admin_name = format!("b6.{}", Uuid::new_v4().simple());
+    create_admin(&test.pool, &admin_name).await;
+    let (cookie, csrf) = login(&lane, test.peer(), &admin_name).await;
+
+    let mut step = 0u32;
+    let post = |path: String, body: Option<Value>| {
+        let c = cookie.clone();
+        let t = csrf.clone();
+        let l = lane.clone();
+        async move { send(&l, req("POST", &path, &c, Some(&t), body)).await }
+    };
+    let get = |path: String| {
+        let c = cookie.clone();
+        let l = lane.clone();
+        async move { send(&l, req("GET", &path, &c, None, None)).await }
+    };
+    let mut key = |label: &str| {
+        step += 1;
+        format!("b6-{label}-{step}")
+    };
+
+    // ── financial account (financial_accounts.manage) ──
+    let (s, account) = post(
+        "/api/financial-accounts".into(),
+        Some(json!({ "name": "B6 Kasa", "accountType": "cash" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "account: {account}");
+    let account: Uuid = account["id"].as_str().unwrap().parse().unwrap();
+
+    // ── shareholders + family-change (locks shareholder + membership) ──
+    let (s, sh_a) = post(
+        "/api/shareholders".into(),
+        Some(json!({
+            "person": { "mode": "new", "firstName": "B6", "lastName": "OrtakA" },
+            "family": { "mode": "new", "sequenceNumber": 1001 }
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "shareholder A: {sh_a}");
+    let sh_a_id: Uuid = sh_a["id"].as_str().unwrap().parse().unwrap();
+    let person_a: Uuid = sh_a["personId"].as_str().unwrap().parse().unwrap();
+
+    let (s, sh_b) = post(
+        "/api/shareholders".into(),
+        Some(json!({
+            "person": { "mode": "new", "firstName": "B6", "lastName": "OrtakB" },
+            "family": { "mode": "new", "sequenceNumber": 1002 }
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "shareholder B: {sh_b}");
+    let sh_b_id: Uuid = sh_b["id"].as_str().unwrap().parse().unwrap();
+
+    let (s, det) = get(format!("/api/shareholders/{sh_a_id}")).await;
+    assert_eq!(s, StatusCode::OK, "{det}");
+    let (s, fc) = post(
+        format!("/api/shareholders/{sh_a_id}/family-change"),
+        Some(json!({
+            "family": { "mode": "new", "sequenceNumber": 1003 },
+            "expectedUpdatedAt": det["updatedAt"].as_str().unwrap(),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "family-change: {fc}");
+
+    // ── shares: create + transfer ──
+    let (s, share) = post(
+        "/api/shares".into(),
+        Some(json!({
+            "shareholderId": sh_a_id,
+            "acquisitionType": "founder",
+            "effectiveAt": "2025-01-01T00:00:00Z",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "share: {share}");
+    let share_id: Uuid = share["id"].as_str().unwrap().parse().unwrap();
+    let (s, share) = get(format!("/api/shares/{share_id}")).await;
+    assert_eq!(s, StatusCode::OK, "{share}");
+    let (s, tr) = post(
+        format!("/api/shares/{share_id}/transfer"),
+        Some(json!({
+            "toShareholderId": sh_b_id,
+            "effectiveAt": "2026-02-01T00:00:00Z",
+            "expectedUpdatedAt": share["updatedAt"].as_str().unwrap(),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "transfer: {tr}");
+
+    // ── periods + assessment generation + a paid payment ──
+    let (s, period) = post(
+        "/api/periods".into(),
+        Some(json!({
+            "name": "B6 Dönem",
+            "collectionStartDate": "2026-02-01",
+            "dueDate": "2026-02-28",
+            "ruleType": "per_shareholder",
+            "baseAmount": "100.00",
+            "assessmentEffectiveDate": "2026-02-01",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "period: {period}");
+    let period_id = period["id"].as_str().unwrap().to_string();
+    let (s, gen) = post(
+        format!("/api/periods/{period_id}/generate-assessments"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "generate: {gen}");
+    let (s, list) = get(format!("/api/periods/{period_id}/assessments?pageSize=50")).await;
+    assert_eq!(s, StatusCode::OK, "{list}");
+    let first_assessment = list["items"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (s, pay) = post(
+        "/api/payments".into(),
+        Some(json!({
+            "payerFirstName": "B6", "payerLastName": "Ödeyen",
+            "amount": "100.00", "method": "cash",
+            "destinationAccountId": account,
+            "idempotencyKey": key("pay"),
+            "allocations": [{ "assessmentId": first_assessment, "amount": "100.00" }],
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "payment: {pay}");
+
+    // ── income / expense (financial_categories + accounts) ──
+    let (s, cat) = post(
+        "/api/financial-categories".into(),
+        Some(json!({ "categoryType": "expense", "name": "B6 Kırtasiye" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "category: {cat}");
+    let cat_id: Uuid = cat["id"].as_str().unwrap().parse().unwrap();
+    let (s, exp) = post(
+        "/api/expenses".into(),
+        Some(json!({
+            "financialAccountId": account.to_string(),
+            "categoryId": cat_id.to_string(),
+            "amount": "50.00",
+            "description": "B6 gider",
+            "idempotencyKey": key("exp"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "expense: {exp}");
+
+    // ── investments: create + funding + valuation + valuation cancel ──
+    let (s, inv) = post(
+        "/api/investments".into(),
+        Some(json!({
+            "name": "B6 Taşınmaz", "investmentType": "real_estate",
+            "acquiredAt": "2026-01-05", "idempotencyKey": key("inv"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "investment: {inv}");
+    let inv_id = inv["id"].as_str().unwrap().to_string();
+    let (s, fnd) = post(
+        format!("/api/investments/{inv_id}/fundings"),
+        Some(json!({
+            "financialAccountId": account.to_string(),
+            "amount": "40.00", "occurredAt": "2026-02-10T10:00:00Z",
+            "idempotencyKey": key("fnd"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "funding: {fnd}");
+    let (s, val) = post(
+        format!("/api/investments/{inv_id}/valuations"),
+        Some(json!({
+            "valuationDate": "2026-02-15", "amount": "45.00",
+            "method": "Ekspertiz", "source": "B6",
+            "idempotencyKey": key("val"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "valuation: {val}");
+    let val_id = val["valuations"][0]["id"].as_str().unwrap().to_string();
+    let (s, vc) = post(
+        format!("/api/investment-valuations/{val_id}/cancel"),
+        Some(json!({ "reason": "B6 iptal" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "valuation cancel: {vc}");
+
+    // ── social aid: fund + donation + disbursement + close ──
+    let (s, fund) = post(
+        "/api/social-aid/funds".into(),
+        Some(json!({ "name": "B6 Fon", "idempotencyKey": key("fund") })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "fund: {fund}");
+    let fund_id = fund["id"].as_str().unwrap().to_string();
+    let (s, don) = post(
+        "/api/social-aid/donations".into(),
+        Some(json!({
+            "fundId": fund_id, "donorDisplayName": "B6 Bağışçı",
+            "financialAccountId": account.to_string(),
+            "amount": "10.00", "occurredAt": "2026-02-10T10:00:00Z",
+            "idempotencyKey": key("don"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "donation: {don}");
+    let (s, dis) = post(
+        "/api/social-aid/disbursements".into(),
+        Some(json!({
+            "fundId": fund_id, "beneficiaryDisplayName": "B6 Aile",
+            "financialAccountId": account.to_string(),
+            "amount": "10.00", "occurredAt": "2026-02-12T10:00:00Z",
+            "reason": "B6 yardım", "idempotencyKey": key("dis"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "disbursement: {dis}");
+    let (s, closed) = post(format!("/api/social-aid/funds/{fund_id}/close"), None).await;
+    assert_eq!(s, StatusCode::OK, "fund close: {closed}");
+
+    // ── governance: body + membership + decision + vote + finalize ──
+    let (s, body) = post(
+        "/api/governance/bodies".into(),
+        Some(json!({
+            "name": "B6 Kurul", "bodyType": "Yönetim Kurulu",
+            "idempotencyKey": key("body"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "body: {body}");
+    let body_id = body["id"].as_str().unwrap().to_string();
+    let (s, mem) = post(
+        format!("/api/governance/bodies/{body_id}/memberships"),
+        Some(json!({
+            "personId": person_a, "startedAt": "2025-06-01T09:00:00Z",
+            "idempotencyKey": key("mem"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "membership: {mem}");
+    let (s, body_detail) = get(format!("/api/governance/bodies/{body_id}")).await;
+    assert_eq!(s, StatusCode::OK, "{body_detail}");
+    let mem_id = body_detail["memberships"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (s, dec) = post(
+        "/api/governance/decisions".into(),
+        Some(json!({
+            "bodyId": body_id, "title": "B6 Karar",
+            "decisionText": "B6 karar metni.",
+            "decisionOn": "2026-02-20", "effectiveOn": "2026-03-01",
+            "idempotencyKey": key("dec"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "decision: {dec}");
+    let dec_id = dec["id"].as_str().unwrap().to_string();
+    let (s, _) = post(format!("/api/governance/decisions/{dec_id}/open"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, vote) = post(
+        format!("/api/governance/decisions/{dec_id}/votes"),
+        Some(json!({
+            "personId": person_a, "choice": "approve",
+            "idempotencyKey": key("vote"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "vote: {vote}");
+    let (s, _) = post(
+        format!("/api/governance/decisions/{dec_id}/finalize"),
+        Some(json!({ "outcome": "approved" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, end) = post(
+        format!("/api/governance/memberships/{mem_id}/end"),
+        Some(json!({
+            "endedAt": "2026-02-25T10:00:00Z", "reason": "B6 süre doldu",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "membership end: {end}");
+    let (s, _) = post(format!("/api/governance/bodies/{body_id}/close"), None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // ── share return: initiate locks shares + live ownership ──
+    let (s, ret) = post(
+        "/api/share-returns".into(),
+        Some(json!({
+            "shareId": share_id, "effectiveReturnDate": "2026-03-01",
+            "reason": "B6 ayrılma", "idempotencyKey": key("ret"),
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "share-return: {ret}");
+
+    // ── forbidden: no-permission user, missing CSRF, foreign id ──
+    let plain_name = format!("pln.{}", Uuid::new_v4().simple());
+    create_plain_user(&test.pool, &plain_name).await;
+    let (pcookie, pcsrf) = login(&lane, test.peer(), &plain_name).await;
+    let (s, denied) = send(
+        &lane,
+        req(
+            "POST",
+            "/api/social-aid/funds",
+            &pcookie,
+            Some(&pcsrf),
+            Some(json!({ "name": "X", "idempotencyKey": "x-1" })),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no role must be denied: {denied}");
+
+    let (s, _) = send(
+        &lane,
+        req(
+            "POST",
+            "/api/financial-accounts",
+            &cookie,
+            None,
+            Some(json!({ "name": "No CSRF", "accountType": "cash" })),
+        ),
+    )
+    .await;
+    assert!(matches!(s, StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST));
+
+    let (s, foreign) = get(format!("/api/shareholders/{}", Uuid::new_v4())).await;
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "foreign id is indistinguishable: {foreign}"
+    );
+
+    app_pool.close().await;
 }

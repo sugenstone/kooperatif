@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { auth, login, logout, restoreSession } from './auth.svelte';
 
-function stubFetch(responder: () => Promise<unknown>): ReturnType<typeof vi.fn> {
+function stubFetch(responder: (...args: unknown[]) => Promise<unknown>): ReturnType<typeof vi.fn> {
 	const fetchMock = vi.fn(responder);
 	vi.stubGlobal('fetch', fetchMock);
 	return fetchMock;
@@ -19,7 +19,13 @@ function jsonResponse(body: unknown, status = 200): Response {
 const meBody = {
 	user: { id: 'u-1', username: 'ali', displayName: 'Ali Yılmaz' },
 	session: { id: 's-1', createdAt: '2026-01-01T00:00:00Z', expiresAt: '2026-01-01T12:00:00Z' },
-	csrfToken: 'csrf-raw'
+	csrfToken: 'csrf-raw',
+	permissions: [],
+	roles: [],
+	cooperatives: [],
+	activeCooperativeId: null,
+	platformAdmin: false,
+	platformCooperativesManage: false
 };
 
 afterEach(() => {
@@ -27,18 +33,28 @@ afterEach(() => {
 	auth.status = 'loading';
 	auth.user = null;
 	auth.csrfToken = null;
+	auth.resolvedCooperativeId = null;
 });
 
 describe('auth state', () => {
 	it('restores an authenticated session from /me (refresh persistence)', async () => {
-		const fetchMock = stubFetch(async () => jsonResponse(meBody));
+		const fetchMock = stubFetch(async (input: unknown) => {
+			const url = String(input);
+			if (url.endsWith('/api/auth/cooperative-context')) {
+				return jsonResponse({ cooperativeId: 'coop-bootstrap', cooperativeName: 'Ana' });
+			}
+			return jsonResponse(meBody);
+		});
 
 		await restoreSession();
 
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		// /me plus the effective-scope follow-up when activeCooperativeId is null.
+		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(auth.status).toBe('authenticated');
 		expect(auth.user?.username).toBe('ali');
 		expect(auth.csrfToken).toBe('csrf-raw');
+		// Null session field resolves to the bootstrap scope via context.
+		expect(auth.resolvedCooperativeId).toBe('coop-bootstrap');
 	});
 
 	it('returns to the unauthenticated state on 401 (expired/revoked session)', async () => {

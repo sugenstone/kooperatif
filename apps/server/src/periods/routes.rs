@@ -18,7 +18,7 @@
 //! an explicit POST so it is CSRF-guarded like every command.
 //!
 //! M1-P1-c3c1: every handler extracts `BusinessAuth` — the verified
-//! bootstrap-pinned cooperative context — and resolves permissions via
+//! session-scoped cooperative context (M1-P6 B4) — and resolves permissions via
 //! `require_business`; a foreign cooperative's role can never
 //! authorize a periods/assessments operation and audit events are
 //! cooperative-attributed.
@@ -377,17 +377,37 @@ pub async fn list_periods(
 ) -> Result<Json<PaginatedDto<PeriodListItemDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::PERIODS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = period_repo::list_periods(pool, query.search.as_deref(), page, page_size)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = period_repo::list_periods(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
+            page,
+            page_size,
+        )
         .await
         .map_err(db_err("period listing failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(period_item).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(period_item).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn create_period(
@@ -403,11 +423,14 @@ pub async fn create_period(
         &Method::POST,
         authz::catalog::PERIODS_MANAGE
     );
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
     let validated = validated(body, false)?;
-    let audit_name = validated.name.clone();
+    let _audit_name = validated.name.clone();
 
     let (period_id, period_number) = period_repo::create_period(
-        pool,
+        &mut tx,
+        ctx.cooperative_id(),
         ctx.auth.user_id,
         period_repo::CreatePeriod {
             name: validated.name,
@@ -421,25 +444,10 @@ pub async fn create_period(
     .await
     .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::PeriodCreated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "period_id": period_id,
-            "period_number": period_number,
-            "name": audit_name,
-            "rule_type": validated.rule_type.as_str(),
-            "base_amount": period_model::canonical_amount(validated.base_amount),
-            "assessment_effective_date": validated.assessment_effective_date.to_string(),
-        }),
-    )
-    .await;
+    // R4: audit row minted by the DB transition trigger.
     tracing::info!(outcome = "period_created", id = %period_id, number = period_number, actor = %ctx.auth.user_id);
 
-    let row = period_repo::find_period(pool, period_id)
+    let row = period_repo::find_period(&mut tx, ctx.cooperative_id(), period_id)
         .await
         .map_err(db_err("period reload failed"))?
         .ok_or(ApiError::Internal)?;
@@ -451,6 +459,18 @@ pub async fn create_period(
         }),
     )
         .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_period(
@@ -460,16 +480,30 @@ pub async fn get_period(
 ) -> Result<Json<PeriodDetailDto>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::PERIODS_READ).await?;
     let pool = pool_of(&state)?;
-    period_repo::find_period(pool, id)
-        .await
-        .map_err(db_err("period load failed"))?
-        .map(|row| {
-            Json(PeriodDetailDto {
-                item: period_item(&row),
-                created_at: row.created_at,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        period_repo::find_period(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("period load failed"))?
+            .map(|row| {
+                Json(PeriodDetailDto {
+                    item: period_item(&row),
+                    created_at: row.created_at,
+                })
             })
-        })
-        .ok_or(ApiError::NotFound)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn update_period(
@@ -486,48 +520,49 @@ pub async fn update_period(
         &Method::PATCH,
         authz::catalog::PERIODS_MANAGE
     );
-    let validated = validated(body, true)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let validated = validated(body, true)?;
 
-    period_repo::update_period(
-        pool,
-        id,
-        period_repo::UpdatePeriod {
-            name: validated.name,
-            collection_start_date: validated.collection_start_date,
-            due_date: validated.due_date,
-            rule_type: validated.rule_type,
-            base_amount: validated.base_amount,
-            assessment_effective_date: validated.assessment_effective_date,
-            expected_updated_at: validated.expected_updated_at.expect("validated"),
-        },
-        state.auth.clock.now(),
-    )
-    .await
-    .map_err(command_error)?;
-
-    let row = period_repo::find_period(pool, id)
+        period_repo::update_period(
+            &mut tx,
+            ctx.cooperative_id(),
+            id,
+            period_repo::UpdatePeriod {
+                name: validated.name,
+                collection_start_date: validated.collection_start_date,
+                due_date: validated.due_date,
+                rule_type: validated.rule_type,
+                base_amount: validated.base_amount,
+                assessment_effective_date: validated.assessment_effective_date,
+                expected_updated_at: validated.expected_updated_at.expect("validated"),
+            },
+            state.auth.clock.now(),
+        )
         .await
-        .map_err(db_err("period reload failed"))?
-        .ok_or(ApiError::NotFound)?;
-    audit::record_scoped(
-        pool,
-        SecurityEventType::PeriodUpdated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "period_id": id,
-            "period_number": row.period_number,
-            "rule_type": validated.rule_type.as_str(),
-            "base_amount": period_model::canonical_amount(validated.base_amount),
-            "assessment_effective_date": validated.assessment_effective_date.to_string(),
-        }),
-    )
+        .map_err(command_error)?;
+
+        let row = period_repo::find_period(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("period reload failed"))?
+            .ok_or(ApiError::NotFound)?;
+        // R4: audit row minted by the DB transition trigger.
+        Ok(Json(PeriodDetailDto {
+            item: period_item(&row),
+            created_at: row.created_at,
+        }))
+    }
     .await;
-    Ok(Json(PeriodDetailDto {
-        item: period_item(&row),
-        created_at: row.created_at,
-    }))
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn delete_period(
@@ -543,19 +578,25 @@ pub async fn delete_period(
         &Method::DELETE,
         authz::catalog::PERIODS_MANAGE
     );
-    let period_number = period_repo::delete_period(pool, id)
-        .await
-        .map_err(command_error)?;
-    audit::record_scoped(
-        pool,
-        SecurityEventType::PeriodDeleted,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "period_id": id, "period_number": period_number }),
-    )
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let _period_number = period_repo::delete_period(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(command_error)?;
+        // R4: audit row minted by the DB transition trigger.
+        Ok(StatusCode::NO_CONTENT)
+    }
     .await;
-    Ok(StatusCode::NO_CONTENT)
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Explicit `open -> closed` transition (docs/16): ordinary mutation is
@@ -573,20 +614,14 @@ pub async fn close_period(
         &Method::POST,
         authz::catalog::PERIODS_MANAGE
     );
-    let period_number = period_repo::close_period(pool, id, state.auth.clock.now())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+    let period_number = period_repo::close_period(&mut tx, ctx.cooperative_id(), id, state.auth.clock.now())
         .await
         .map_err(command_error)?;
-    audit::record_scoped(
-        pool,
-        SecurityEventType::PeriodClosed,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "period_id": id, "period_number": period_number }),
-    )
-    .await;
+    // R4: audit row minted by the DB transition trigger.
     tracing::info!(outcome = "period_closed", id = %id, number = period_number, actor = %ctx.auth.user_id);
-    let row = period_repo::find_period(pool, id)
+    let row = period_repo::find_period(&mut tx, ctx.cooperative_id(), id)
         .await
         .map_err(db_err("period reload failed"))?
         .ok_or(ApiError::NotFound)?;
@@ -594,6 +629,18 @@ pub async fn close_period(
         item: period_item(&row),
         created_at: row.created_at,
     }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// POST preview (§63): read-only command — CSRF-guarded like every
@@ -613,47 +660,61 @@ pub async fn preview_assessments(
         &Method::POST,
         authz::catalog::ASSESSMENTS_READ
     );
-    let (page, page_size) = page_of(&query)?;
-    let plan = period_repo::preview_assessments(pool, id)
-        .await
-        .map_err(command_error)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let plan = period_repo::preview_assessments(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(command_error)?;
 
-    let total_rows = plan.rows.len() as i64;
-    let start = ((page - 1) * page_size).max(0) as usize;
-    let end = (start + page_size as usize).min(plan.rows.len());
-    let rows = plan.rows[start.min(plan.rows.len())..end]
-        .iter()
-        .map(|(shareholder, share_count, amount)| PreviewRowDto {
-            shareholder: identity_dto(
-                Some(shareholder.shareholder_id),
-                &Some(shareholder.first_name.clone()),
-                &Some(shareholder.last_name.clone()),
-                &shareholder.guardian_first_name,
-                &shareholder.guardian_last_name,
-                shareholder.family_sequence,
-                Some(shareholder.shareholder_status.as_str()),
-            )
-            .expect("preview row always carries a shareholder"),
-            share_count: *share_count,
-            amount: period_model::canonical_amount(*amount),
-        })
-        .collect();
+        let total_rows = plan.rows.len() as i64;
+        let start = ((page - 1) * page_size).max(0) as usize;
+        let end = (start + page_size as usize).min(plan.rows.len());
+        let rows = plan.rows[start.min(plan.rows.len())..end]
+            .iter()
+            .map(|(shareholder, share_count, amount)| PreviewRowDto {
+                shareholder: identity_dto(
+                    Some(shareholder.shareholder_id),
+                    &Some(shareholder.first_name.clone()),
+                    &Some(shareholder.last_name.clone()),
+                    &shareholder.guardian_first_name,
+                    &shareholder.guardian_last_name,
+                    shareholder.family_sequence,
+                    Some(shareholder.shareholder_status.as_str()),
+                )
+                .expect("preview row always carries a shareholder"),
+                share_count: *share_count,
+                amount: period_model::canonical_amount(*amount),
+            })
+            .collect();
 
-    Ok(Json(PreviewResponse {
-        period_id: id,
-        rule_type: plan.rule_type.as_str().to_owned(),
-        base_amount: period_model::canonical_amount(plan.base_amount),
-        currency: "TRY".to_owned(),
-        assessment_effective_date: plan.effective_date,
-        eligible_shareholder_count: total_rows,
-        eligible_share_count: plan.eligible_share_count,
-        assessment_count: total_rows,
-        total_amount: period_model::canonical_amount(plan.total_amount),
-        page,
-        page_size,
-        total_rows,
-        rows,
-    }))
+        Ok(Json(PreviewResponse {
+            period_id: id,
+            rule_type: plan.rule_type.as_str().to_owned(),
+            base_amount: period_model::canonical_amount(plan.base_amount),
+            currency: "TRY".to_owned(),
+            assessment_effective_date: plan.effective_date,
+            eligible_shareholder_count: total_rows,
+            eligible_share_count: plan.eligible_share_count,
+            assessment_count: total_rows,
+            total_amount: period_model::canonical_amount(plan.total_amount),
+            page,
+            page_size,
+            total_rows,
+            rows,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// POST finalization (§30–§33): atomic, idempotent obligation
@@ -671,44 +732,56 @@ pub async fn generate_assessments(
         &Method::POST,
         authz::catalog::ASSESSMENTS_MANAGE
     );
-    let summary = period_repo::generate_assessments(pool, ctx.auth.user_id, id)
-        .await
-        .map_err(command_error)?;
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let summary =
+            period_repo::generate_assessments(&mut tx, ctx.cooperative_id(), ctx.auth.user_id, id)
+                .await
+                .map_err(command_error)?;
 
-    audit::record_scoped(
-        pool,
-        SecurityEventType::AssessmentsGenerated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({
-            "period_id": id,
-            "assessment_count": summary.assessment_count,
-            "share_source_count": summary.share_source_count,
-            "total_amount": period_model::canonical_amount(summary.total_amount),
-            "credit_applied_amount":
-                period_model::canonical_amount(summary.credit_applied_amount),
-            "credit_application_count": summary.credit_application_count,
-        }),
-    )
+        audit::record_tx(
+            &mut tx,
+            SecurityEventType::AssessmentsGenerated,
+            serde_json::json!({
+                "period_id": id,
+                "assessment_count": summary.assessment_count,
+                "share_source_count": summary.share_source_count,
+                "total_amount": period_model::canonical_amount(summary.total_amount),
+                "credit_applied_amount":
+                    period_model::canonical_amount(summary.credit_applied_amount),
+                "credit_application_count": summary.credit_application_count,
+            }),
+        )
+        .await?;
+        tracing::info!(
+            outcome = "assessments_generated", id = %id,
+            assessments = summary.assessment_count, actor = %ctx.auth.user_id
+        );
+
+        let row = period_repo::find_period(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("period reload failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((
+            StatusCode::CREATED,
+            Json(PeriodDetailDto {
+                item: period_item(&row),
+                created_at: row.created_at,
+            }),
+        )
+            .into_response())
+    }
     .await;
-    tracing::info!(
-        outcome = "assessments_generated", id = %id,
-        assessments = summary.assessment_count, actor = %ctx.auth.user_id
-    );
-
-    let row = period_repo::find_period(pool, id)
-        .await
-        .map_err(db_err("period reload failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(PeriodDetailDto {
-            item: period_item(&row),
-            created_at: row.created_at,
-        }),
-    )
-        .into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn list_assessments(
@@ -719,22 +792,42 @@ pub async fn list_assessments(
 ) -> Result<Json<PaginatedDto<AssessmentListItemDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::ASSESSMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    period_repo::find_period(pool, period_id)
-        .await
-        .map_err(db_err("period load failed"))?
-        .ok_or(ApiError::NotFound)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows =
-        period_repo::list_assessments(pool, period_id, query.search.as_deref(), page, page_size)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        period_repo::find_period(&mut tx, ctx.cooperative_id(), period_id)
             .await
-            .map_err(db_err("assessment listing failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(assessment_item).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+            .map_err(db_err("period load failed"))?
+            .ok_or(ApiError::NotFound)?;
+        let (page, page_size) = page_of(&query)?;
+        let rows = period_repo::list_assessments(
+            &mut tx,
+            ctx.cooperative_id(),
+            period_id,
+            query.search.as_deref(),
+            page,
+            page_size,
+        )
+        .await
+        .map_err(db_err("assessment listing failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(assessment_item).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_assessment(
@@ -744,27 +837,41 @@ pub async fn get_assessment(
 ) -> Result<Json<AssessmentDetailDto>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::ASSESSMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let Some(row) = period_repo::find_assessment(pool, id)
-        .await
-        .map_err(db_err("assessment load failed"))?
-    else {
-        return Err(ApiError::NotFound);
-    };
-    let sources = period_repo::assessment_sources(pool, id)
-        .await
-        .map_err(db_err("assessment sources failed"))?
-        .into_iter()
-        .map(|s| AssessmentSourceDto {
-            share_id: s.share_id,
-            share_number: s.share_number,
-            amount_component: period_model::canonical_amount(s.amount_component),
-            ownership_started_at: s.ownership_started_at,
-        })
-        .collect();
-    Ok(Json(AssessmentDetailDto {
-        item: assessment_item(&row),
-        sources,
-    }))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let Some(row) = period_repo::find_assessment(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("assessment load failed"))?
+        else {
+            return Err(ApiError::NotFound);
+        };
+        let sources = period_repo::assessment_sources(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("assessment sources failed"))?
+            .into_iter()
+            .map(|s| AssessmentSourceDto {
+                share_id: s.share_id,
+                share_number: s.share_number,
+                amount_component: period_model::canonical_amount(s.amount_component),
+                ownership_started_at: s.ownership_started_at,
+            })
+            .collect();
+        Ok(Json(AssessmentDetailDto {
+            item: assessment_item(&row),
+            sources,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Shareholder-scoped obligation history (§62): the "Hissedar
@@ -777,16 +884,24 @@ pub async fn list_shareholder_assessments(
 ) -> Result<Json<Vec<ShareholderAssessmentDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::ASSESSMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
-            .bind(shareholder_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err("shareholder check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
-    let items = period_repo::list_assessments_by_shareholder(pool, shareholder_id)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1 AND cooperative_id = $2)",
+        )
+        .bind(shareholder_id)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err("shareholder check failed"))?;
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let items = period_repo::list_assessments_by_shareholder(
+            &mut tx,
+            ctx.cooperative_id(),
+            shareholder_id,
+        )
         .await
         .map_err(db_err("shareholder assessments failed"))?
         .iter()
@@ -803,5 +918,17 @@ pub async fn list_shareholder_assessments(
             generated_at: r.generated_at,
         })
         .collect();
-    Ok(Json(items))
+        Ok(Json(items))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

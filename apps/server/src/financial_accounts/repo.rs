@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -57,20 +56,28 @@ fn account_select() -> String {
 
 /// Account list: substring over the name, optional type/status filters.
 /// Stable ordering by name + id (ADR-010).
+///
+/// `cooperative_id` is the verified business context (M1-P2-C3):
+/// `Some` scopes to that cooperative; `None` is reachable only in the
+/// proven never-bootstrapped lane and matches only legacy NULL rows
+/// (`IS NOT DISTINCT FROM`) — never a global listing.
 pub async fn list_accounts(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     account_type: Option<AccountType>,
     status: Option<AccountStatus>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<FinancialAccountRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let pattern = search.map(|s| format!("%{}%", s.trim().to_lowercase()));
     sqlx::query_as::<_, FinancialAccountRow>(&format!(
         "{account_select} \
         WHERE ($1::text IS NULL OR lower(a.name) LIKE $1) \
           AND ($2::text IS NULL OR a.account_type = $2) \
           AND ($3::text IS NULL OR a.status = $3) \
+          AND a.cooperative_id IS NOT DISTINCT FROM $6 \
         ORDER BY a.name, a.id LIMIT $4 OFFSET $5",
         account_select = account_select()
     ))
@@ -79,7 +86,8 @@ pub async fn list_accounts(
     .bind(status.map(|s| s.as_str()))
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -95,8 +103,10 @@ pub struct AccountOptionRow {
 }
 
 pub async fn list_active_account_options(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
 ) -> Result<Vec<AccountOptionRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT a.id, a.name, a.account_type, a.currency, \
             COALESCE(( \
@@ -106,22 +116,29 @@ pub async fn list_active_account_options(
             ), 0) AS balance \
         FROM financial_accounts a \
         WHERE a.status = 'active' \
+          AND a.cooperative_id IS NOT DISTINCT FROM $1 \
         ORDER BY a.name, a.id",
     )
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
+/// Cooperative-scoped detail (C3): foreign account ids return `None`.
 pub async fn get_account(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<FinancialAccountRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, FinancialAccountRow>(&format!(
-        "{account_select} WHERE a.id = $1",
+        "{account_select} WHERE a.id = $1 \
+         AND a.cooperative_id IS NOT DISTINCT FROM $2",
         account_select = account_select()
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
@@ -147,12 +164,20 @@ pub struct AccountMovementRow {
 
 /// Bounded movement history for one account (ADR-010 offset
 /// pagination; ordering by business time then id).
+/// Cooperative-scoped (C3): movements of foreign accounts are
+/// invisible. The polymorphic `source_type`/`source_id` joins are the
+/// documented C2 exception (no FK possible): every source label join
+/// additionally demands the SOURCE row live in the same scope, so a
+/// malformed or foreign-cooperative source_id can never leak a
+/// business number across the boundary.
 pub async fn list_movements(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     account_id: Uuid,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<AccountMovementRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT m.id, m.account_id, m.direction, m.amount, m.source_type, m.source_id, \
             COALESCE(p.payment_number, t.transfer_number, i.income_number, e.expense_number, \
@@ -163,29 +188,42 @@ pub async fn list_movements(
             count(*) OVER() AS total_count \
         FROM account_movements m \
         LEFT JOIN payments p ON m.source_type = 'payment' AND m.source_id = p.id \
+            AND p.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN account_transfers t ON m.source_type = 'transfer' AND m.source_id = t.id \
+            AND t.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN income_entries i ON m.source_type = 'income' AND m.source_id = i.id \
+            AND i.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN expense_entries e ON m.source_type = 'expense' AND m.source_id = e.id \
+            AND e.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN share_return_settlements s \
             ON m.source_type = 'share_return_settlement' AND m.source_id = s.id \
+            AND s.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN investment_fundings ivf \
             ON m.source_type = 'investment_funding' AND m.source_id = ivf.id \
+            AND ivf.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN investment_incomes ivn \
             ON m.source_type = 'investment_income' AND m.source_id = ivn.id \
+            AND ivn.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN investment_disposal_proceeds ivp \
             ON m.source_type = 'investment_disposal' AND m.source_id = ivp.id \
+            AND ivp.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN investment_disposals ivd ON ivd.id = ivp.disposal_id \
+            AND ivd.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN social_aid_donations sad \
             ON m.source_type = 'social_aid_donation' AND m.source_id = sad.id \
+            AND sad.cooperative_id IS NOT DISTINCT FROM $4 \
         LEFT JOIN social_aid_disbursements say \
             ON m.source_type = 'social_aid_disbursement' AND m.source_id = say.id \
+            AND say.cooperative_id IS NOT DISTINCT FROM $4 \
         WHERE m.account_id = $1 \
+          AND m.cooperative_id IS NOT DISTINCT FROM $4 \
         ORDER BY m.occurred_at DESC, m.id LIMIT $2 OFFSET $3",
     )
     .bind(account_id)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -201,17 +239,21 @@ pub struct PaymentMovementRow {
 }
 
 pub async fn movement_of_payment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     payment_id: Uuid,
 ) -> Result<Option<PaymentMovementRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT m.id, m.account_id, a.name AS account_name, m.direction, m.amount, m.status \
         FROM account_movements m \
         JOIN financial_accounts a ON a.id = m.account_id \
-        WHERE m.source_type = 'payment' AND m.source_id = $1",
+        WHERE m.source_type = 'payment' AND m.source_id = $1 \
+          AND m.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(payment_id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
@@ -235,10 +277,13 @@ pub struct AccountTransferRow {
     pub total_count: i64,
 }
 
+/// Cooperative-scoped detail (C3): foreign transfer ids return `None`.
 pub async fn get_transfer(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<AccountTransferRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT t.id, t.transfer_number, \
             t.source_account_id, sa.name AS source_account_name, \
@@ -249,19 +294,23 @@ pub async fn get_transfer(
         FROM account_transfers t \
         JOIN financial_accounts sa ON sa.id = t.source_account_id \
         JOIN financial_accounts da ON da.id = t.destination_account_id \
-        WHERE t.id = $1",
+        WHERE t.id = $1 \
+          AND t.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
 /// Bounded transfer list, newest business time first.
 pub async fn list_transfers(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<AccountTransferRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT t.id, t.transfer_number, \
             t.source_account_id, sa.name AS source_account_name, \
@@ -272,11 +321,13 @@ pub async fn list_transfers(
         FROM account_transfers t \
         JOIN financial_accounts sa ON sa.id = t.source_account_id \
         JOIN financial_accounts da ON da.id = t.destination_account_id \
+        WHERE t.cooperative_id IS NOT DISTINCT FROM $3 \
         ORDER BY t.transfer_number DESC LIMIT $1 OFFSET $2",
     )
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -284,17 +335,21 @@ pub async fn list_transfers(
 /// (every account is TRY in STEP-008; the GROUP BY keeps the rule
 /// explicit for future value types).
 pub async fn total_balance_by_currency(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
 ) -> Result<Vec<(String, Decimal)>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT a.currency, COALESCE(sum( \
             CASE m.direction WHEN 'inflow' THEN m.amount ELSE -m.amount END \
         ), 0) AS balance \
         FROM financial_accounts a \
         LEFT JOIN account_movements m ON m.account_id = a.id AND m.status = 'active' \
+        WHERE a.cooperative_id IS NOT DISTINCT FROM $1 \
         GROUP BY a.currency ORDER BY a.currency",
     )
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -337,14 +392,17 @@ pub struct CreateAccount {
 }
 
 pub async fn create_account(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateAccount,
 ) -> Result<Uuid, AccountCommandError> {
+    let mut conn = db.conn().await.map_err(AccountCommandError::Database)?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO financial_accounts \
-            (name, account_type, currency, status, description, bank_name, iban, created_by) \
-         VALUES ($1, $2, 'TRY', 'active', $3, $4, $5, $6) RETURNING id",
+            (name, account_type, currency, status, description, bank_name, iban, \
+             created_by, cooperative_id) \
+         VALUES ($1, $2, 'TRY', 'active', $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(&command.name)
     .bind(command.account_type.as_str())
@@ -352,7 +410,8 @@ pub async fn create_account(
     .bind(&command.bank_name)
     .bind(&command.iban)
     .bind(actor)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
     .map_err(AccountCommandError::Database)?;
     Ok(id)
@@ -361,8 +420,10 @@ pub async fn create_account(
 /// Safe metadata update only — `account_type` and `currency` are
 /// IMMUTABLE at creation: changing them after movements would silently
 /// rewrite financial history (docs/19).
+#[allow(clippy::too_many_arguments)]
 pub async fn update_account(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
     name: String,
     description: Option<String>,
@@ -370,10 +431,12 @@ pub async fn update_account(
     iban: Option<String>,
     expected_updated_at: OffsetDateTime,
 ) -> Result<(), AccountCommandError> {
+    let mut conn = db.conn().await.map_err(AccountCommandError::Database)?;
     let updated = sqlx::query(
         "UPDATE financial_accounts SET \
             name = $2, description = $3, bank_name = $4, iban = $5, updated_at = now() \
-         WHERE id = $1 AND updated_at = $6",
+         WHERE id = $1 AND updated_at = $6 \
+           AND cooperative_id IS NOT DISTINCT FROM $7",
     )
     .bind(id)
     .bind(&name)
@@ -381,16 +444,22 @@ pub async fn update_account(
     .bind(&bank_name)
     .bind(&iban)
     .bind(expected_updated_at)
-    .execute(pool)
+    .bind(cooperative_id)
+    .execute(&mut *conn)
     .await
     .map_err(AccountCommandError::Database)?;
     if updated.rows_affected() == 0 {
-        let exists: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM financial_accounts WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(AccountCommandError::Database)?;
+        // Scoped existence check keeps a foreign account
+        // indistinguishable from a missing one (C3 / IDOR rule).
+        let exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM financial_accounts WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(AccountCommandError::Database)?;
         return match exists {
             Some(_) => Err(AccountCommandError::StaleState),
             None => Err(AccountCommandError::NotFound),
@@ -402,22 +471,26 @@ pub async fn update_account(
 /// Controlled lifecycle command: active <-> inactive. History, balance
 /// and movements are untouched — only NEW postings are refused.
 pub async fn change_account_status(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
     target: AccountStatus,
 ) -> Result<AccountStatus, AccountCommandError> {
-    let previous: Option<String> = sqlx::query_scalar(
-        "UPDATE financial_accounts SET status = $2, updated_at = now() \
-         WHERE id = $1 RETURNING status",
-    )
-    .bind(id)
-    .bind(target.as_str())
-    .fetch_optional(pool)
-    .await
-    .map_err(AccountCommandError::Database)?;
-    match previous {
-        Some(_) => Ok(target),
-        None => Err(AccountCommandError::NotFound),
+    let mut conn = db.conn().await.map_err(AccountCommandError::Database)?;
+    // R3B: status is a lifecycle column — the write goes through the
+    // permission-checked definer; the verified scope is re-derived
+    // from the sealed context inside the database.
+    let updated: bool =
+        sqlx::query_scalar("SELECT public.app_financial_account_set_status($1, $2, $3)")
+            .bind(id)
+            .bind(target.as_str())
+            .bind(cooperative_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AccountCommandError::Database)?;
+    match updated {
+        true => Ok(target),
+        false => Err(AccountCommandError::NotFound),
     }
 }
 
@@ -427,33 +500,48 @@ pub async fn change_account_status(
 
 /// Lock account rows `FOR UPDATE` in ascending id order — the single
 /// deterministic lock prefix every balance-affecting command shares.
-/// Returns (id -> (status, currency)).
+/// Returns (id -> (status, currency, cooperative_id)).
+///
+/// Cooperative ownership is returned rather than filtered (C3):
+/// callers with a verified context compare it against the row's
+/// `cooperative_id`, while modules whose own C3 batch has not landed
+/// yet derive movement/reversal scope from the LOCKED row itself — a
+/// movement always lives in its account's cooperative.
 pub async fn lock_accounts(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ids: &[Uuid],
-) -> Result<HashMap<Uuid, (String, String)>, AccountCommandError> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, status, currency FROM financial_accounts \
-         WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+) -> Result<HashMap<Uuid, (String, String, Option<Uuid>)>, AccountCommandError> {
+    let rows: Vec<(Uuid, String, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, status, currency, cooperative_id \
+         FROM public.app_lock_accounts($1)",
     )
     .bind(ids)
     .fetch_all(tx.as_mut())
     .await
     .map_err(AccountCommandError::Database)?;
-    Ok(rows.into_iter().map(|(id, s, c)| (id, (s, c))).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(id, s, c, coop)| (id, (s, c, coop)))
+        .collect())
 }
 
 /// Derived balance of an account — call ONLY after lock_accounts so
-/// the value is stable inside the command transaction.
+/// the value is stable inside the command transaction. `cooperative_id`
+/// is the owning scope of the locked account row (C3): movements are
+/// always written in their account's cooperative, so the predicate is
+/// a consistency assertion, never a narrowing of legitimate rows.
 pub async fn locked_balance(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     account_id: Uuid,
 ) -> Result<Decimal, AccountCommandError> {
     sqlx::query_scalar::<_, Option<Decimal>>(
         "SELECT sum(CASE direction WHEN 'inflow' THEN amount ELSE -amount END) \
-         FROM account_movements WHERE account_id = $1 AND status = 'active'",
+         FROM account_movements WHERE account_id = $1 AND status = 'active' \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(account_id)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map(|balance| balance.unwrap_or_default())
@@ -471,18 +559,29 @@ pub async fn locked_balance(
 /// underlying rows (`social_aid` commands) also holds that same lock
 /// (canonical prefix fund -> account), so a caller holding the account
 /// lock is serialized against every concurrent reservation mutation.
+/// C3 note: deliberately NOT cooperative-scoped. Social Aid ledger
+/// rows are written by the `social_aid` module whose own C3 batch has
+/// not landed yet — legacy/pre-batch rows carry NULL cooperative_id
+/// and filtering them out would under-count the reservation and allow
+/// over-spending restricted cash. The `account_id` predicate already
+/// confines the sum to this account's cooperative; the explicit scope
+/// lands with the Social Aid batch.
 pub async fn locked_reserved_social_aid(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     account_id: Uuid,
 ) -> Result<Decimal, AccountCommandError> {
     sqlx::query_scalar::<_, Option<Decimal>>(
         "SELECT \
             COALESCE((SELECT sum(amount) FROM social_aid_donations \
-                      WHERE financial_account_id = $1 AND status = 'posted'), 0) \
+                      WHERE financial_account_id = $1 AND status = 'posted' \
+                        AND cooperative_id IS NOT DISTINCT FROM $2), 0) \
           - COALESCE((SELECT sum(amount) FROM social_aid_disbursements \
-                      WHERE financial_account_id = $1 AND status = 'posted'), 0)",
+                      WHERE financial_account_id = $1 AND status = 'posted' \
+                        AND cooperative_id IS NOT DISTINCT FROM $2), 0)",
     )
     .bind(account_id)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map(|v| v.unwrap_or_default())
@@ -497,10 +596,11 @@ pub async fn locked_reserved_social_aid(
 /// cash (PILOT-FIX-001 user-approved hard reservation).
 pub async fn locked_spendable_balance(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     account_id: Uuid,
 ) -> Result<Decimal, AccountCommandError> {
-    let balance = locked_balance(tx, account_id).await?;
-    let reserved = locked_reserved_social_aid(tx, account_id).await?;
+    let balance = locked_balance(tx, cooperative_id, account_id).await?;
+    let reserved = locked_reserved_social_aid(tx, cooperative_id, account_id).await?;
     Ok(balance - reserved)
 }
 
@@ -514,6 +614,11 @@ pub struct NewMovement {
     pub source_id: Uuid,
     pub occurred_at: OffsetDateTime,
     pub actor: Uuid,
+    /// C3: the owning cooperative — always the cooperative of the
+    /// account the movement lands on (a movement can never live in a
+    /// different cooperative than its account). Callers pass the value
+    /// from `lock_accounts` or their verified context.
+    pub cooperative_id: Option<Uuid>,
 }
 
 /// Insert a movement inside the caller's transaction.
@@ -525,8 +630,9 @@ pub async fn insert_movement(
 ) -> Result<Uuid, AccountCommandError> {
     sqlx::query_scalar(
         "INSERT INTO account_movements \
-            (account_id, direction, amount, source_type, source_id, occurred_at, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+            (account_id, direction, amount, source_type, source_id, occurred_at, \
+             created_by, cooperative_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(movement.account_id)
     .bind(movement.direction.as_str())
@@ -535,6 +641,7 @@ pub async fn insert_movement(
     .bind(movement.source_id)
     .bind(movement.occurred_at)
     .bind(movement.actor)
+    .bind(movement.cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(AccountCommandError::Database)
@@ -543,28 +650,36 @@ pub async fn insert_movement(
 /// Status-based movement reversal inside the caller's transaction
 /// (docs/19: original preserved, actor/time/reason recorded). Returns
 /// the number of legs reversed.
+/// `cooperative_id` is the scope the caller verified for the SOURCE
+/// record (C3): polymorphic `source_id` has no FK, so the predicate is
+/// the ownership validation — a source_id pointing into another
+/// cooperative's rows can never flip foreign movements.
 pub async fn reverse_movements_of_source(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     source: MovementSource,
     source_id: Uuid,
     now: OffsetDateTime,
     actor: Uuid,
     reason: &str,
 ) -> Result<u64, AccountCommandError> {
-    let affected = sqlx::query(
-        "UPDATE account_movements SET status = 'reversed', \
-            reversed_at = $3, reversed_by = $4, reversal_reason = $5 \
-         WHERE source_type = $1 AND source_id = $2 AND status = 'active'",
-    )
-    .bind(source.as_str())
-    .bind(source_id)
-    .bind(now)
-    .bind(actor)
-    .bind(reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(AccountCommandError::Database)?;
-    Ok(affected.rows_affected())
+    // R3B: the reversal write runs inside the permission-checked
+    // definer — the source domain's .manage permission is re-verified
+    // in the database, the scope comes from the seal, not the caller.
+    // `cooperative_id` stays bound only to the callers' scoped locks
+    // above; the definer re-derives it from the verified context.
+    let affected: i64 =
+        sqlx::query_scalar("SELECT public.app_movements_reverse_of_source($1, $2, $3, $4, $5, $6)")
+            .bind(source.as_str())
+            .bind(source_id)
+            .bind(now)
+            .bind(actor)
+            .bind(reason)
+            .bind(cooperative_id)
+            .fetch_one(tx.as_mut())
+            .await
+            .map_err(AccountCommandError::Database)?;
+    Ok(affected as u64)
 }
 
 // ------------------------------------------------------------------
@@ -592,21 +707,27 @@ pub struct TransferOutcome {
 /// (active / distinct / same currency / sufficient source balance)
 /// -> insert transfer -> insert both legs -> COMMIT.
 pub async fn post_transfer(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: PostTransfer,
 ) -> Result<TransferOutcome, AccountCommandError> {
+    let mut tx = db.begin().await.map_err(AccountCommandError::Database)?;
     if command.source_account_id == command.destination_account_id {
         return Err(AccountCommandError::SameAccount);
     }
-    let mut tx = pool.begin().await.map_err(AccountCommandError::Database)?;
 
-    // 1. Idempotent replay short-circuit.
+    // 1. Idempotent replay short-circuit — scoped so a foreign
+    //    cooperative's key never replays one of ITS transfers (C3).
+    //    The key itself stays globally unique until C5: a cross-coop
+    //    collision lands in the ON CONFLICT re-read below as NotFound.
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, transfer_number, idempotency_fingerprint FROM account_transfers \
-         WHERE idempotency_key = $1",
+         WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(AccountCommandError::Database)?;
@@ -622,18 +743,25 @@ pub async fn post_transfer(
         });
     }
 
-    // 2. Deterministic lock order: ascending account id.
+    // 2. Deterministic lock order: ascending account id. Locked rows
+    //    carry their owning cooperative; anything outside the verified
+    //    scope is NotFound (IDOR rule, C3).
     let mut ids = [command.source_account_id, command.destination_account_id];
     ids.sort_unstable();
     let locked = lock_accounts(&mut tx, &ids).await?;
-    let Some((source_status, source_currency)) = locked.get(&command.source_account_id) else {
+    let Some((source_status, source_currency, source_coop)) =
+        locked.get(&command.source_account_id)
+    else {
         return Err(AccountCommandError::NotFound);
     };
-    let Some((destination_status, destination_currency)) =
+    let Some((destination_status, destination_currency, destination_coop)) =
         locked.get(&command.destination_account_id)
     else {
         return Err(AccountCommandError::NotFound);
     };
+    if *source_coop != cooperative_id || *destination_coop != cooperative_id {
+        return Err(AccountCommandError::NotFound);
+    }
     if *source_status != AccountStatus::Active.as_str()
         || *destination_status != AccountStatus::Active.as_str()
     {
@@ -647,22 +775,26 @@ pub async fn post_transfer(
     //    PILOT-FIX-001 hard reservation: an ordinary transfer may only
     //    spend the UNRESTRICTED portion — Social Aid reservations are
     //    not transferable cooperative cash.
-    let source_balance = locked_balance(&mut tx, command.source_account_id).await?;
+    let source_balance = locked_balance(&mut tx, cooperative_id, command.source_account_id).await?;
     if command.amount > source_balance {
         return Err(AccountCommandError::InsufficientFunds);
     }
-    let source_reserved = locked_reserved_social_aid(&mut tx, command.source_account_id).await?;
+    let source_reserved =
+        locked_reserved_social_aid(&mut tx, cooperative_id, command.source_account_id).await?;
     if command.amount > source_balance - source_reserved {
         return Err(AccountCommandError::InsufficientUnrestrictedFunds);
     }
 
     // 4. Transfer + the two paired legs — one transaction, or nothing.
+    //    Every new row carries the verified cooperative scope (C3).
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO account_transfers \
             (source_account_id, destination_account_id, amount, currency, \
-             occurred_at, note, status, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'posted', $7, $8, $9) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             occurred_at, note, status, idempotency_key, idempotency_fingerprint, \
+             created_by, cooperative_id, transfer_number) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'posted', $7, $8, $9, $10, \
+             allocate_document_number($10, 'account_transfers.transfer_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, transfer_number",
     )
     .bind(command.source_account_id)
@@ -674,22 +806,34 @@ pub async fn post_transfer(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(AccountCommandError::Database)?;
 
     let (transfer_id, transfer_number) = match inserted {
         Some(row) => row,
         None => {
-            tx.rollback().await.map_err(AccountCommandError::Database)?;
             let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
                 "SELECT id, transfer_number, idempotency_fingerprint FROM account_transfers \
-                 WHERE idempotency_key = $1",
+                 WHERE idempotency_key = $1 \
+                   AND cooperative_id IS NOT DISTINCT FROM $2",
             )
             .bind(&command.idempotency_key)
-            .fetch_optional(pool)
+            .bind(cooperative_id)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(AccountCommandError::Database)?;
+            tx.rollback().await.map_err(AccountCommandError::Database)?;
+            // Scoped re-read: a conflicting row owned by another
+            // cooperative is indistinguishable from absence (C3).
             let Some((id, number, fingerprint)) = existing else {
                 return Err(AccountCommandError::NotFound);
             };
@@ -714,6 +858,7 @@ pub async fn post_transfer(
             source_id: transfer_id,
             occurred_at: command.occurred_at,
             actor,
+            cooperative_id,
         },
     )
     .await?;
@@ -727,6 +872,7 @@ pub async fn post_transfer(
             source_id: transfer_id,
             occurred_at: command.occurred_at,
             actor,
+            cooperative_id,
         },
     )
     .await?;
@@ -744,73 +890,40 @@ pub async fn post_transfer(
 /// A reversal that would take either account below zero is rejected:
 /// the money physically left; restore it first, then reverse.
 pub async fn reverse_transfer(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     transfer_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), AccountCommandError> {
-    let mut tx = pool.begin().await.map_err(AccountCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(AccountCommandError::Database)?;
 
-    let transfer: Option<(String, i64, Uuid, Uuid, Decimal)> = sqlx::query_as(
-        "SELECT status, transfer_number, source_account_id, destination_account_id, amount \
-         FROM account_transfers WHERE id = $1 FOR UPDATE",
-    )
-    .bind(transfer_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(AccountCommandError::Database)?;
-    let Some((status, transfer_number, source_id, destination_id, amount)) = transfer else {
-        return Err(AccountCommandError::NotFound);
-    };
-    if status != "posted" {
-        tx.rollback().await.map_err(AccountCommandError::Database)?;
-        return Ok((true, transfer_number));
-    }
-
-    // Lock both accounts (same deterministic order). Reversal removes
-    // the DESTINATION inflow (source gains back — it cannot go
-    // negative): if the destination already paid the value out, the
-    // reversal would fabricate a negative balance — reject (operator
-    // restores funds first, then reverses).
-    let mut ids = [source_id, destination_id];
-    ids.sort_unstable();
-    lock_accounts(&mut tx, &ids).await?;
-    let destination_balance = locked_balance(&mut tx, destination_id).await?;
-    if destination_balance - amount < Decimal::ZERO {
-        return Err(AccountCommandError::InsufficientFunds);
-    }
-    // Reversal removes the destination inflow: the post-reversal
-    // physical balance must still cover the Social Aid reservation
-    // held in that account (PILOT-FIX-001).
-    let destination_reserved = locked_reserved_social_aid(&mut tx, destination_id).await?;
-    if destination_balance - amount < destination_reserved {
-        return Err(AccountCommandError::InsufficientUnrestrictedFunds);
-    }
-
-    reverse_movements_of_source(
-        &mut tx,
-        MovementSource::Transfer,
-        transfer_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await?;
-
-    sqlx::query(
-        "UPDATE account_transfers SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: the complete reversal package (transfer lock + status,
+    // both account locks in canonical order, destination balance and
+    // Social-Aid reservation checks, both movement legs, status flip)
+    // runs as ONE permission-checked definer — the runtime role can
+    // no longer invoke a partial reversal.
+    let (replayed, transfer_number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, transfer_number \
+         FROM public.app_transfer_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(transfer_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(AccountCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => AccountCommandError::NotFound,
+        Some("insufficient_funds") => AccountCommandError::InsufficientFunds,
+        Some("insufficient_unrestricted_funds") => {
+            AccountCommandError::InsufficientUnrestrictedFunds
+        }
+        _ => AccountCommandError::Database(error),
+    })?;
 
     tx.commit().await.map_err(AccountCommandError::Database)?;
-    Ok((false, transfer_number))
+    Ok((replayed, transfer_number))
 }

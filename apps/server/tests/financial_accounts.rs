@@ -80,7 +80,16 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("db");
-    app_db::run_migrations(&pool).await.expect("migrations");
+    app_db::run_test_migrations(&pool)
+        .await
+        .expect("migrations");
+    // C5-3: cooperative_id is NOT NULL on every business table — the
+    // NULL legacy lane is closed. Bootstrap up front so fixtures and
+    // API writes land in the bootstrap cooperative; user helpers add
+    // memberships explicitly.
+    let _ = kooperatif_server::tenant::repo::bootstrap_initial_cooperative(&pool, "Ana Kooperatif")
+        .await
+        .expect("bootstrap cooperative");
 
     let config = AuthConfig {
         allowed_origins: vec![ORIGIN.to_string()],
@@ -135,12 +144,21 @@ async fn create_admin(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    let user = users::create_user(pool, username, "Test", &hash)
+    let user = users::create_user(pool, username, "Test", &hash, TEST_PASSWORD)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO user_role_assignments (user_id, role_id) \
                  SELECT $1, id FROM roles WHERE name = 'Sistem Yöneticisi'",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Post-C5-3: suites run inside the bootstrap cooperative —
+    // membership is required for the business lane.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status)          SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
     )
     .bind(user.id)
     .execute(pool)
@@ -156,10 +174,19 @@ async fn create_plain_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    users::create_user(pool, username, "Plain", &hash)
+    let user = users::create_user(pool, username, "Plain", &hash, TEST_PASSWORD)
         .await
-        .unwrap()
-        .id
+        .unwrap();
+    // Active member with no roles — cooperative lane resolves, the
+    // business permission check still denies.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status)          SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    user.id
 }
 
 async fn login(app: &axum::Router, peer: SocketAddr, username: &str) -> (String, String) {
@@ -615,10 +642,12 @@ async fn legacy_null_account_payment_reverses_without_account_effect() {
         .unwrap();
 
     // Simulate a pre-STEP-008 row: posted Payment, NULL destination,
-    // required idempotency columns filled.
+    // required idempotency columns filled — bound to the bootstrap
+    // cooperative (C5-3 closed the NULL-ownership lane).
     let payer: Uuid = sqlx::query_scalar(
-        "INSERT INTO persons (first_name, last_name, search_name) \
-         VALUES ('Eski', 'Kayıt', 'eski kayit') RETURNING id",
+        "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+         VALUES ('Eski', 'Kayıt', 'eski kayit', \
+         (SELECT id FROM cooperatives WHERE is_bootstrap)) RETURNING id",
     )
     .fetch_one(&test.pool)
     .await
@@ -626,8 +655,12 @@ async fn legacy_null_account_payment_reverses_without_account_effect() {
     let payment_id: Uuid = sqlx::query_scalar(
         "INSERT INTO payments \
             (payer_person_id, amount, currency, method, received_at, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, 100.00, 'TRY', 'cash', now(), 'posted', 'legacy-1', '{}', $2) \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             payment_number) \
+         VALUES ($1, 100.00, 'TRY', 'cash', now(), 'posted', 'legacy-1', '{}', $2, \
+         (SELECT id FROM cooperatives WHERE is_bootstrap), \
+         allocate_document_number((SELECT id FROM cooperatives WHERE is_bootstrap), \
+             'payments.payment_number')) \
          RETURNING id",
     )
     .bind(payer)

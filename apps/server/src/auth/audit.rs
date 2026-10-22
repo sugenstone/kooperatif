@@ -5,6 +5,7 @@
 //! stored here: passwords, raw session tokens, cookie values, CSRF
 //! secrets, password hashes (docs/19, docs/22).
 
+use crate::http::error::ApiError;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -204,9 +205,108 @@ impl SecurityEventType {
     }
 }
 
+/// MANDATORY lane (S2B, migration 0048): the event is written INSIDE
+/// the caller's sealed request transaction — it commits atomically with
+/// the protected operation and rolls back with it. Actor, session and
+/// cooperative attribution are derived from the verified context seal
+/// in the database (`app_ctx_audit`); the caller supplies only the
+/// event type and metadata. A write failure fails the operation —
+/// callers must propagate with `?`, never swallow.
+pub async fn record_tx(
+    conn: &mut sqlx::PgConnection,
+    event_type: SecurityEventType,
+    metadata: serde_json::Value,
+) -> Result<(), ApiError> {
+    sqlx::query("SELECT public.app_ctx_audit($1, $2)")
+        .bind(event_type.as_str())
+        .bind(metadata)
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, event = event_type.as_str(), "mandatory security event write failed");
+            ApiError::Internal
+        })?;
+    Ok(())
+}
+
+/// Session-bound platform event (S2B best-effort): the definer derives
+/// the actor and session from the presented token hash and forces
+/// cooperative attribution to NULL. Used where an audit write must not
+/// block the action it describes (login success). Failures are loud
+/// (`tracing::error`) but never change the response.
+pub async fn record_platform_session(
+    pool: &PgPool,
+    session_token_hash: &[u8],
+    event_type: SecurityEventType,
+    metadata: serde_json::Value,
+    now: time::OffsetDateTime,
+) {
+    let result = sqlx::query("SELECT public.app_session_audit_platform($1, $2, $3, $4)")
+        .bind(session_token_hash)
+        .bind(event_type.as_str())
+        .bind(metadata)
+        .bind(now)
+        .execute(pool)
+        .await;
+    if let Err(error) = result {
+        tracing::error!(error = %error, event = event_type.as_str(), "session-bound platform event write failed");
+    }
+}
+
+/// Session-bound cooperative event (S2B best-effort): for denial events
+/// whose protected transaction was already rolled back
+/// (lockout_prevented). The definer re-verifies the session and an
+/// active membership in the claimed cooperative — cross-cooperative
+/// attribution is rejected server-side. Failures are loud but cannot
+/// and must not change the denial outcome.
+pub async fn record_scoped_session(
+    pool: &PgPool,
+    session_token_hash: &[u8],
+    event_type: SecurityEventType,
+    cooperative_id: Option<Uuid>,
+    metadata: serde_json::Value,
+    now: time::OffsetDateTime,
+) {
+    let result = sqlx::query("SELECT public.app_session_audit_scoped($1, $2, $3, $4, $5)")
+        .bind(session_token_hash)
+        .bind(cooperative_id)
+        .bind(event_type.as_str())
+        .bind(metadata)
+        .bind(now)
+        .execute(pool)
+        .await;
+    if let Err(error) = result {
+        tracing::error!(error = %error, event = event_type.as_str(), "session-bound scoped event write failed");
+    }
+}
+
+/// Unauthenticated login-failure lane (S2B best-effort): the definer
+/// hardcodes event_type `login_failed` and NULL attribution — the
+/// caller can only supply the metadata payload. Authentication must
+/// never fail because an audit write did.
+pub async fn record_login_failed(
+    pool: &PgPool,
+    metadata: serde_json::Value,
+    now: time::OffsetDateTime,
+) {
+    let result = sqlx::query("SELECT public.app_audit_login_failed($1, $2)")
+        .bind(metadata)
+        .bind(now)
+        .execute(pool)
+        .await;
+    if let Err(error) = result {
+        tracing::error!(error = %error, "login_failed event write failed");
+    }
+}
+
 /// Record one durable security event. Failures are logged and swallowed
 /// by design: an audit-write failure must not flip the security outcome
 /// of an operation that already happened (and must never 500 a login).
+///
+/// OWNER-LANE ONLY since S2B: this direct INSERT is retained for the
+/// privileged administration/CLI pool (main.rs). Runtime-pool callers
+/// go through `record_tx` / `record_*_session` / `record_login_failed` —
+/// `kooperatif_app` no longer holds INSERT on `security_events`.
 pub async fn record(
     pool: &PgPool,
     event_type: SecurityEventType,

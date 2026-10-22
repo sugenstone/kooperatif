@@ -92,6 +92,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -132,7 +133,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -191,7 +192,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c3c5 Test", &hash)
+    users::create_user(pool, username, "P1c3c5 Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -344,14 +345,15 @@ async fn bootstrap_operator(pool: &PgPool, username: &str) -> (Uuid, Uuid) {
 
 /// Canonical Person row — governance members and social-aid donors/
 /// beneficiaries are Person facts, never derived from Users.
-async fn create_person(pool: &PgPool, first: &str, last: &str) -> Uuid {
+async fn create_person(pool: &PgPool, coop: Option<Uuid>, first: &str, last: &str) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO persons (first_name, last_name, search_name) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(first)
     .bind(last)
     .bind(format!("{first} {last}").to_lowercase())
+    .bind(coop)
     .fetch_one(pool)
     .await
     .expect("person")
@@ -1068,7 +1070,7 @@ async fn mutations_record_cooperative_scoped_audit() {
     let Some(test) = setup().await else { return };
     let (_, coop) = bootstrap_operator(&test.pool, "audit_op").await;
     let (cookie, csrf) = login(&test.app, test.peer, "audit_op").await;
-    let member = create_person(&test.pool, "Üye", "Bir").await;
+    let member = create_person(&test.pool, Some(coop), "Üye", "Bir").await;
     let account = make_account(&test, &cookie, &csrf, "Kasa").await;
 
     let fund = make_fund(&test, &cookie, &csrf, "Denetim Fonu", "f-audit").await;
@@ -1181,12 +1183,12 @@ async fn mutations_record_cooperative_scoped_audit() {
 #[tokio::test]
 async fn scoped_social_aid_financial_flow_parity() {
     let Some(test) = setup().await else { return };
-    bootstrap_operator(&test.pool, "fin_op").await;
+    let (_, coop) = bootstrap_operator(&test.pool, "fin_op").await;
     let (cookie, csrf) = login(&test.app, test.peer, "fin_op").await;
     let account = make_account(&test, &cookie, &csrf, "Kasa").await;
     let account_b = make_account(&test, &cookie, &csrf, "Banka").await;
     fund_account(&test, &cookie, &csrf, account, "500.00", "fa-1").await;
-    let donor = create_person(&test.pool, "Bağışçı", "Kişi").await;
+    let donor = create_person(&test.pool, Some(coop), "Bağışçı", "Kişi").await;
     let fund = make_fund(&test, &cookie, &csrf, "Gıda Fonu", "f-1").await;
     let fund_id = fund["id"].as_str().unwrap().to_string();
 
@@ -1419,11 +1421,11 @@ async fn scoped_social_aid_financial_flow_parity() {
 #[tokio::test]
 async fn scoped_governance_lifecycle_parity() {
     let Some(test) = setup().await else { return };
-    bootstrap_operator(&test.pool, "gov_op").await;
+    let (_, coop) = bootstrap_operator(&test.pool, "gov_op").await;
     let (cookie, csrf) = login(&test.app, test.peer, "gov_op").await;
-    let member_a = create_person(&test.pool, "Ayşe", "Yılmaz").await;
-    let member_b = create_person(&test.pool, "Mehmet", "Demir").await;
-    let outsider = create_person(&test.pool, "Dışarı", "Kişi").await;
+    let member_a = create_person(&test.pool, Some(coop), "Ayşe", "Yılmaz").await;
+    let member_b = create_person(&test.pool, Some(coop), "Mehmet", "Demir").await;
+    let outsider = create_person(&test.pool, Some(coop), "Dışarı", "Kişi").await;
 
     let body = make_body(&test, &cookie, &csrf, "Yönetim Kurulu", "b-1").await;
     let body_id = body["id"].as_str().unwrap().to_string();
@@ -1680,9 +1682,9 @@ async fn scoped_governance_lifecycle_parity() {
 #[tokio::test]
 async fn replay_and_concurrent_same_key_single_write() {
     let Some(test) = setup().await else { return };
-    bootstrap_operator(&test.pool, "idem_op").await;
+    let (_, coop) = bootstrap_operator(&test.pool, "idem_op").await;
     let (cookie, csrf) = login(&test.app, test.peer, "idem_op").await;
-    let member = create_person(&test.pool, "Üye", "Bir").await;
+    let member = create_person(&test.pool, Some(coop), "Üye", "Bir").await;
     let account = make_account(&test, &cookie, &csrf, "Kasa").await;
     let fund = make_fund(&test, &cookie, &csrf, "Fon", "f-1").await;
     let fund_id = fund["id"].as_str().unwrap().to_string();
@@ -1856,9 +1858,11 @@ async fn replay_and_concurrent_same_key_single_write() {
 }
 
 #[tokio::test]
-async fn never_bootstrapped_lane_keeps_legacy_semantics() {
+async fn never_bootstrapped_lane_reads_but_cannot_write_unowned() {
     let Some(test) = setup().await else { return };
-    // No bootstrap at all — the global lane is untouched.
+    // No bootstrap at all — the global lane still opens for READS.
+    // C5-3 closed the write side: cooperative_id is NOT NULL on all
+    // business tables, so an ownerless write cannot commit.
     let legacy = create_user(&test.pool, "kuresel").await;
     grant_role(&test.pool, legacy, "global-op", None, OPERATOR_PERMS).await;
     let (cookie, csrf) = login(&test.app, test.peer, "kuresel").await;
@@ -1868,10 +1872,26 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
             request_json(&test, Method::GET, path, &cookie, None, None, None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
-    let fund = make_fund(&test, &cookie, &csrf, "Eski Fon", "f-g").await;
-    assert_eq!(fund["status"], "active");
-    let body = make_body(&test, &cookie, &csrf, "Eski Kurul", "b-g").await;
-    assert_eq!(body["status"], "active");
+
+    let (status, body) = request_json(
+        &test,
+        Method::POST,
+        "/api/social-aid/funds",
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "name": "Eski Fon", "idempotencyKey": "f-g" })),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "unowned business write must fail, got {status}: {body}"
+    );
+    let funds: i64 = sqlx::query_scalar("SELECT count(*) FROM social_aid_funds")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(funds, 0, "no unowned fund may be written");
 
     test.cleanup().await;
 }

@@ -97,6 +97,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -134,7 +135,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -195,7 +196,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c1 Test", &hash)
+    users::create_user(pool, username, "P1c1 Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -308,9 +309,9 @@ async fn headerless_pins_bootstrap_and_ignores_session_default() {
     repo::add_member(&test.pool, "B Kooperatifi", user, None)
         .await
         .expect("B membership");
-    let (cookie, session_id) = session_for(&test.pool, user).await;
+    let (cookie, _session_id) = session_for(&test.pool, user).await;
     // Session default points at B — legacy endpoints must ignore it.
-    repo::set_session_cooperative(&test.pool, session_id, Some(coop_b))
+    repo::set_session_cooperative(&test.pool, token::hash_token(&cookie), coop_b)
         .await
         .expect("session default");
 
@@ -509,12 +510,14 @@ async fn require_business_applies_verified_legacy_attribution() {
                 username: "x".into(),
                 display_name: "x".into(),
                 session_id: Uuid::new_v4(),
+                session_token_hash: [0u8; 32],
+                authed_at: OffsetDateTime::UNIX_EPOCH,
                 session_created_at: OffsetDateTime::now_utc(),
                 session_expires_at: OffsetDateTime::now_utc(),
                 csrf_token: "c".into(),
                 active_cooperative_id: None,
             },
-            scope: kooperatif_server::tenant::BusinessScope::Bootstrap {
+            scope: kooperatif_server::tenant::BusinessScope::Cooperative {
                 cooperative_id: coop,
                 cooperative_name: "Ana".into(),
             },

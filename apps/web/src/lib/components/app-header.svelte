@@ -13,6 +13,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
+	import CooperativeSwitcher from '$lib/components/cooperative-switcher.svelte';
 	import { auth, logout } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { useSidebar } from '$lib/components/ui/sidebar/index.js';
@@ -43,6 +44,7 @@
 		'/yonetim': 'nav.governance',
 		'/roller': 'nav.roles',
 		'/kullanicilar': 'nav.users',
+		'/uyelikler': 'nav.memberships',
 		'/oturumlar': 'auth.shell.sessions'
 	};
 
@@ -99,6 +101,7 @@
 	{/if}
 
 	<div class="ms-auto flex items-center gap-1">
+		<CooperativeSwitcher />
 		<span
 			class="me-1 hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground sm:flex"
 			title={t(connectionLabel)}

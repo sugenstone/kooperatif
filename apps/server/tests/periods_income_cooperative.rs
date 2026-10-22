@@ -88,6 +88,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -128,7 +129,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -187,7 +188,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c3c1 Test", &hash)
+    users::create_user(pool, username, "P1c3c1 Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -350,13 +351,21 @@ fn period_body() -> Value {
 
 /// A cash account written directly — the `financial_accounts` router
 /// is still on global authorization (P1-c3c2+), so test fixtures must
-/// not depend on it.
+/// not depend on it. C3: bound to the CURRENT verified scope — the
+/// bootstrap cooperative when bootstrapped, NULL otherwise (scoped
+/// account locks never see NULL rows).
 async fn make_account(pool: &PgPool, created_by: Uuid) -> Uuid {
+    let coop: Option<Uuid> =
+        sqlx::query_scalar("SELECT bootstrap_cooperative_id FROM installation_state")
+            .fetch_one(pool)
+            .await
+            .expect("installation scope");
     sqlx::query_scalar(
-        "INSERT INTO financial_accounts (name, account_type, created_by) \
-         VALUES ('Kasa', 'cash', $1) RETURNING id",
+        "INSERT INTO financial_accounts (name, account_type, created_by, cooperative_id) \
+         VALUES ('Kasa', 'cash', $1, $2) RETURNING id",
     )
     .bind(created_by)
+    .bind(coop)
     .fetch_one(pool)
     .await
     .expect("account")
@@ -1168,9 +1177,11 @@ async fn scoped_financial_flow_parity() {
 }
 
 #[tokio::test]
-async fn never_bootstrapped_lane_keeps_legacy_semantics() {
+async fn never_bootstrapped_lane_reads_but_cannot_write_unowned() {
     let Some(test) = setup().await else { return };
-    // No bootstrap at all — the documented legacy global lane.
+    // No bootstrap at all — the legacy global lane still opens for
+    // READS. C5-3 closed the write side: cooperative_id is NOT NULL on
+    // all business tables, so an ownerless write cannot commit.
     let user = create_user(&test.pool, "eski_serit").await;
     grant_role(&test.pool, user, "legacy-op", None, OPERATOR_PERMS).await;
     let (cookie, csrf) = login(&test.app, test.peer, "eski_serit").await;
@@ -1196,6 +1207,7 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+
     let (status, body) = request_json(
         &test,
         Method::POST,
@@ -1206,7 +1218,15 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
         Some(period_body()),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        !status.is_success(),
+        "unowned business write must fail, got {status}: {body}"
+    );
+    let periods: i64 = sqlx::query_scalar("SELECT count(*) FROM periods")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(periods, 0, "no unowned period may be written");
 
     test.cleanup().await;
 }

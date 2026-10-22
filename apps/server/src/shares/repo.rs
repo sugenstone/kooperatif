@@ -3,7 +3,6 @@
 //! allocation, owner change (transfer/sale) and lifecycle transitions.
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -69,12 +68,17 @@ FROM shares sh ";
 /// Share list: folded substring over owner name, guardian name, or an
 /// exact share/family number when the term is a positive integer.
 /// Stable ordering by share number (ADR-010).
+/// `cooperative_id` is the verified business context (M1-P2-C3):
+/// `Some` scopes to that cooperative; `None` is reachable only in the
+/// proven never-bootstrapped lane and matches only legacy NULL rows.
 pub async fn list_shares(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<ShareListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let raw = search.map(str::trim).filter(|s| !s.is_empty());
     let folded: Option<String> = raw.map(|term| format!("%{}%", party_model::fold_search(term)));
     let number: Option<i64> = raw
@@ -83,7 +87,7 @@ pub async fn list_shares(
 
     let sql = format!(
         "{SHARE_LIST_SELECT}{OWNER_JOINS} \
-         WHERE ( \
+         WHERE sh.cooperative_id IS NOT DISTINCT FROM $5 AND ( \
             $1::text IS NULL \
             OR op.search_name LIKE $1 OR ogp.search_name LIKE $1 \
             OR ($2::bigint IS NOT NULL AND (sh.share_number = $2 OR ofm.sequence_number = $2)) \
@@ -96,32 +100,51 @@ pub async fn list_shares(
         .bind(number)
         .bind((page - 1) * page_size)
         .bind(page_size)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
 /// Currently held shares of one shareholder (shareholder detail
 /// "Hisseler" section; §66). Open intervals only; share status is
 /// carried so voided/suspended shares remain distinguishable.
+/// Cooperative-scoped (C3): a shareholder id from another cooperative
+/// yields an empty result without disclosure.
 pub async fn list_shares_by_shareholder(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<ShareListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let sql = format!(
         "{SHARE_LIST_SELECT}{OWNER_JOINS} \
-         WHERE os.id = $1 ORDER BY sh.share_number"
+         WHERE os.id = $1 \
+           AND os.cooperative_id IS NOT DISTINCT FROM $2 \
+           AND sh.cooperative_id IS NOT DISTINCT FROM $2 \
+         ORDER BY sh.share_number"
     );
     sqlx::query_as::<_, ShareListRow>(&sql)
         .bind(shareholder_id)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
-pub async fn find_share(pool: &PgPool, id: Uuid) -> Result<Option<ShareListRow>, sqlx::Error> {
-    let sql = format!("{SHARE_LIST_SELECT}{OWNER_JOINS} WHERE sh.id = $1");
+/// Cooperative-scoped detail (C3): foreign share ids return `None`.
+pub async fn find_share(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<ShareListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
+    let sql = format!(
+        "{SHARE_LIST_SELECT}{OWNER_JOINS} \
+         WHERE sh.id = $1 AND sh.cooperative_id IS NOT DISTINCT FROM $2"
+    );
     let mut rows = sqlx::query_as::<_, ShareListRow>(&sql)
         .bind(id)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await?;
     Ok(rows.pop())
 }
@@ -155,10 +178,12 @@ pub struct ShareEventRow {
 /// Append-oriented business history (§53): chronological share events
 /// with canonical identity on both sides. Bounded for safety (§77).
 pub async fn share_event_history(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     share_id: Uuid,
     limit: i64,
 ) -> Result<Vec<ShareEventRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, ShareEventRow>(
         "SELECT e.id, e.event_type, e.occurred_at, e.acquisition_type, e.amount, e.currency, \
             e.status_from, e.status_to, e.reason, \
@@ -184,12 +209,14 @@ pub async fn share_event_history(
              ON tm.shareholder_id = ts.id AND tm.ended_at IS NULL \
          LEFT JOIN families tf ON tf.id = tm.family_id \
          WHERE e.share_id = $1 \
+           AND e.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY e.occurred_at, e.created_at, e.id \
          LIMIT $2",
     )
     .bind(share_id)
     .bind(limit)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -220,11 +247,13 @@ pub enum CreateShareError {
 /// transaction (§62): a Share never exists without a recorded initial
 /// acquisition. The shareholder must exist and be `active` (§45).
 pub async fn create_share(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateShare,
     now: OffsetDateTime,
 ) -> Result<(Uuid, i64), CreateShareError> {
+    let mut tx = db.begin().await.map_err(CreateShareError::Database)?;
     if !command.acquisition_type.is_initial() {
         return Err(CreateShareError::InvalidAcquisitionType);
     }
@@ -232,14 +261,17 @@ pub async fn create_share(
         return Err(CreateShareError::FutureEffectiveAt);
     }
 
-    let mut tx = pool.begin().await.map_err(CreateShareError::Database)?;
-
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM shareholders WHERE id = $1 FOR UPDATE")
-            .bind(command.shareholder_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(CreateShareError::Database)?;
+    // Cooperative-scoped (C3): a foreign shareholder id resolves to
+    // ShareholderNotFound without disclosure.
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM shareholders WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(command.shareholder_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(CreateShareError::Database)?;
     let Some(status) = status else {
         return Err(CreateShareError::ShareholderNotFound);
     };
@@ -247,18 +279,24 @@ pub async fn create_share(
         return Err(CreateShareError::ShareholderNotActive);
     }
 
-    let (share_id, share_number): (Uuid, i64) =
-        sqlx::query_as("INSERT INTO shares (created_by) VALUES ($1) RETURNING id, share_number")
-            .bind(actor)
-            .fetch_one(tx.as_mut())
-            .await
-            .map_err(CreateShareError::Database)?;
+    // All three aggregate rows carry the verified cooperative scope
+    // explicitly (C3): share, initial_acquisition event, ownership.
+    let (share_id, share_number): (Uuid, i64) = sqlx::query_as(
+        "INSERT INTO shares (created_by, cooperative_id, share_number) \
+         VALUES ($1, $2, allocate_document_number($2, 'shares.share_number')) \
+         RETURNING id, share_number",
+    )
+    .bind(actor)
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
+    .await
+    .map_err(CreateShareError::Database)?;
 
     let event_id: Uuid = sqlx::query_scalar(
         "INSERT INTO share_events \
              (share_id, event_type, occurred_at, to_shareholder_id, acquisition_type, \
-              amount, currency, reason, actor_user_id) \
-         VALUES ($1, 'initial_acquisition', $2, $3, $4, $5, 'TRY', $6, $7) \
+              amount, currency, reason, actor_user_id, cooperative_id) \
+         VALUES ($1, 'initial_acquisition', $2, $3, $4, $5, 'TRY', $6, $7, $8) \
          RETURNING id",
     )
     .bind(share_id)
@@ -268,14 +306,16 @@ pub async fn create_share(
     .bind(command.fee)
     .bind(&command.reason)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(CreateShareError::Database)?;
 
     sqlx::query(
         "INSERT INTO share_ownerships \
-             (share_id, shareholder_id, started_at, acquisition_type, source_event_id, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             (share_id, shareholder_id, started_at, acquisition_type, source_event_id, \
+              created_by, cooperative_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(share_id)
     .bind(command.shareholder_id)
@@ -283,6 +323,7 @@ pub async fn create_share(
     .bind(command.acquisition_type.as_str())
     .bind(event_id)
     .bind(actor)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await
     .map_err(CreateShareError::Database)?;
@@ -327,135 +368,59 @@ pub struct ChangeOwner {
 /// The share row lock serializes concurrent mutations; the exclusion
 /// constraint makes double-ownership impossible under any race.
 pub async fn change_owner(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: ChangeOwner,
 ) -> Result<(Uuid, i64), OwnershipChangeError> {
+    let mut tx = db.begin().await.map_err(OwnershipChangeError::Database)?;
     // (returns: previous owner id, share_number)
     debug_assert!(matches!(
         command.kind,
         AcquisitionType::Transfer | AcquisitionType::Sale
     ));
-    if command.effective_at > command.now {
-        return Err(OwnershipChangeError::FutureEffectiveAt);
-    }
 
-    let mut tx = pool.begin().await.map_err(OwnershipChangeError::Database)?;
-
-    let share: Option<(String, OffsetDateTime)> =
-        sqlx::query_as("SELECT status, updated_at FROM shares WHERE id = $1 FOR UPDATE")
-            .bind(command.share_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(OwnershipChangeError::Database)?;
-    let Some((status, updated_at)) = share else {
-        return Err(OwnershipChangeError::ShareNotFound);
-    };
-    if updated_at != command.expected_updated_at {
-        return Err(OwnershipChangeError::StaleState);
-    }
-    if status != ShareStatus::Active.as_str() {
-        return Err(OwnershipChangeError::ShareNotActive);
-    }
-
-    let current: Option<(Uuid, Uuid, OffsetDateTime)> = sqlx::query_as(
-        "SELECT id, shareholder_id, started_at FROM share_ownerships \
-         WHERE share_id = $1 AND ended_at IS NULL FOR UPDATE",
+    // R3C: one atomic definer — share/ownership/target locks, the
+    // chronology and active-owner rules, interval close, the share
+    // event and the successor interval are indivisible. The
+    // `no_overlap` exclusion constraint still guards any residual
+    // race; it surfaces as StaleState via the constraint name.
+    let (from_shareholder_id, share_number): (Uuid, i64) = sqlx::query_as(
+        "SELECT from_shareholder, share_number \
+         FROM public.app_share_transfer_tx(\
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(command.share_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(OwnershipChangeError::Database)?;
-    let Some((ownership_id, from_shareholder_id, started_at)) = current else {
-        return Err(OwnershipChangeError::NoCurrentOwner);
-    };
-    if from_shareholder_id == command.to_shareholder_id {
-        return Err(OwnershipChangeError::SameOwner);
-    }
-    if command.effective_at < started_at {
-        return Err(OwnershipChangeError::InvalidEffectiveAt);
-    }
-
-    // Target must be an active Shareholder (§45); row lock prevents a
-    // concurrent void/status change racing the transfer.
-    let target_status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM shareholders WHERE id = $1 FOR UPDATE")
-            .bind(command.to_shareholder_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(OwnershipChangeError::Database)?;
-    let Some(target_status) = target_status else {
-        return Err(OwnershipChangeError::ShareholderNotFound);
-    };
-    if target_status != party_model::ShareholderStatus::Active.as_str() {
-        return Err(OwnershipChangeError::ShareholderNotActive);
-    }
-
-    let share_number: i64 = sqlx::query_scalar("SELECT share_number FROM shares WHERE id = $1")
-        .bind(command.share_id)
-        .fetch_one(tx.as_mut())
-        .await
-        .map_err(OwnershipChangeError::Database)?;
-
-    sqlx::query("UPDATE share_ownerships SET ended_at = $2 WHERE id = $1")
-        .bind(ownership_id)
-        .bind(command.effective_at)
-        .execute(tx.as_mut())
-        .await
-        .map_err(OwnershipChangeError::Database)?;
-
-    let event_type = command.kind.as_str();
-    let event_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO share_events \
-             (share_id, event_type, occurred_at, from_shareholder_id, to_shareholder_id, \
-              amount, currency, reason, actor_user_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'TRY', $7, $8) \
-         RETURNING id",
-    )
-    .bind(command.share_id)
-    .bind(event_type)
-    .bind(command.effective_at)
-    .bind(from_shareholder_id)
     .bind(command.to_shareholder_id)
+    .bind(command.kind.as_str())
     .bind(command.amount)
     .bind(&command.reason)
+    .bind(command.effective_at)
+    .bind(command.expected_updated_at)
+    .bind(command.now)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
-    .map_err(OwnershipChangeError::Database)?;
-
-    let insert = sqlx::query(
-        "INSERT INTO share_ownerships \
-             (share_id, shareholder_id, started_at, acquisition_type, source_event_id, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(command.share_id)
-    .bind(command.to_shareholder_id)
-    .bind(command.effective_at)
-    .bind(event_type)
-    .bind(event_id)
-    .bind(actor)
-    .execute(tx.as_mut())
-    .await;
-
-    match insert {
-        Ok(_) => {}
-        Err(sqlx::Error::Database(db_err))
-            if db_err
-                .constraint()
-                .is_some_and(|c| c.contains("no_overlap")) =>
-        {
-            return Err(OwnershipChangeError::StaleState);
-        }
-        Err(other) => return Err(OwnershipChangeError::Database(other)),
-    }
-
-    sqlx::query("UPDATE shares SET updated_at = $2 WHERE id = $1")
-        .bind(command.share_id)
-        .bind(command.now)
-        .execute(tx.as_mut())
-        .await
-        .map_err(OwnershipChangeError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => OwnershipChangeError::ShareNotFound,
+        Some("stale_state") => OwnershipChangeError::StaleState,
+        Some("share_not_active") => OwnershipChangeError::ShareNotActive,
+        Some("no_current_owner") => OwnershipChangeError::NoCurrentOwner,
+        Some("same_owner") => OwnershipChangeError::SameOwner,
+        Some("invalid_effective_at") => OwnershipChangeError::InvalidEffectiveAt,
+        Some("future_effective_at") => OwnershipChangeError::FutureEffectiveAt,
+        Some("shareholder_not_found") => OwnershipChangeError::ShareholderNotFound,
+        Some("shareholder_not_active") => OwnershipChangeError::ShareholderNotActive,
+        _ => match &error {
+            sqlx::Error::Database(db)
+                if db.constraint().is_some_and(|c| c.contains("no_overlap")) =>
+            {
+                OwnershipChangeError::StaleState
+            }
+            _ => OwnershipChangeError::Database(error),
+        },
+    })?;
 
     tx.commit().await.map_err(OwnershipChangeError::Database)?;
     Ok((from_shareholder_id, share_number))
@@ -477,93 +442,35 @@ pub enum StatusChangeError {
 /// closes the initial ownership interval so a voided share keeps no
 /// current owner.
 pub async fn change_status(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     share_id: Uuid,
     target: ShareStatus,
     reason: Option<String>,
     now: OffsetDateTime,
 ) -> Result<i64, StatusChangeError> {
-    let mut tx = pool.begin().await.map_err(StatusChangeError::Database)?;
+    let mut tx = db.begin().await.map_err(StatusChangeError::Database)?;
 
-    let share: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, share_number FROM shares WHERE id = $1 FOR UPDATE")
+    // R3C: one atomic definer — transition table, the share lock, the
+    // mandatory share_events row and (for voiding) the no-history
+    // check + initial-interval close are indivisible.
+    let share_number: i64 =
+        sqlx::query_scalar("SELECT public.app_share_set_status_tx($1, $2, $3, $4, $5, $6)")
             .bind(share_id)
-            .fetch_optional(tx.as_mut())
+            .bind(target.as_str())
+            .bind(&reason)
+            .bind(now)
+            .bind(actor)
+            .bind(cooperative_id)
+            .fetch_one(tx.as_mut())
             .await
-            .map_err(StatusChangeError::Database)?;
-    let Some((status, share_number)) = share else {
-        return Err(StatusChangeError::ShareNotFound);
-    };
-    let from_status = ShareStatus::parse(&status).ok_or(StatusChangeError::Database(
-        sqlx::Error::Decode("unknown share status".into()),
-    ))?;
-    if !from_status.can_transition_to(target) {
-        return Err(StatusChangeError::InvalidTransition);
-    }
-
-    if target == ShareStatus::Voided {
-        let later_events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM share_events \
-             WHERE share_id = $1 AND event_type <> 'initial_acquisition'",
-        )
-        .bind(share_id)
-        .fetch_one(tx.as_mut())
-        .await
-        .map_err(StatusChangeError::Database)?;
-        if later_events > 0 {
-            return Err(StatusChangeError::HasHistory);
-        }
-        // Close the initial interval: a voided share keeps no owner.
-        let owner: Option<Uuid> = sqlx::query_scalar(
-            "UPDATE share_ownerships SET ended_at = $2 \
-             WHERE share_id = $1 AND ended_at IS NULL RETURNING shareholder_id",
-        )
-        .bind(share_id)
-        .bind(now)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(StatusChangeError::Database)?;
-
-        sqlx::query(
-            "INSERT INTO share_events \
-                 (share_id, event_type, occurred_at, from_shareholder_id, \
-                  status_from, status_to, reason, actor_user_id) \
-             VALUES ($1, 'voided', $2, $3, $4, 'voided', $5, $6)",
-        )
-        .bind(share_id)
-        .bind(now)
-        .bind(owner)
-        .bind(from_status.as_str())
-        .bind(&reason)
-        .bind(actor)
-        .execute(tx.as_mut())
-        .await
-        .map_err(StatusChangeError::Database)?;
-    } else {
-        sqlx::query(
-            "INSERT INTO share_events \
-                 (share_id, event_type, occurred_at, status_from, status_to, reason, actor_user_id) \
-             VALUES ($1, 'status_change', $2, $3, $4, $5, $6)",
-        )
-        .bind(share_id)
-        .bind(now)
-        .bind(from_status.as_str())
-        .bind(target.as_str())
-        .bind(&reason)
-        .bind(actor)
-        .execute(tx.as_mut())
-        .await
-        .map_err(StatusChangeError::Database)?;
-    }
-
-    sqlx::query("UPDATE shares SET status = $2, updated_at = $3 WHERE id = $1")
-        .bind(share_id)
-        .bind(target.as_str())
-        .bind(now)
-        .execute(tx.as_mut())
-        .await
-        .map_err(StatusChangeError::Database)?;
+            .map_err(|error| match crate::db::package_error_token(&error) {
+                Some("not_found") => StatusChangeError::ShareNotFound,
+                Some("invalid_transition") => StatusChangeError::InvalidTransition,
+                Some("has_history") => StatusChangeError::HasHistory,
+                _ => StatusChangeError::Database(error),
+            })?;
 
     tx.commit().await.map_err(StatusChangeError::Database)?;
     Ok(share_number)

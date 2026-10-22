@@ -28,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
 use crate::auth::routes::csrf_rejection_to_api_error;
@@ -253,45 +252,60 @@ pub async fn list_accounts(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    let list = ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    };
-    let (page, page_size) = page_of(&list)?;
-    let account_type = match query.account_type.as_deref() {
-        None | Some("") => None,
-        Some(value) => Some(AccountType::parse(value).ok_or(ApiError::ValidationFailed)?),
-    };
-    let status = match query.status.as_deref() {
-        None | Some("") => None,
-        Some(value) => Some(AccountStatus::parse(value).ok_or(ApiError::ValidationFailed)?),
-    };
-    let rows = account_repo::list_accounts(
-        pool,
-        query.search.as_deref(),
-        account_type,
-        status,
-        page,
-        page_size,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "list accounts failed");
-        ApiError::Internal
-    })?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items: rows.iter().map(account_dto).collect::<Vec<_>>(),
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let list = ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        };
+        let (page, page_size) = page_of(&list)?;
+        let account_type = match query.account_type.as_deref() {
+            None | Some("") => None,
+            Some(value) => Some(AccountType::parse(value).ok_or(ApiError::ValidationFailed)?),
+        };
+        let status = match query.status.as_deref() {
+            None | Some("") => None,
+            Some(value) => Some(AccountStatus::parse(value).ok_or(ApiError::ValidationFailed)?),
+        };
+        let rows = account_repo::list_accounts(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
+            account_type,
+            status,
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list accounts failed");
+            ApiError::Internal
+        })?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items: rows.iter().map(account_dto).collect::<Vec<_>>(),
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Active accounts for pickers (payment destination / transfer
@@ -310,27 +324,41 @@ pub async fn account_options(
         authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_MANAGE).await?;
     }
     let pool = pool_of(&state)?;
-    let rows = account_repo::list_active_account_options(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "account options failed");
-            ApiError::Internal
-        })?;
-    Ok((
-        StatusCode::OK,
-        Json(
-            rows.iter()
-                .map(|r| AccountOptionDto {
-                    id: r.id,
-                    name: r.name.clone(),
-                    account_type: r.account_type.clone(),
-                    currency: r.currency.clone(),
-                    balance: canonical(r.balance),
-                })
-                .collect::<Vec<_>>(),
-        ),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let rows = account_repo::list_active_account_options(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "account options failed");
+                ApiError::Internal
+            })?;
+        Ok((
+            StatusCode::OK,
+            Json(
+                rows.iter()
+                    .map(|r| AccountOptionDto {
+                        id: r.id,
+                        name: r.name.clone(),
+                        account_type: r.account_type.clone(),
+                        currency: r.currency.clone(),
+                        balance: canonical(r.balance),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Cooperative-wide totals grouped BY CURRENCY — never a meaningless
@@ -341,22 +369,36 @@ pub async fn accounts_summary(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    let rows = account_repo::total_balance_by_currency(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "accounts summary failed");
-            ApiError::Internal
-        })?;
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "totals": rows.iter().map(|(currency, balance)| serde_json::json!({
-                "currency": currency,
-                "balance": canonical(*balance),
-            })).collect::<Vec<_>>(),
-        })),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let rows = account_repo::total_balance_by_currency(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "accounts summary failed");
+                ApiError::Internal
+            })?;
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "totals": rows.iter().map(|(currency, balance)| serde_json::json!({
+                    "currency": currency,
+                    "balance": canonical(*balance),
+                })).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_account(
@@ -366,14 +408,30 @@ pub async fn get_account(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    let row = account_repo::get_account(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get account failed");
-        ApiError::Internal
-    })?;
-    let Some(row) = row else {
-        return Err(ApiError::NotFound);
-    };
-    Ok((StatusCode::OK, Json(account_dto(&row))).into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let row = account_repo::get_account(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get account failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::NotFound);
+        };
+        Ok((StatusCode::OK, Json(account_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn list_movements(
@@ -384,55 +442,69 @@ pub async fn list_movements(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    if account_repo::get_account(pool, id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "get account failed");
-            ApiError::Internal
-        })?
-        .is_none()
-    {
-        return Err(ApiError::NotFound);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        if account_repo::get_account(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get account failed");
+                ApiError::Internal
+            })?
+            .is_none()
+        {
+            return Err(ApiError::NotFound);
+        }
+        let (page, page_size) = page_of(&query)?;
+        let rows = account_repo::list_movements(&mut tx, ctx.cooperative_id(), id, page, page_size)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "list movements failed");
+                ApiError::Internal
+            })?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items: rows
+                    .iter()
+                    .map(|m| {
+                        let effect = MovementDirection::parse(&m.direction)
+                            .unwrap_or(MovementDirection::Inflow)
+                            .effect(m.amount);
+                        AccountMovementDto {
+                            id: m.id,
+                            direction: m.direction.clone(),
+                            amount: canonical(m.amount),
+                            effect: canonical(effect),
+                            source_type: m.source_type.clone(),
+                            source_id: m.source_id,
+                            source_number: m.source_number,
+                            occurred_at: m.occurred_at,
+                            status: m.status.clone(),
+                            reversed_at: m.reversed_at,
+                            reversal_reason: m.reversal_reason.clone(),
+                            created_at: m.created_at,
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
     }
-    let (page, page_size) = page_of(&query)?;
-    let rows = account_repo::list_movements(pool, id, page, page_size)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "list movements failed");
-            ApiError::Internal
-        })?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items: rows
-                .iter()
-                .map(|m| {
-                    let effect = MovementDirection::parse(&m.direction)
-                        .unwrap_or(MovementDirection::Inflow)
-                        .effect(m.amount);
-                    AccountMovementDto {
-                        id: m.id,
-                        direction: m.direction.clone(),
-                        amount: canonical(m.amount),
-                        effect: canonical(effect),
-                        source_type: m.source_type.clone(),
-                        source_id: m.source_id,
-                        source_number: m.source_number,
-                        occurred_at: m.occurred_at,
-                        status: m.status.clone(),
-                        reversed_at: m.reversed_at,
-                        reversal_reason: m.reversal_reason.clone(),
-                        created_at: m.created_at,
-                    }
-                })
-                .collect::<Vec<_>>(),
-            page,
-            page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -457,50 +529,61 @@ pub async fn create_account(
     Json(body): Json<CreateAccountRequest>,
 ) -> Result<Response, ApiError> {
     let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
-    let name = account_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let account_type = AccountType::parse(&body.account_type).ok_or(ApiError::ValidationFailed)?;
-    let description = account_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let bank_name = account_model::validate_bank_name(body.bank_name.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let iban = account_model::validate_iban(body.iban.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    // Bank metadata is meaningful only on bank accounts.
-    if account_type != AccountType::Bank && (bank_name.is_some() || iban.is_some()) {
-        return Err(ApiError::ValidationFailed);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let name =
+            account_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let account_type =
+            AccountType::parse(&body.account_type).ok_or(ApiError::ValidationFailed)?;
+        let description = account_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let bank_name = account_model::validate_bank_name(body.bank_name.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let iban = account_model::validate_iban(body.iban.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        // Bank metadata is meaningful only on bank accounts.
+        if account_type != AccountType::Bank && (bank_name.is_some() || iban.is_some()) {
+            return Err(ApiError::ValidationFailed);
+        }
+
+        let id = account_repo::create_account(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            account_repo::CreateAccount {
+                name,
+                account_type,
+                description,
+                bank_name,
+                iban,
+            },
+        )
+        .await
+        .map_err(command_error)?;
+
+        // R4: audit row minted by the DB transition trigger.
+        let row = account_repo::get_account(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get account failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::CREATED, Json(account_dto(&row))).into_response())
     }
-
-    let id = account_repo::create_account(
-        pool,
-        ctx.auth.user_id,
-        account_repo::CreateAccount {
-            name,
-            account_type,
-            description,
-            bank_name,
-            iban,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FinancialAccountCreated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "accountId": id }),
-    )
     .await;
-    let row = account_repo::get_account(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get account failed");
-        ApiError::Internal
-    })?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::CREATED, Json(account_dto(&row))).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -526,54 +609,67 @@ pub async fn update_account(
     Json(body): Json<UpdateAccountRequest>,
 ) -> Result<Response, ApiError> {
     let pool = accounts_mutation!(&state, &headers, &ctx, &Method::PATCH);
-    let name = account_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let description = account_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let bank_name = account_model::validate_bank_name(body.bank_name.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let iban = account_model::validate_iban(body.iban.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let current = account_repo::get_account(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get account failed");
-        ApiError::Internal
-    })?;
-    let Some(current) = current else {
-        return Err(ApiError::NotFound);
-    };
-    if current.account_type != AccountType::Bank.as_str() && (bank_name.is_some() || iban.is_some())
-    {
-        return Err(ApiError::ValidationFailed);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let name =
+            account_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let description = account_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let bank_name = account_model::validate_bank_name(body.bank_name.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let iban = account_model::validate_iban(body.iban.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let current = account_repo::get_account(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get account failed");
+                ApiError::Internal
+            })?;
+        let Some(current) = current else {
+            return Err(ApiError::NotFound);
+        };
+        if current.account_type != AccountType::Bank.as_str()
+            && (bank_name.is_some() || iban.is_some())
+        {
+            return Err(ApiError::ValidationFailed);
+        }
+
+        account_repo::update_account(
+            &mut tx,
+            ctx.cooperative_id(),
+            id,
+            name,
+            description,
+            bank_name,
+            iban,
+            body.expected_updated_at,
+        )
+        .await
+        .map_err(command_error)?;
+
+        // R4: audit row minted by the DB transition trigger.
+        let row = account_repo::get_account(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get account failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::OK, Json(account_dto(&row))).into_response())
     }
-
-    account_repo::update_account(
-        pool,
-        id,
-        name,
-        description,
-        bank_name,
-        iban,
-        body.expected_updated_at,
-    )
-    .await
-    .map_err(command_error)?;
-
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FinancialAccountUpdated,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "accountId": id }),
-    )
     .await;
-    let row = account_repo::get_account(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get account failed");
-        ApiError::Internal
-    })?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::OK, Json(account_dto(&row))).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -591,27 +687,35 @@ pub async fn change_status(
     Json(body): Json<StatusChangeRequest>,
 ) -> Result<Response, ApiError> {
     let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
-    let target = AccountStatus::parse(&body.status).ok_or(ApiError::ValidationFailed)?;
-    account_repo::change_account_status(pool, id, target)
-        .await
-        .map_err(command_error)?;
-    audit::record_scoped(
-        pool,
-        SecurityEventType::FinancialAccountStatusChanged,
-        ctx.cooperative_id(),
-        Some(ctx.auth.user_id),
-        None,
-        serde_json::json!({ "accountId": id, "status": target.as_str() }),
-    )
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let target = AccountStatus::parse(&body.status).ok_or(ApiError::ValidationFailed)?;
+        account_repo::change_account_status(&mut tx, ctx.cooperative_id(), id, target)
+            .await
+            .map_err(command_error)?;
+        // R4: audit row minted by the DB transition trigger.
+        let row = account_repo::get_account(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get account failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::OK, Json(account_dto(&row))).into_response())
+    }
     .await;
-    let row = account_repo::get_account(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get account failed");
-        ApiError::Internal
-    })?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::OK, Json(account_dto(&row))).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -637,20 +741,34 @@ pub async fn list_transfers(
 ) -> Result<Json<PaginatedDto<AccountTransferDto>>, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = account_repo::list_transfers(pool, page, page_size)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "transfer listing failed");
-            ApiError::Internal
-        })?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(transfer_dto).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = account_repo::list_transfers(&mut tx, ctx.cooperative_id(), page, page_size)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "transfer listing failed");
+                ApiError::Internal
+            })?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(transfer_dto).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// THE transfer command: ONE transaction creates the transfer row and
@@ -662,83 +780,84 @@ pub async fn post_transfer(
     Json(body): Json<PostTransferRequest>,
 ) -> Result<Response, ApiError> {
     let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
-    let now = state.auth.clock.now();
-    let amount = account_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let occurred_at = match &body.occurred_at {
-        Some(raw) => {
-            OffsetDateTime::parse(raw.trim(), &Rfc3339).map_err(|_| ApiError::ValidationFailed)?
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let amount = account_model::validate_positive_amount(&body.amount)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let occurred_at = match &body.occurred_at {
+            Some(raw) => OffsetDateTime::parse(raw.trim(), &Rfc3339)
+                .map_err(|_| ApiError::ValidationFailed)?,
+            None => now,
+        };
+        account_model::validate_occurred_at(occurred_at, now)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        // Idempotency covers CLIENT INTENT: an omitted occurredAt must not
+        // enter the fingerprint as the server-generated default (F4).
+        let occurred_at_intent = body.occurred_at.is_some().then_some(occurred_at);
+        let note = account_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = account_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        if body.source_account_id == body.destination_account_id {
+            return Err(ApiError::ValidationFailed);
         }
-        None => now,
-    };
-    account_model::validate_occurred_at(occurred_at, now)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    // Idempotency covers CLIENT INTENT: an omitted occurredAt must not
-    // enter the fingerprint as the server-generated default (F4).
-    let occurred_at_intent = body.occurred_at.is_some().then_some(occurred_at);
-    let note = account_model::validate_note(body.note.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = account_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    if body.source_account_id == body.destination_account_id {
-        return Err(ApiError::ValidationFailed);
-    }
-    let fingerprint = account_model::transfer_fingerprint(&account_model::TransferFingerprint {
-        source_account_id: body.source_account_id,
-        destination_account_id: body.destination_account_id,
-        amount,
-        occurred_at: occurred_at_intent,
-        note: note.clone(),
-    });
+        let fingerprint =
+            account_model::transfer_fingerprint(&account_model::TransferFingerprint {
+                source_account_id: body.source_account_id,
+                destination_account_id: body.destination_account_id,
+                amount,
+                occurred_at: occurred_at_intent,
+                note: note.clone(),
+            });
 
-    let outcome = account_repo::post_transfer(
-        pool,
-        ctx.auth.user_id,
-        account_repo::PostTransfer {
-            source_account_id: body.source_account_id,
-            destination_account_id: body.destination_account_id,
-            amount,
-            occurred_at,
-            note,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::AccountTransferPosted,
+        let outcome = account_repo::post_transfer(
+            &mut tx,
             ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({
-                "transferId": outcome.transfer_id,
-                "transferNumber": outcome.transfer_number,
-                "sourceAccountId": body.source_account_id,
-                "destinationAccountId": body.destination_account_id,
-                "amount": canonical(amount),
-            }),
+            ctx.auth.user_id,
+            account_repo::PostTransfer {
+                source_account_id: body.source_account_id,
+                destination_account_id: body.destination_account_id,
+                amount,
+                occurred_at,
+                note,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-    }
-    let row = account_repo::get_transfer(pool, outcome.transfer_id)
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "get transfer failed");
-            ApiError::Internal
-        })?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(transfer_dto(&row))).into_response())
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+        let row = account_repo::get_transfer(&mut tx, ctx.cooperative_id(), outcome.transfer_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get transfer failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(transfer_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_transfer(
@@ -748,14 +867,30 @@ pub async fn get_transfer(
 ) -> Result<Response, ApiError> {
     authz::require_business(&state, &ctx, authz::catalog::FINANCIAL_ACCOUNTS_READ).await?;
     let pool = pool_of(&state)?;
-    let row = account_repo::get_transfer(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get transfer failed");
-        ApiError::Internal
-    })?;
-    let Some(row) = row else {
-        return Err(ApiError::NotFound);
-    };
-    Ok((StatusCode::OK, Json(transfer_dto(&row))).into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let row = account_repo::get_transfer(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get transfer failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::NotFound);
+        };
+        Ok((StatusCode::OK, Json(transfer_dto(&row))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -773,30 +908,44 @@ pub async fn reverse_transfer(
     Json(body): Json<ReverseTransferRequest>,
 ) -> Result<Response, ApiError> {
     let pool = accounts_mutation!(&state, &headers, &ctx, &Method::POST);
-    let reason = account_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let now = state.auth.clock.now();
-    let (replayed, transfer_number) =
-        account_repo::reverse_transfer(pool, ctx.auth.user_id, id, reason, now)
-            .await
-            .map_err(command_error)?;
-    if !replayed {
-        audit::record_scoped(
-            pool,
-            SecurityEventType::AccountTransferReversed,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = account_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let now = state.auth.clock.now();
+        let (replayed, _transfer_number) = account_repo::reverse_transfer(
+            &mut tx,
             ctx.cooperative_id(),
-            Some(ctx.auth.user_id),
-            None,
-            serde_json::json!({ "transferId": id, "transferNumber": transfer_number }),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
         )
-        .await;
+        .await
+        .map_err(command_error)?;
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+        let row = account_repo::get_transfer(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "get transfer failed");
+                ApiError::Internal
+            })?;
+        let Some(row) = row else {
+            return Err(ApiError::Internal);
+        };
+        Ok((StatusCode::OK, Json(transfer_dto(&row))).into_response())
     }
-    let row = account_repo::get_transfer(pool, id).await.map_err(|e| {
-        tracing::error!(error = %e, "get transfer failed");
-        ApiError::Internal
-    })?;
-    let Some(row) = row else {
-        return Err(ApiError::Internal);
-    };
-    Ok((StatusCode::OK, Json(transfer_dto(&row))).into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

@@ -8,6 +8,7 @@
 //! STEP-001: infrastructure baseline. STEP-002: identity, authentication
 //! and server-side sessions. No other domain functionality exists yet.
 
+pub mod audit;
 pub mod auth;
 pub mod clock;
 pub mod config;
@@ -18,6 +19,7 @@ pub mod governance;
 pub mod http;
 pub mod income_expense;
 pub mod investments;
+pub mod numbering;
 pub mod observability;
 pub mod parties;
 pub mod payments;

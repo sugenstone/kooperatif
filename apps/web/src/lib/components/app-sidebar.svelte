@@ -17,6 +17,7 @@
 	import { auth, can, logout } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
+	import Building2 from '@lucide/svelte/icons/building-2';
 	import CalendarRange from '@lucide/svelte/icons/calendar-range';
 	import ChartNoAxesColumn from '@lucide/svelte/icons/chart-no-axes-column';
 	import ChevronUp from '@lucide/svelte/icons/chevron-up';
@@ -46,6 +47,13 @@
 		labelKey: MessageKey;
 		permission: string | null;
 		icon: Component;
+		/**
+		 * M1-P7-B: platform lane entries gate on an explicit capability —
+		 * `cooperatives` maps to `auth.platformCooperativesManage`
+		 * (NULL-scope cooperatives.manage). Never `platformAdmin`
+		 * (users.manage): neither platform key implies the other.
+		 */
+		platformCapability?: 'cooperatives';
 	}
 	interface NavGroup {
 		labelKey: MessageKey;
@@ -196,7 +204,25 @@
 					permission: 'users.read',
 					icon: UserRoundCog
 				},
+				{
+					href: '/uyelikler',
+					labelKey: 'nav.memberships',
+					permission: 'memberships.read',
+					icon: UsersRound
+				},
 				{ href: '/oturumlar', labelKey: 'auth.shell.sessions', permission: null, icon: KeyRound }
+			]
+		},
+		{
+			labelKey: 'nav.group.platform',
+			items: [
+				{
+					href: '/platform/kooperatifler',
+					labelKey: 'nav.platformCooperatives',
+					permission: null,
+					icon: Building2,
+					platformCapability: 'cooperatives'
+				}
 			]
 		}
 	];
@@ -204,7 +230,11 @@
 	const visibleGroups = $derived(
 		GROUPS.map((group) => ({
 			...group,
-			items: group.items.filter((item) => item.permission === null || can(item.permission))
+			items: group.items.filter((item) =>
+				item.platformCapability === 'cooperatives'
+					? auth.platformCooperativesManage
+					: item.permission === null || can(item.permission)
+			)
 		})).filter((group) => group.items.length > 0)
 	);
 

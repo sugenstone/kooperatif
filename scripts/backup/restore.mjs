@@ -181,7 +181,12 @@ async function main() {
 	writeStatus(cfg, {
 		lastRestore: { at: isoNow(), artifact: name, target: targetDb, result: 'success' }
 	});
-	log('RESTORE COMPLETED');
+	// M1-P4-BR1: data restore ≠ application readiness. The artifact is
+	// --no-privileges; the kooperatif_app grant surface and PUBLIC
+	// revocations must be rebuilt before the application can run.
+	log('RESTORE COMPLETED — data + schema verified.');
+	log(`NOT application-ready yet: rebuild privileges with ` +
+		`pnpm backup:regrants -- --target-db ${targetDb} --confirm ${targetDb}`);
 }
 
 main().catch((error) => {

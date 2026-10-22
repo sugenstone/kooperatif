@@ -79,6 +79,7 @@ impl TestApp {
         .await;
         self.pool.close().await;
         if let Ok(admin) = sqlx::PgPool::connect(&self.admin_url).await {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -113,7 +114,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -172,7 +173,7 @@ async fn create_user(pool: &PgPool, username: &str, sysadmin: bool) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    let user = users::create_user(pool, username, "Test Kullanıcı", &hash)
+    let user = users::create_user(pool, username, "Test Kullanıcı", &hash, TEST_PASSWORD)
         .await
         .expect("user created");
     if sysadmin {
@@ -391,11 +392,12 @@ async fn effective_permissions_follow_the_union_and_default_deny() {
     let permissions = kooperatif_server::auth::authz::effective_permissions(&test.pool, plain_id)
         .await
         .expect("resolution");
-    // The seeded admin role holds exactly the application-owned
-    // catalog (migration seeds grant every catalog key).
+    // The seeded admin role holds the application-owned catalog minus
+    // `cooperatives.manage`, which stays platform-only (B5/0072 granted
+    // the membership keys to System Administrator roles).
     assert_eq!(
         permissions.len(),
-        kooperatif_server::auth::authz::catalog::ALL.len(),
+        kooperatif_server::auth::authz::catalog::ALL.len() - 1,
         "re-enabled role grants again"
     );
 }
@@ -603,7 +605,8 @@ async fn permission_changes_take_effect_immediately_without_relogin() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         me["permissions"].as_array().expect("permissions").len(),
-        kooperatif_server::auth::authz::catalog::ALL.len()
+        // minus `cooperatives.manage` (B5/0072: platform-only).
+        kooperatif_server::auth::authz::catalog::ALL.len() - 1
     );
     assert!(!me["roles"].as_array().expect("roles").is_empty());
 }
@@ -974,7 +977,8 @@ async fn last_administration_path_is_protected() {
     .expect("keys");
     assert_eq!(
         keys.len(),
-        kooperatif_server::auth::authz::catalog::ALL.len(),
+        // minus `cooperatives.manage` (platform-only, never held).
+        kooperatif_server::auth::authz::catalog::ALL.len() - 1,
         "permission strip must be rolled back"
     );
 
@@ -1307,7 +1311,7 @@ async fn user_disable_enable_lifecycle() {
         &test.app,
         request_builder(
             "POST",
-            &format!("/api/users/{target_id}/disable"),
+            &format!("/api/platform/users/{target_id}/disable"),
             &target_cookie,
             None,
             None,
@@ -1324,7 +1328,7 @@ async fn user_disable_enable_lifecycle() {
         &test.app,
         request_builder(
             "POST",
-            &format!("/api/users/{target_id}/disable"),
+            &format!("/api/platform/users/{target_id}/disable"),
             &admin_cookie,
             Some(&admin_csrf),
             None,
@@ -1353,7 +1357,7 @@ async fn user_disable_enable_lifecycle() {
         &test.app,
         request_builder(
             "POST",
-            &format!("/api/users/{target_id}/disable"),
+            &format!("/api/platform/users/{target_id}/disable"),
             &admin_cookie,
             Some(&admin_csrf),
             None,
@@ -1367,7 +1371,7 @@ async fn user_disable_enable_lifecycle() {
         &test.app,
         request_builder(
             "POST",
-            &format!("/api/users/{target_id}/enable"),
+            &format!("/api/platform/users/{target_id}/enable"),
             &admin_cookie,
             Some(&admin_csrf),
             None,
@@ -1377,19 +1381,20 @@ async fn user_disable_enable_lifecycle() {
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     let _ = login(&test.app, test.peer(), &target_name).await;
 
-    // Unknown user → 404.
+    // Unknown user → 204 (idempotent; the platform lane is not an
+    // existence oracle for cooperative viewers).
     let (status, _) = send(
         &test.app,
         request_builder(
             "POST",
-            &format!("/api/users/{}/disable", Uuid::new_v4()),
+            &format!("/api/platform/users/{}/disable", Uuid::new_v4()),
             &admin_cookie,
             Some(&admin_csrf),
             None,
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Audit provenance.
     let events: Vec<String> = sqlx::query_scalar(
@@ -1418,7 +1423,7 @@ async fn disabling_last_administration_user_is_lockout_prevented() {
         &test.app,
         request_builder(
             "POST",
-            &format!("/api/users/{admin_id}/disable"),
+            &format!("/api/platform/users/{admin_id}/disable"),
             &admin_cookie,
             Some(&admin_csrf),
             None,

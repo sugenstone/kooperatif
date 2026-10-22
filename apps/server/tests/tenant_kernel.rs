@@ -66,6 +66,7 @@ impl TestApp {
         .await;
         self.pool.close().await;
         if let Ok(admin) = sqlx::PgPool::connect(&self.admin_url).await {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -98,7 +99,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -156,7 +157,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "Test Kullanıcı", &hash)
+    users::create_user(pool, username, "Test Kullanıcı", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -308,6 +309,165 @@ async fn bootstrap_is_idempotent_and_enrolls_every_user() {
 }
 
 #[tokio::test]
+async fn bootstrap_never_grants_membership_to_disabled_users() {
+    let Some(test) = setup().await else { return };
+    let active_user = create_user(&test.pool, "aktif_kullanici").await;
+    let disabled_user = create_user(&test.pool, "engelli_kullanici").await;
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(disabled_user)
+        .execute(&test.pool)
+        .await
+        .expect("user disabled");
+
+    let (coop_id, count) = bootstrap(&test.pool, "Ana Kooperatif").await;
+
+    // Only the active user is enrolled; the disabled user gets NO row —
+    // not even a suspended one — so nothing can silently reactivate.
+    assert_eq!(count, 1, "only active users may receive memberships");
+    let memberships: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT user_id, status FROM cooperative_memberships \
+         WHERE cooperative_id = $1 ORDER BY user_id",
+    )
+    .bind(coop_id)
+    .fetch_all(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(memberships, vec![(active_user, "active".to_string())]);
+
+    // Reactivating the user must NOT conjure a membership: cooperative
+    // access still requires an explicit add-member decision.
+    sqlx::query("UPDATE users SET status = 'active' WHERE id = $1")
+        .bind(disabled_user)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let still_absent: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS(\
+            SELECT 1 FROM cooperative_memberships \
+            WHERE cooperative_id = $1 AND user_id = $2)",
+    )
+    .bind(coop_id)
+    .bind(disabled_user)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert!(
+        still_absent,
+        "reactivation must not silently grant membership"
+    );
+    test.cleanup().await;
+}
+
+/// P0 (M1-P2-C3-B4): a fresh install may claim ONLY the known system
+/// seed rows — migration 0010's ten global financial_categories
+/// (`created_by IS NULL`). Bootstrap binds them to the new cooperative
+/// so cooperative-scoped category queries stay functional.
+#[tokio::test]
+async fn bootstrap_claims_only_system_seed_rows() {
+    let Some(test) = setup().await else { return };
+    let (coop_id, _count) = bootstrap(&test.pool, "Ana Kooperatif").await;
+
+    let claimed_seeds: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM financial_categories \
+         WHERE cooperative_id = $1 AND created_by IS NULL",
+    )
+    .bind(coop_id)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(claimed_seeds, 10, "all ten seed categories claimed");
+
+    let unowned: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM financial_categories WHERE cooperative_id IS NULL",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(unowned, 0, "no unowned seed category may remain");
+
+    // No other business row may have been conjured or touched.
+    let other_business_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM persons) + (SELECT count(*) FROM payments) \
+         + (SELECT count(*) FROM financial_accounts)",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(other_business_rows, 0);
+    test.cleanup().await;
+}
+
+/// C5-3: since 0025 closed the NULL lane (`cooperative_id NOT NULL` on
+/// all 37 business tables), an unowned business row can no longer be
+/// WRITTEN at all — the schema itself is the fail-closed wall. This
+/// test proves the schema rejection and that bootstrap then runs to a
+/// clean commit (the runtime fail-closed scan stays as defense-in-depth
+/// for databases migrated mid-lifecycle).
+#[tokio::test]
+async fn unowned_business_rows_are_schema_rejected_and_bootstrap_commits() {
+    let Some(test) = setup().await else { return };
+    let user = create_user(&test.pool, "miras_kullanici").await;
+
+    // NULL-owned writes are rejected by the column NOT NULL — the old
+    // "unowned row" precondition is physically unreachable.
+    let unowned_category = sqlx::query(
+        "INSERT INTO financial_categories (category_type, name, created_by) \
+         VALUES ('income', 'Tarihi Kategori', $1)",
+    )
+    .bind(user)
+    .execute(&test.pool)
+    .await;
+    assert!(
+        unowned_category.is_err(),
+        "NULL cooperative_id must be rejected by NOT NULL"
+    );
+    let unowned_period = sqlx::query(
+        "INSERT INTO periods (name, collection_start_date, due_date) \
+         VALUES ('Miras Dönem', '2026-01-01', '2026-02-01')",
+    )
+    .execute(&test.pool)
+    .await;
+    assert!(
+        unowned_period.is_err(),
+        "NULL cooperative_id must be rejected by NOT NULL"
+    );
+
+    // Bootstrap then commits cleanly: cooperative, marker, memberships
+    // and seed categories all materialize in one transaction.
+    let result = kooperatif_server::tenant::repo::bootstrap_initial_cooperative(
+        &test.pool,
+        "Ana Kooperatif",
+    )
+    .await;
+    result.expect("bootstrap must commit on a NULL-free database");
+
+    let coops: i64 = sqlx::query_scalar("SELECT count(*) FROM cooperatives")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(coops, 1);
+    let marker: Option<Uuid> =
+        sqlx::query_scalar("SELECT bootstrap_cooperative_id FROM installation_state")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap();
+    assert!(marker.is_some());
+    let memberships: i64 = sqlx::query_scalar("SELECT count(*) FROM cooperative_memberships")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(memberships, 1, "the only user is auto-enrolled");
+    let seeds: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM financial_categories WHERE cooperative_id IS NOT NULL",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(seeds, 10, "bootstrap seeds the ten categories bound");
+    test.cleanup().await;
+}
+
+#[tokio::test]
 async fn second_bootstrap_marker_is_rejected_by_constraint() {
     let Some(test) = setup().await else { return };
     bootstrap(&test.pool, "Ana Kooperatif").await;
@@ -397,7 +557,9 @@ async fn cooperative_switch_and_context_resolution() {
     let (coop_id, _) = bootstrap(&test.pool, "Ana Kooperatif").await;
     let (cookie, csrf, _) = login(&test.app, test.peer(), "gecis_kullanici").await;
 
-    // Missing context fails closed (no header, no session default yet).
+    // M1-P6 B4: a session that never switched resolves to the
+    // bootstrap scope — the probe reports exactly the scope business
+    // authorization uses (no separate header-driven model).
     let (status, body) = send(
         &test.app,
         request_builder(
@@ -410,8 +572,8 @@ async fn cooperative_switch_and_context_resolution() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"]["code"], "cooperative_context_required");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cooperativeId"].as_str().unwrap(), coop_id.to_string());
 
     // Malformed header is rejected, never parsed loosely.
     let (status, _) = send(
@@ -460,8 +622,8 @@ async fn cooperative_switch_and_context_resolution() {
     assert_eq!(body["cooperativeId"].as_str().unwrap(), coop_id.to_string());
     assert_eq!(body["cooperativeName"], "Ana Kooperatif");
 
-    // Explicit header wins (same coop here — precedence proven by the
-    // header path in the foreign-coop test below).
+    // A header equal to the session scope is accepted as a pure
+    // assertion (B4: it can confirm, never select).
     let (status, _) = send(
         &test.app,
         request_builder(
@@ -632,7 +794,8 @@ async fn non_enabled_cooperative_is_unreachable_even_for_members() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "cooperative_not_ready");
 
-    // Header-scoped context to the gated coop is refused the same way.
+    // B4: a header naming any cooperative other than the session scope
+    // is an override attempt — refused before the target is examined.
     let (status, body) = send(
         &test.app,
         request_builder(
@@ -646,7 +809,7 @@ async fn non_enabled_cooperative_is_unreachable_even_for_members() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], "cooperative_not_ready");
+    assert_eq!(body["error"]["code"], "cooperative_access_denied");
 
     // The enabled bootstrap coop still resolves fine — one user, two
     // memberships, independent reachability (PD-02).

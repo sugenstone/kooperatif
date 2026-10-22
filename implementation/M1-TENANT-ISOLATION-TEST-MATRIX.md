@@ -83,9 +83,22 @@ Legend: expected status `404` = existence-hidden (`docs/21:86`);
 
 ## T7 — UI / multi-tab E2E
 
+> **T7.1 supersession (M1-P7-A, owner-approved):** the original T7.1
+> expected two tabs of one session to hold DIFFERENT cooperatives
+> (per-tab `sessionStorage` scope — the M1-K1 hybrid option E). The
+> approved architecture is now **one authenticated session = one
+> authoritative active cooperative** (`user_sessions.active_cooperative_id`,
+> changed only through the audited `POST /api/auth/cooperative`):
+> all tabs sharing the session converge to the same cooperative —
+> verified live by P6-B5 E2E (cross-tab convergence) and P6-B6. The
+> `sessionStorage` value survives only as a per-tab ASSERTION mirror
+> (never a selector): a stale assertion is rejected with 403. The
+> historical M1-K1 record in `implementation/M1-OWNER-DECISIONS.md` is
+> preserved unchanged; this note documents the supersession.
+
 | # | Setup | Action | Expected | Level |
 | --- | --- | --- | --- | --- |
-| T7.1 | U2 tab1→A, tab2→B (sessionStorage each) | both lists open | tab1 shows A data, tab2 B data, headers differ | E2E |
+| T7.1 | ~~U2 tab1→A, tab2→B~~ **superseded** — see note: U2 tab1+tab2 share ONE session scope | tab1 switches A→B while tab2 is open | tab2 masks stale content, revalidates `/api/auth/me`, converges to B; no tab may hold an independent scope | E2E |
 | T7.2 | switch tab1 A→B mid-form | coop switcher | dirty-form warning; nav resets; header now B | E2E |
 | T7.3 | bookmarked URL under coop A, session default B | load deep link | coop header wins explicit ctx; UI banner shows active coop | E2E |
 | T7.4 | revoke B while tab2 active | next action/tab poll | 403 → UI falls back to coop selector | E2E |

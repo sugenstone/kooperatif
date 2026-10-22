@@ -55,6 +55,7 @@ impl TestDb {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -93,7 +94,7 @@ async fn setup() -> Option<TestDb> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     Some(TestDb {
@@ -113,7 +114,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
     );
     let hash =
         kooperatif_server::auth::identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    kooperatif_server::auth::users::create_user(pool, username, "P1a Test", &hash)
+    kooperatif_server::auth::users::create_user(pool, username, "P1a Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -152,11 +153,19 @@ async fn insert_assignment(
 /// ordering (roles/assignments created before bootstrap). Must stay in
 /// sync with migrations/0019_cooperative_rbac_foundation.sql.
 async fn replay_0019_backfill(pool: &PgPool, bootstrap: Uuid) {
-    sqlx::query("UPDATE roles SET cooperative_id = $1 WHERE cooperative_id IS NULL")
-        .bind(bootstrap)
-        .execute(pool)
-        .await
-        .expect("roles backfill");
+    // The 0019 statement is replayed byte-identically EXCEPT for the
+    // deliberate exclusion of the M1-P6-B2 platform lifecycle role:
+    // 'platform-lifecycle' did not exist at 0019 time, is a NULL-scope
+    // (platform) role by contract, and must never be re-homed into a
+    // cooperative by this historical-replay fixture.
+    sqlx::query(
+        "UPDATE roles SET cooperative_id = $1 WHERE cooperative_id IS NULL \
+           AND lower(name) <> lower('platform-lifecycle')",
+    )
+    .bind(bootstrap)
+    .execute(pool)
+    .await
+    .expect("roles backfill");
     sqlx::query(
         "UPDATE user_role_assignments ura \
             SET cooperative_id = $1 \
@@ -249,14 +258,22 @@ async fn cooperative_columns_and_template_seed_exist() {
     .fetch_one(&test.pool)
     .await
     .expect("template seed");
-    let catalog: i64 = sqlx::query_scalar("SELECT count(*) FROM permissions")
-        .fetch_one(&test.pool)
-        .await
-        .expect("catalog size");
+    // M1-P6-B1 refined the contract: the template mirrors the
+    // COOPERATIVE-scoped catalog. One key is excluded:
+    // - `cooperatives.manage` is platform authority — it must never
+    //   appear on a cooperative template (permanent exclusion).
+    // B5 (0072, approved) added memberships.manage to the template, so
+    // the catalog exclusion now covers the platform key only.
+    let catalog: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM permissions WHERE key NOT IN ('cooperatives.manage')",
+    )
+    .fetch_one(&test.pool)
+    .await
+    .expect("catalog size");
     assert!(catalog > 0);
     assert_eq!(
         template_perms, catalog,
-        "admin template mirrors the full catalog"
+        "admin template mirrors the cooperative-scoped catalog"
     );
 
     // Templates are not roles and can never be assigned.
@@ -521,7 +538,7 @@ async fn administrator_continuity_assertion_detects_lockout() {
 async fn migration_replay_is_idempotent() {
     let Some(test) = setup().await else { return };
 
-    app_db::run_migrations(&test.pool)
+    app_db::run_test_migrations(&test.pool)
         .await
         .expect("migration re-run is a no-op");
     let applied: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")

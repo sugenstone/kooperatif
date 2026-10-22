@@ -16,6 +16,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
@@ -40,6 +41,10 @@
 	let reason = $state('');
 	let submitError = $state<MessageKey | null>(null);
 	let submitting = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() => shareId !== '' || effectiveReturnDate !== '' || reason !== ''
+	);
 	let idempotencyKey = $state(crypto.randomUUID());
 
 	const dateFormatter = new Intl.DateTimeFormat(activeIntlLocale(), { dateStyle: 'medium' });
@@ -92,6 +97,7 @@
 				body: request
 			});
 			idempotencyKey = crypto.randomUUID();
+			formGuard.clear();
 			await goto(resolve(`/hisse-iadeleri/${created.id}`));
 		} catch (error) {
 			submitError =

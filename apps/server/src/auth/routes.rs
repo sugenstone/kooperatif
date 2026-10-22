@@ -31,7 +31,6 @@ use crate::auth::extractor::CurrentAuth;
 use crate::auth::limiter;
 use crate::auth::session::{self};
 use crate::auth::token;
-use crate::auth::users;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 
@@ -86,6 +85,16 @@ pub struct AuthResponse {
     pub cooperatives: Vec<crate::tenant::repo::CooperativeMembershipSummary>,
     /// Session's default cooperative (UX convenience, M1-K1).
     pub active_cooperative_id: Option<Uuid>,
+    /// Whether the session owner holds platform authority — an active
+    /// NULL-scope `users.manage` grant (M1). Drives whether the
+    /// frontend surfaces global-account controls; backend enforcement
+    /// is the definer gate, never this hint.
+    pub platform_admin: bool,
+    /// Whether the session owner holds NULL-scope `cooperatives.manage`
+    /// (M1-P7-B). Drives the platform cooperative-lifecycle UI only;
+    /// backend enforcement is `app_has_platform_permission` inside the
+    /// lifecycle definers, never this hint.
+    pub platform_cooperatives_manage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,17 +179,16 @@ pub async fn login(
 
     // Malformed usernames can never match a stored user; keep the same
     // external failure shape while still doing real verification work.
+    let now = state.auth.clock.now();
     let normalized = match crate::auth::identity::normalize_and_validate_username(&body.username) {
         Ok(normalized) => normalized,
         Err(_) => {
             state.auth.limiter.record_ip_attempt(&client_ip);
             crate::auth::identity::dummy_verify(&state.auth.argon2, &body.password);
-            audit::record(
+            audit::record_login_failed(
                 pool,
-                audit::SecurityEventType::LoginFailed,
-                None,
-                None,
                 login_failed_metadata(&body.username.to_lowercase(), "unknown_username"),
+                now,
             )
             .await;
             tracing::info!(outcome = "login_failed", reason = "invalid_username");
@@ -189,12 +197,10 @@ pub async fn login(
     };
 
     if !state.auth.limiter.check(&normalized, &client_ip).allowed {
-        audit::record(
+        audit::record_login_failed(
             pool,
-            audit::SecurityEventType::LoginFailed,
-            None,
-            None,
             login_failed_metadata(&normalized, "rate_limited"),
+            now,
         )
         .await;
         tracing::warn!(outcome = "login_rate_limited", "login blocked by limiter");
@@ -202,64 +208,11 @@ pub async fn login(
     }
     state.auth.limiter.record_ip_attempt(&client_ip);
 
-    let user = users::find_by_normalized_username(pool, &normalized)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "user lookup failed");
-            ApiError::Internal
-        })?;
-
-    let argon2 = state.auth.argon2.clone();
-    let password_ok = match &user {
-        Some(user) => {
-            crate::auth::identity::verify_password(&argon2, &body.password, &user.password_hash)
-                .unwrap_or(false)
-        }
-        None => {
-            // Equalize timing for unknown usernames (anti-enumeration).
-            crate::auth::identity::dummy_verify(&argon2, &body.password);
-            false
-        }
-    };
-
-    let Some(user) = user else {
-        state.auth.limiter.record_failure(&normalized);
-        audit::record(
-            pool,
-            audit::SecurityEventType::LoginFailed,
-            None,
-            None,
-            login_failed_metadata(&normalized, "unknown_username"),
-        )
-        .await;
-        tracing::info!(outcome = "login_failed", reason = "unknown_username");
-        return Err(ApiError::AuthenticationFailed);
-    };
-
-    let user_disabled = user.status != "active";
-    if !password_ok || user_disabled {
-        state.auth.limiter.record_failure(&normalized);
-        let reason = if user_disabled {
-            "user_disabled"
-        } else {
-            "invalid_credentials"
-        };
-        audit::record(
-            pool,
-            audit::SecurityEventType::LoginFailed,
-            Some(user.id),
-            None,
-            login_failed_metadata(&normalized, reason),
-        )
-        .await;
-        tracing::info!(outcome = "login_failed", reason, user_id = %user.id);
-        return Err(ApiError::AuthenticationFailed);
-    }
-
-    // Success: fresh session (fixation-safe: brand-new token, the
-    // attacker-supplied cookie value is never reused), limiter recovery.
-    state.auth.limiter.on_success(&normalized);
-    let now = state.auth.clock.now();
+    // Credential-bound login: `app_session_open` verifies the password
+    // against the DB-side verifier and creates the session atomically.
+    // A uniform `None` on failure keeps the endpoint non-oracle while
+    // the definer writes the reason-granular LoginFailed audit row
+    // itself (M1-P4-P3B).
     let session_token = token::generate_token();
     let csrf_token = token::generate_token();
     let client_label = session::coarse_client_label(
@@ -268,10 +221,11 @@ pub async fn login(
             .and_then(|value| value.to_str().ok()),
     );
 
-    let created = session::create_session(
+    let opened = session::open_session(
         pool,
-        session::NewSession {
-            user_id: user.id,
+        session::LoginAttempt {
+            username: &normalized,
+            password: &body.password,
             token_hash: session_token.hash,
             csrf_token: &csrf_token.raw,
             absolute_ttl_secs: state.auth.config.session_absolute_ttl_secs,
@@ -286,19 +240,25 @@ pub async fn login(
         ApiError::Internal
     })?;
 
-    if let Err(error) = users::touch_last_login(pool, user.id, now).await {
-        tracing::warn!(error = %error, "last_login update failed");
-    }
+    let Some(created) = opened else {
+        state.auth.limiter.record_failure(&normalized);
+        tracing::info!(outcome = "login_failed", reason = "credentials_rejected");
+        return Err(ApiError::AuthenticationFailed);
+    };
 
-    audit::record(
+    // Success: fresh session (fixation-safe: brand-new token, the
+    // attacker-supplied cookie value is never reused), limiter recovery.
+    state.auth.limiter.on_success(&normalized);
+
+    audit::record_platform_session(
         pool,
+        &session_token.hash,
         audit::SecurityEventType::LoginSucceeded,
-        Some(user.id),
-        Some(created.id),
         serde_json::json!({ "username": normalized }),
+        now,
     )
     .await;
-    tracing::info!(outcome = "login_succeeded", user_id = %user.id, session_id = %created.id);
+    tracing::info!(outcome = "login_succeeded", user_id = %created.user_id, session_id = %created.session_id);
 
     let cookie = cookies::build_session_cookie(
         &session_token.raw,
@@ -306,8 +266,17 @@ pub async fn login(
         state.auth.config.session_absolute_ttl_secs,
     );
 
-    let (permissions, roles) = authorization_context(pool, user.id).await?;
-    let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, user.id)
+    let (permissions, roles) = authorization_context(
+        pool,
+        &session_token.hash,
+        created.active_cooperative_id,
+        now,
+    )
+    .await?;
+    let platform_admin = is_platform_admin(pool, &session_token.hash, now).await?;
+    let platform_cooperatives_manage =
+        has_platform_cooperatives_manage(pool, created.user_id).await?;
+    let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, &session_token.hash, now)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "cooperative list failed at login");
@@ -316,12 +285,12 @@ pub async fn login(
 
     let body = AuthResponse {
         user: UserSummary {
-            id: user.id,
-            username: user.username.clone(),
-            display_name: user.display_name.clone(),
+            id: created.user_id,
+            username: created.username.clone(),
+            display_name: created.display_name.clone(),
         },
         session: SessionInfo {
-            id: created.id,
+            id: created.session_id,
             created_at: created.created_at,
             expires_at: created.expires_at,
         },
@@ -330,6 +299,8 @@ pub async fn login(
         roles,
         cooperatives,
         active_cooperative_id: created.active_cooperative_id,
+        platform_admin,
+        platform_cooperatives_manage,
     };
 
     Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(body)).into_response())
@@ -347,9 +318,15 @@ pub async fn login(
 /// the provably never-bootstrapped lane; tenant residue without a
 /// bootstrap marker is a broken state and fails loud rather than
 /// overstating authority.
+///
+/// M1-P4-S2A: the resolvers are credential-bound — the principal is
+/// derived from the session token hash inside the database
+/// (`app_session_*` definers), never from a caller-supplied `user_id`.
 async fn authorization_context(
     pool: &sqlx::PgPool,
-    user_id: Uuid,
+    session_token_hash: &[u8; 32],
+    active_cooperative_id: Option<Uuid>,
+    now: OffsetDateTime,
 ) -> Result<(Vec<String>, Vec<RoleSummaryDto>), ApiError> {
     let internal = |context: &'static str| {
         move |error: sqlx::Error| {
@@ -360,14 +337,28 @@ async fn authorization_context(
     let bootstrap = crate::tenant::repo::resolve_bootstrap(pool)
         .await
         .map_err(internal("bootstrap lookup failed"))?;
-    let (permissions, roles) = match bootstrap {
-        Some((cooperative_id, _)) => (
-            crate::auth::authz::effective_permissions_in_bootstrap(pool, user_id, cooperative_id)
-                .await
-                .map_err(internal("scoped permission resolution failed"))?,
-            crate::auth::authz::active_role_summaries_in_bootstrap(pool, user_id, cooperative_id)
-                .await
-                .map_err(internal("scoped role resolution failed"))?,
+    // M1-P6 B4: hints follow the SESSION scope — the active
+    // cooperative, or bootstrap while the session never switched —
+    // exactly the scope BusinessAuth will authorize against.
+    let scope = active_cooperative_id.or(bootstrap.map(|(id, _)| id));
+    let (permissions, roles) = match scope {
+        Some(cooperative_id) => (
+            crate::auth::authz::session_permissions_scoped(
+                pool,
+                session_token_hash,
+                cooperative_id,
+                now,
+            )
+            .await
+            .map_err(internal("scoped permission resolution failed"))?,
+            crate::auth::authz::session_role_summaries_scoped(
+                pool,
+                session_token_hash,
+                cooperative_id,
+                now,
+            )
+            .await
+            .map_err(internal("scoped role resolution failed"))?,
         ),
         None => {
             if !crate::tenant::repo::never_bootstrapped(pool)
@@ -378,10 +369,10 @@ async fn authorization_context(
                 return Err(ApiError::Internal);
             }
             (
-                crate::auth::authz::effective_permissions(pool, user_id)
+                crate::auth::authz::session_permissions_legacy(pool, session_token_hash, now)
                     .await
                     .map_err(internal("permission resolution failed"))?,
-                crate::auth::authz::active_role_summaries(pool, user_id)
+                crate::auth::authz::session_role_summaries_legacy(pool, session_token_hash, now)
                     .await
                     .map_err(internal("role resolution failed"))?,
             )
@@ -401,13 +392,22 @@ pub async fn me(
     auth: CurrentAuth,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
-    let (permissions, roles) = authorization_context(pool, auth.user_id).await?;
-    let cooperatives = crate::tenant::repo::list_user_cooperatives(pool, auth.user_id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "cooperative list failed");
-            ApiError::Internal
-        })?;
+    let (permissions, roles) = authorization_context(
+        pool,
+        &auth.session_token_hash,
+        auth.active_cooperative_id,
+        auth.authed_at,
+    )
+    .await?;
+    let platform_admin = is_platform_admin(pool, &auth.session_token_hash, auth.authed_at).await?;
+    let platform_cooperatives_manage = has_platform_cooperatives_manage(pool, auth.user_id).await?;
+    let cooperatives =
+        crate::tenant::repo::list_user_cooperatives(pool, &auth.session_token_hash, auth.authed_at)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "cooperative list failed");
+                ApiError::Internal
+            })?;
     Ok(Json(AuthResponse {
         user: UserSummary {
             id: auth.user_id,
@@ -424,7 +424,51 @@ pub async fn me(
         roles,
         cooperatives,
         active_cooperative_id: auth.active_cooperative_id,
+        platform_admin,
+        platform_cooperatives_manage,
     }))
+}
+
+/// M1: does the session owner hold platform authority (active
+/// NULL-scope `users.manage`)? Resolved inside the database through
+/// the session-bound definer — a credential-derived check, never a
+/// caller-supplied flag.
+async fn is_platform_admin(
+    pool: &sqlx::PgPool,
+    session_token_hash: &[u8],
+    now: OffsetDateTime,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>("SELECT public.app_session_is_platform_admin($1, $2)")
+        .bind(session_token_hash)
+        .bind(now)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "platform admin check failed");
+            ApiError::Internal
+        })
+}
+
+/// M1-P7-B: does the session owner hold an effective NULL-scope
+/// `cooperatives.manage` grant? `p_user_id` is the credential-derived
+/// session owner (extractor/creation path), never client input.
+/// `app_has_platform_permission` requires an active NULL-scope role +
+/// NULL-scope assignment + active user, so cooperative-scoped or forged
+/// grants can never satisfy it; a disabled owner resolves to false.
+async fn has_platform_cooperatives_manage(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT public.app_has_platform_permission($1, 'cooperatives.manage')",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "platform cooperatives.manage check failed");
+        ApiError::Internal
+    })
 }
 
 pub async fn logout(
@@ -452,7 +496,7 @@ pub async fn logout(
             ApiError::Internal
         })?;
 
-    let Ok((session_row, user_row)) = classified else {
+    let Ok(session_row) = classified else {
         return Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, clearing)]).into_response());
     };
 
@@ -460,22 +504,17 @@ pub async fn logout(
     csrf::validate_csrf_token(&headers, &session_row.csrf_token)
         .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
 
-    session::revoke_session(pool, session_row.id, Some(user_row.id), "logout", now)
+    // The definer writes the `logout` audit row atomically with the
+    // revocation itself (S2B) — a revoked session cannot resolve an
+    // owner, so no post-revocation pool write could ever record it.
+    session::revoke_session(pool, token_hash, session_row.session_id, "logout", now)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "logout: revocation failed");
             ApiError::Internal
         })?;
 
-    audit::record(
-        pool,
-        audit::SecurityEventType::Logout,
-        Some(user_row.id),
-        Some(session_row.id),
-        serde_json::json!({}),
-    )
-    .await;
-    tracing::info!(outcome = "logout", user_id = %user_row.id, session_id = %session_row.id);
+    tracing::info!(outcome = "logout", user_id = %session_row.user_id, session_id = %session_row.session_id);
 
     Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, clearing)]).into_response())
 }
@@ -485,7 +524,7 @@ pub async fn list_sessions(
     auth: CurrentAuth,
 ) -> Result<Json<SessionsResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
-    let rows = session::list_active_sessions(pool, auth.user_id, state.auth.clock.now())
+    let rows = session::list_active_sessions(pool, auth.session_token_hash, state.auth.clock.now())
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "session listing failed");
@@ -499,7 +538,7 @@ pub async fn list_sessions(
             created_at: row.created_at,
             last_seen_at: row.last_seen_at,
             expires_at: row.expires_at,
-            current: row.id == auth.session_id,
+            current: row.is_current,
             client_label: row.client_label,
         })
         .collect();
@@ -522,45 +561,32 @@ pub async fn revoke_session(
     let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
     let now = state.auth.clock.now();
 
-    let revoked =
-        session::revoke_session(pool, session_id, Some(auth.user_id), "user_revoked", now)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "session revocation failed");
-                ApiError::Internal
-            })?;
+    // Credential-bound revocation: the definer resolves the hash owner
+    // and distinguishes own-revoked (idempotent 204) from
+    // foreign/unknown (indistinguishable 404) server-side.
+    let outcome = session::revoke_session(
+        pool,
+        auth.session_token_hash,
+        session_id,
+        "user_revoked",
+        now,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "session revocation failed");
+        ApiError::Internal
+    })?;
 
-    if !revoked {
-        // Idempotency: an already-revoked OWN session answers 204;
-        // anything else (foreign/unknown) answers an indistinguishable
-        // 404 — never leaking whose session it was.
-        let already: Option<bool> = sqlx::query_scalar(
-            "SELECT revoked_at IS NOT NULL FROM user_sessions \
-                                WHERE id = $1 AND user_id = $2",
-        )
-        .bind(session_id)
-        .bind(auth.user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "revocation check failed");
-            ApiError::Internal
-        })?;
-        if already != Some(true) {
+    if outcome != session::RevokeOutcome::Revoked {
+        if outcome == session::RevokeOutcome::NotFound {
             tracing::info!(outcome = "session_revoke_denied", target_session = %session_id);
             return Err(ApiError::NotFound);
         }
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
 
-    audit::record(
-        pool,
-        audit::SecurityEventType::SessionRevoked,
-        Some(auth.user_id),
-        Some(session_id),
-        serde_json::json!({ "source": "user" }),
-    )
-    .await;
+    // `session_revoked` is written inside `app_session_revoke` — atomic
+    // with the revocation (S2B).
     tracing::info!(outcome = "session_revoked", user_id = %auth.user_id, session_id = %session_id);
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -579,8 +605,7 @@ pub async fn revoke_others(
 
     let count = session::revoke_all_other_sessions(
         pool,
-        auth.user_id,
-        auth.session_id,
+        auth.session_token_hash,
         "user_revoked_others",
         now,
     )
@@ -590,14 +615,8 @@ pub async fn revoke_others(
         ApiError::Internal
     })?;
 
-    audit::record(
-        pool,
-        audit::SecurityEventType::SessionsRevokedAllOthers,
-        Some(auth.user_id),
-        Some(auth.session_id),
-        serde_json::json!({ "revoked_count": count }),
-    )
-    .await;
+    // `sessions_revoked_all_others` is written inside
+    // `app_session_revoke_others` — atomic with the revocation (S2B).
     tracing::info!(outcome = "sessions_revoked_all_others", user_id = %auth.user_id, count);
 
     Ok(StatusCode::NO_CONTENT.into_response())

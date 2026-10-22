@@ -46,9 +46,11 @@ async fn migrations_apply_to_a_clean_database_and_readiness_reports_ready() {
 
     let pool = db::connect(&url).await.expect("database connectivity");
 
-    db::run_migrations(&pool).await.expect("migrations apply");
+    db::run_test_migrations(&pool)
+        .await
+        .expect("migrations apply");
     // Re-running must be a no-op (deterministic, idempotent mechanism).
-    db::run_migrations(&pool)
+    db::run_test_migrations(&pool)
         .await
         .expect("migrations re-run is a no-op");
 
@@ -125,6 +127,7 @@ fn disposable_name() -> String {
 }
 
 async fn create_probe(admin: &sqlx::PgPool, name: &str) {
+    db::assert_disposable_test_database_name(name);
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(admin)
         .await
@@ -132,6 +135,7 @@ async fn create_probe(admin: &sqlx::PgPool, name: &str) {
 }
 
 async fn drop_probe(admin: &sqlx::PgPool, name: &str) {
+    db::assert_disposable_test_database_name(name);
     sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
         .execute(admin)
         .await
@@ -170,16 +174,16 @@ fn probe_admin_url() -> String {
         .expect("url with database segment")
 }
 
-/// Run GC passes until the probe is gone (deadline-bounded). Uses
-/// the leader-elected sweep: under parallel load a losing call is a
-/// cheap no-op while whichever sweeper holds leadership does the
-/// work — avoids adding to the checkpoint convoy. Eventual
-/// reclamation within a generous deadline is the contract, not
-/// pass count.
+/// Run authorized-delete GC passes until the probe is gone
+/// (deadline-bounded). The authorized path is still confined to
+/// databases this process registered as current-run-owned, so tests
+/// register their probe before reclamation is expected. Eventual
+/// reclamation within a generous deadline is the contract, not pass
+/// count.
 async fn dropped_eventually(admin: &sqlx::PgPool, name: &str) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        let _ = db::drop_stale_test_databases(admin).await;
+        let _ = db::drop_stale_test_databases_authorized_forced(admin).await;
         if !probe_exists(admin, name).await {
             return true;
         }
@@ -221,11 +225,22 @@ async fn gc_marks_on_first_sighting_then_drops_after_grace() {
     let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(probe_exists(&admin, &name).await);
 
-    // Backdate the marker past the 30-minute grace → reclaimed.
-    // Several passes: a concurrent GC may legitimately hold the
-    // probe's advisory lock mid-classification (try-lock skip is the
-    // DESIGNED safe path), so reclamation is eventual, not one-shot.
+    // Backdate the marker past the 30-minute grace → under the default
+    // policy the candidate is STILL retained: automatic sweeps never
+    // delete (previous-run ownership is outside the current-run
+    // teardown boundary). Only the authorized-delete variant reclaims.
     set_probe_comment(&admin, &name, "kooperatif-gc-pending:1").await;
+    let _ = db::drop_stale_test_databases_forced(&admin).await;
+    assert!(
+        probe_exists(&admin, &name).await,
+        "default-policy sweep must retain even a stale-pending database"
+    );
+    // The probe stays UNREGISTERED until every retention assertion is
+    // done: CURRENT_RUN_DATABASES is process-global, so registering
+    // earlier would let a sibling test's authorized sweep legally
+    // reclaim this probe mid-assertion. Unregistered names sit outside
+    // the only deletion boundary — no sweep can reach them.
+    db::register_current_run_database(&name);
     assert!(
         dropped_eventually(&admin, &name).await,
         "stale pending marker must be reclaimed"
@@ -241,7 +256,13 @@ async fn gc_never_touches_connected_or_nonmatching_databases() {
     let nonmatching = format!("kooperatif_gc_keep_{}", Uuid::new_v4().simple());
 
     create_probe(&admin, &matching).await;
-    create_probe(&admin, &nonmatching).await;
+    // Deliberate harness bypass: this test's whole point is proving GC
+    // ignores foreign-name databases, so the foreign probe is created by
+    // raw admin SQL — the guarded helpers refuse it by design.
+    sqlx::query(&format!("CREATE DATABASE \"{nonmatching}\""))
+        .execute(&admin)
+        .await
+        .expect("nonmatching probe database created");
 
     // A live pool on the matching DB = active run → not even marked.
     let url = test_database_url().unwrap();
@@ -269,7 +290,12 @@ async fn gc_never_touches_connected_or_nonmatching_databases() {
     assert!(probe_comment(&admin, &nonmatching).await.is_none());
 
     drop_probe(&admin, &matching).await;
-    drop_probe(&admin, &nonmatching).await;
+    sqlx::query(&format!(
+        "DROP DATABASE IF EXISTS \"{nonmatching}\" WITH (FORCE)"
+    ))
+    .execute(&admin)
+    .await
+    .expect("nonmatching probe dropped");
 }
 
 /// M1-INFRA-002 — a claimed (heartbeat-owned) database survives an
@@ -318,6 +344,7 @@ async fn expired_lease_demotes_to_pending_before_any_drop() {
     let admin = admin_pool().await;
     let name = disposable_name();
     create_probe(&admin, &name).await;
+    db::register_current_run_database(&name);
 
     // Simulate a dead owner: an owned marker far past the lease TTL.
     set_probe_comment(&admin, &name, "kooperatif-test-owned:1").await;
@@ -336,7 +363,8 @@ async fn expired_lease_demotes_to_pending_before_any_drop() {
     let _ = db::drop_stale_test_databases_forced(&admin).await;
     assert!(probe_exists(&admin, &name).await);
 
-    // Age the pending marker past the grace → finally reclaimed.
+    // Age the pending marker past the grace → finally reclaimed on the
+    // authorized current-run-confined path.
     set_probe_comment(&admin, &name, "kooperatif-gc-pending:1").await;
     assert!(
         dropped_eventually(&admin, &name).await,
@@ -354,6 +382,7 @@ async fn interrupted_run_is_reclaimed_after_pending_grace() {
     let admin = admin_pool().await;
     let name = disposable_name();
     create_probe(&admin, &name).await;
+    db::register_current_run_database(&name);
 
     // Claim, then simulate process death by releasing the claim.
     let claim = db::claim_test_database_with_heartbeat(
@@ -382,9 +411,42 @@ async fn interrupted_run_is_reclaimed_after_pending_grace() {
     drop_probe(&admin, &name).await;
 }
 
-/// M1-INFRA-002 — deterministic scan→drop race: the GC pauses inside
-/// its advisory lock immediately before the real DROP, the test then
-/// opens a connection to the candidate, and the plain (non-FORCE)
+/// The authorized-delete GC path is confined to databases THIS process
+/// registered as current-run-owned: a foreign candidate — shaped
+/// exactly like a previous-run leftover (stale `gc-pending` marker,
+/// zero connections) — is retained even under the authorized sweep,
+/// while a registered probe created by this test is reclaimed.
+#[tokio::test]
+async fn authorized_sweep_cannot_target_unregistered_databases() {
+    let admin = admin_pool().await;
+    let foreign = disposable_name();
+    let owned = disposable_name();
+    create_probe(&admin, &foreign).await;
+    create_probe(&admin, &owned).await;
+    db::register_current_run_database(&owned);
+
+    set_probe_comment(&admin, &foreign, "kooperatif-gc-pending:1").await;
+    set_probe_comment(&admin, &owned, "kooperatif-gc-pending:1").await;
+
+    let _ = db::drop_stale_test_databases_authorized_forced(&admin).await;
+    assert!(
+        probe_exists(&admin, &foreign).await,
+        "authorized sweep must never reach unregistered databases"
+    );
+    assert!(
+        !probe_exists(&admin, &owned).await,
+        "registered current-run probe is reclaimable"
+    );
+
+    drop_probe(&admin, &foreign).await;
+}
+
+/// M1-INFRA-002 — deterministic scan→drop race on the authorized-delete
+/// path (the only path that can still DROP, and only for names this
+/// process registered as current-run-owned): the GC pauses inside its
+/// advisory
+/// lock immediately before the real DROP, the test then opens a
+/// connection to the candidate, and the plain (non-FORCE)
 /// `DROP DATABASE` must be rejected atomically by the engine (55006) —
 /// the database survives and the late connection is never killed.
 #[tokio::test]
@@ -400,11 +462,15 @@ async fn scan_to_drop_connection_race_is_survived() {
         if !probe_exists(&admin, &name).await {
             create_probe(&admin, &name).await;
         }
+        // The gated authorized pass may only reach current-run names.
+        db::register_current_run_database(&name);
         set_probe_comment(&admin, &name, "kooperatif-gc-pending:1").await;
 
         let gate = db::DropGate::for_database(&name);
         let mut live = None;
-        let gc = db::drop_stale_test_databases_gated(&admin, Some(&gate));
+        // The race needs a real DROP attempt → the explicitly
+        // authorized variant (default-policy sweeps never drop).
+        let gc = db::drop_stale_test_databases_authorized_gated(&admin, Some(&gate));
         let driver = async {
             // GC is parked between its own zero-connection re-check
             // and the DROP — inject the racy reconnect deterministically.
@@ -420,12 +486,16 @@ async fn scan_to_drop_connection_race_is_survived() {
             tokio::join!(gc, driver)
         })
         .await;
-        let Ok((dropped, ())) = outcome else {
+        let Ok((_dropped, ())) = outcome else {
             // Another pass stole the probe — recreate and retry.
             continue;
         };
 
-        assert_eq!(dropped, 0, "a connected database must not be dropped");
+        // `dropped` counts every candidate this pass reclaimed —
+        // unrelated expired stale databases legitimately drop alongside
+        // the probe (the file's probe-state convention already treats
+        // the count as unreliable). The race contract is: the probed
+        // database survives and the late connection is never killed.
         assert!(
             probe_exists(&admin, &name).await,
             "probe must survive the raced drop attempt"

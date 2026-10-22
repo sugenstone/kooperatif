@@ -2,23 +2,28 @@
 //!
 //! Security posture (docs/22, §8–§10):
 //! * Handshake uses the SAME session cookie pipeline as every API,
-//!   wrapped in `BusinessAuth` (M1-P1-c3a): the verified
-//!   bootstrap-pinned context runs full classify/touch plus
-//!   cooperative membership verification before upgrade — a suspended
-//!   member cannot even open a socket, and a malformed or
-//!   non-bootstrap `x-cooperative-id` is rejected like on every other
-//!   business endpoint.
+//!   wrapped in `BusinessAuth` (M1-P1-c3a, M1-P6 B4): the socket binds
+//!   the SESSION's cooperative scope (active cooperative, bootstrap
+//!   while never switched) after full classify/touch plus membership
+//!   verification — a suspended member cannot even open a socket, and
+//!   a malformed or non-matching `x-cooperative-id` is rejected like
+//!   on every other business endpoint.
 //! * Origin is enforced unconditionally here (a WS upgrade is GET, so
 //!   the CSRF layer's safe-method exemption does not apply).
 //! * No token is ever accepted in the URL or query string.
 //! * Subscriptions are permission-scoped server-side; permissions are
 //!   RE-READ from PostgreSQL for every delivered signal, resolved in
 //!   the VERIFIED cooperative scope — a role owned by another
-//!   cooperative can never grant a bootstrap signal — and session
-//!   validity PLUS bootstrap membership are re-checked per signal and
+//!   cooperative can never grant this scope's signal — and session
+//!   validity PLUS bound-scope membership are re-checked per signal and
 //!   per heartbeat tick — a revoked/expired session, a suspended
 //!   membership, or a lost permission terminates delivery
 //!   (close 1008), it never rides a stale socket.
+//! * M1-P5 B1: signals carry a row-derived, HMAC-signed cooperative id.
+//!   A socket bound to cooperative A never sees cooperative B's
+//!   invalidations — the scope check runs before any delivery work, and
+//!   unverifiable (forged/malformed) payloads are dropped in the
+//!   listener before they can reach the hub at all.
 
 use std::collections::HashSet;
 
@@ -41,7 +46,7 @@ use crate::auth::cookies;
 use crate::auth::session::{self, SessionRejection};
 use crate::auth::token;
 use crate::http::{error::ApiError, AppState};
-use crate::realtime::{hub, known_scopes, HubSignal};
+use crate::realtime::{hub, known_scopes, Domain, HubSignal};
 use crate::tenant::extractor::BusinessAuth;
 
 /// Client → server subscription request. `scopes` are permission keys
@@ -127,22 +132,26 @@ async fn websocket_upgrade(
 }
 
 /// Verified-scope permission resolution for signal delivery
-/// (M1-P1-c3a): a bootstrap scope resolves through
-/// `effective_permissions_in_bootstrap` — NULL-attribution included,
-/// active bootstrap membership required — so a role owned by another
-/// cooperative can never grant a bootstrap signal and a suspended
-/// membership resolves to an empty set. `None` is the provably
-/// never-bootstrapped lane (legacy global set).
+/// (M1-P1-c3a): a bootstrap scope resolves through the bootstrap-aware
+/// scoped set — NULL-attribution included, active bootstrap membership
+/// required — so a role owned by another cooperative can never grant a
+/// bootstrap signal and a suspended membership resolves to an empty
+/// set. `None` is the provably never-bootstrapped lane (legacy global
+/// set).
+///
+/// M1-P4-S2A: credential-bound — the definer derives the principal
+/// from the session token hash; `user_id` is never an input.
 async fn scoped_permissions(
     pool: &PgPool,
-    user_id: Uuid,
+    token_hash: &[u8; 32],
+    now: OffsetDateTime,
     scope: Option<Uuid>,
 ) -> Result<HashSet<String>, sqlx::Error> {
     match scope {
         Some(cooperative_id) => {
-            authz::effective_permissions_in_bootstrap(pool, user_id, cooperative_id).await
+            authz::session_permissions_scoped(pool, token_hash, cooperative_id, now).await
         }
-        None => authz::effective_permissions(pool, user_id).await,
+        None => authz::session_permissions_legacy(pool, token_hash, now).await,
     }
 }
 
@@ -160,8 +169,8 @@ async fn revalidate(
     now: OffsetDateTime,
     scope: Option<Uuid>,
 ) -> Option<HashSet<String>> {
-    match session::classify_session(pool, token_hash, now).await {
-        Ok(Ok(_)) => {}
+    let session = match session::classify_session(pool, token_hash, now).await {
+        Ok(Ok(session)) => session,
         Ok(Err(
             SessionRejection::Unknown
             | SessionRejection::Revoked
@@ -175,15 +184,40 @@ async fn revalidate(
             tracing::error!(error = %error, "realtime session revalidation failed");
             return None;
         }
+    };
+    // Cooperative switching (M1-P5-B5): the session's current
+    // `active_cooperative_id` must still equal the socket's bound
+    // scope. A switch rewrites it via `POST /api/auth/cooperative`;
+    // the stale socket is closed — it may still hold a valid
+    // membership in the old cooperative, but the subscription is
+    // stale by contract and must not linger until membership loss.
+    // `None` active scope means the session never switched: B4 bound
+    // the socket to the bootstrap fallback, and any later switch makes
+    // `active` non-NULL — so divergence is always detectable.
+    if let (Some(bound), Some(active)) = (scope, session.active_cooperative_id) {
+        if active != bound {
+            tracing::info!(
+                user_id = %user_id,
+                bound_cooperative_id = %bound,
+                active_cooperative_id = %active,
+                "realtime scope diverged after cooperative switch — closing socket"
+            );
+            return None;
+        }
     }
     // Membership in the verified cooperative is part of the
     // authorization decision — an empty permission set alone cannot
     // distinguish "no grants" from "membership suspended", so the
     // membership itself is re-verified and its loss closes the socket.
     if let Some(cooperative_id) = scope {
-        if let Err(error) =
-            crate::tenant::extractor::verify_business_membership(pool, user_id, cooperative_id)
-                .await
+        if let Err(error) = crate::tenant::extractor::verify_business_membership(
+            pool,
+            &token_hash,
+            user_id,
+            cooperative_id,
+            now,
+        )
+        .await
         {
             match error {
                 ApiError::CooperativeAccessDenied | ApiError::CooperativeNotReady => {
@@ -200,7 +234,7 @@ async fn revalidate(
             return None;
         }
     }
-    match scoped_permissions(pool, user_id, scope).await {
+    match scoped_permissions(pool, &token_hash, now, scope).await {
         Ok(perms) => Some(perms),
         Err(error) => {
             tracing::error!(error = %error, "realtime permission lookup failed");
@@ -231,7 +265,14 @@ async fn run_connection(
                 Some(Ok(Message::Text(text))) => {
                     let Ok(request) = serde_json::from_str::<SubscribeRequest>(&text) else { continue };
                     let known = known_scopes();
-                    let Ok(effective) = scoped_permissions(&pool, user_id, scope).await else {
+                    let Ok(effective) = scoped_permissions(
+                        &pool,
+                        &token_hash,
+                        state.auth.clock.now(),
+                        scope,
+                    )
+                    .await
+                    else {
                         close(&mut sink, 1011, "internal").await;
                         return;
                     };
@@ -252,7 +293,16 @@ async fn run_connection(
                 Some(Err(_)) => return,
             },
             signal = hub_rx.recv() => match signal {
-                Ok(HubSignal::Changed(domain)) => {
+                Ok(HubSignal::Changed { domain, cooperative }) => {
+                    // M1-P5 B1: a socket is bound to its verified
+                    // handshake scope and receives ONLY that
+                    // cooperative's signals — a commit in another
+                    // cooperative must not even cost a revalidation
+                    // round-trip here (and certainly no refetch).
+                    // `None` ↔ `None` is the never-bootstrapped lane.
+                    if cooperative != scope {
+                        continue;
+                    }
                     let now = state.auth.clock.now();
                     // Fresh session + fresh permission for THIS delivery.
                     let Some(effective) =
@@ -261,12 +311,20 @@ async fn run_connection(
                         close(&mut sink, 1008, "session").await;
                         return;
                     };
-                    let permitted = granted.contains(domain.read_permission())
+                    // M1-P5 B3: `authz` is an authorization-context
+                    // signal — it must reach EVERY socket bound to this
+                    // cooperative (revalidation above is the point: a
+                    // suspended/revoked principal already closed), not
+                    // only readers of one domain. Delivery is still
+                    // fresh-permission-checked for data domains.
+                    let permitted = domain == Domain::Authz
+                        || granted.contains(domain.read_permission())
                         || granted.contains(authz::catalog::REPORTS_READ);
                     // Authorization is rechecked against live
                     // permissions, not the set cached at subscribe time.
                     let authorized = permitted
-                        && (effective.contains(domain.read_permission())
+                        && (domain == Domain::Authz
+                            || effective.contains(domain.read_permission())
                             || effective.contains(authz::catalog::REPORTS_READ));
                     if authorized {
                         let event = ServerEvent::DataChanged {

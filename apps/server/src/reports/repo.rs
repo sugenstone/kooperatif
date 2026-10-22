@@ -21,7 +21,6 @@
 //! numbers must answer "where did this come from" consistently).
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -71,13 +70,16 @@ const SETTLED_UNION: &str = "(
     SELECT assessment_id, amount FROM credit_applications WHERE status = 'active'
 )";
 
-/// One repeatable-read snapshot so all overview metrics describe the
-/// same committed instant.
-pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx)
-        .await?;
+/// Metrics describe one committed instant: HTTP callers must run this
+/// inside a REPEATABLE READ request transaction (`open_tx_repeatable`).
+/// A pooled source degrades to per-statement autocommit — acceptable
+/// only for test conveniences, never for a served snapshot.
+pub async fn overview(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+) -> Result<OverviewRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
+    let tx = &mut *conn;
 
     let (financial_accounts_balance, financial_accounts_count): (Decimal, i64) = sqlx::query_as(
         "SELECT COALESCE(sum(bal.balance), 0), count(*) FROM ( \
@@ -85,8 +87,10 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
                     SELECT sum(CASE m.direction WHEN 'inflow' THEN m.amount ELSE -m.amount END) \
                     FROM account_movements m \
                     WHERE m.account_id = a.id AND m.status = 'active'), 0) AS balance \
-                FROM financial_accounts a) bal",
+                FROM financial_accounts a \
+                WHERE a.cooperative_id IS NOT DISTINCT FROM $1) bal",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -98,8 +102,10 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
              LEFT JOIN (SELECT assessment_id, sum(amount) AS paid \
                  FROM {SETTLED_UNION} settled GROUP BY assessment_id) s \
                 ON s.assessment_id = a.id \
-             WHERE a.status = 'active'"
+             WHERE a.status = 'active' \
+               AND a.cooperative_id IS NOT DISTINCT FROM $1"
         ))
+        .bind(cooperative_id)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -109,24 +115,31 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
          LEFT JOIN (SELECT credit_id, sum(amount) AS applied \
              FROM credit_applications WHERE status = 'active' GROUP BY credit_id) ap \
             ON ap.credit_id = c.id \
-         WHERE c.status = 'active'",
+         WHERE c.status = 'active' \
+           AND c.cooperative_id IS NOT DISTINCT FROM $1",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await
     .map(|v: Option<Decimal>| v.unwrap_or_default())?;
 
     let (operational_income_total, operational_expense_total): (Decimal, Decimal) = sqlx::query_as(
         "SELECT \
-                COALESCE((SELECT sum(amount) FROM income_entries WHERE status = 'posted'), 0), \
-                COALESCE((SELECT sum(amount) FROM expense_entries WHERE status = 'posted'), 0)",
+                COALESCE((SELECT sum(amount) FROM income_entries WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0), \
+                COALESCE((SELECT sum(amount) FROM expense_entries WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0)",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
     let (posted_payments_total, posted_payments_count): (Decimal, i64) = sqlx::query_as(
         "SELECT COALESCE(sum(amount), 0), count(*) \
-         FROM payments WHERE status = 'posted'",
+         FROM payments WHERE status = 'posted' \
+           AND cooperative_id IS NOT DISTINCT FROM $1",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -144,12 +157,15 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
             count(*) FILTER (WHERE e.amount IS NULL \
                 AND e.status IN ('open','partially_settled')), \
             COALESCE((SELECT sum(amount) FROM share_return_settlements \
-                WHERE status = 'posted'), 0) \
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0) \
          FROM share_return_entitlements e \
          LEFT JOIN (SELECT entitlement_id, sum(amount) AS settled \
              FROM share_return_settlements WHERE status = 'posted' \
-             GROUP BY entitlement_id) s ON s.entitlement_id = e.id",
+             GROUP BY entitlement_id) s ON s.entitlement_id = e.id \
+         WHERE e.cooperative_id IS NOT DISTINCT FROM $1",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -161,20 +177,25 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
     ): (Decimal, Option<Decimal>, Decimal, i64) = sqlx::query_as(
         "SELECT \
             COALESCE((SELECT sum(amount) FROM investment_fundings \
-                WHERE status = 'posted'), 0), \
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0), \
             (SELECT sum(v.amount) FROM ( \
                 SELECT DISTINCT ON (v2.investment_id) v2.amount \
                 FROM investment_valuations v2 \
                 JOIN investments i2 ON i2.id = v2.investment_id \
                     AND i2.status = 'active' \
                 WHERE v2.status = 'recorded' \
+                    AND i2.cooperative_id IS NOT DISTINCT FROM $1 \
                 ORDER BY v2.investment_id, v2.valuation_date DESC, \
                     v2.valuation_number DESC) v), \
             COALESCE((SELECT sum(amount) FROM investment_incomes \
-                WHERE status = 'posted'), 0), \
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0), \
             count(*) FILTER (WHERE i.status = 'active') \
-         FROM investments i WHERE i.status <> 'cancelled'",
+         FROM investments i WHERE i.status <> 'cancelled' \
+           AND i.cooperative_id IS NOT DISTINCT FROM $1",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -187,24 +208,32 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
     ): (Decimal, Decimal, Decimal) = sqlx::query_as(
         "SELECT \
             COALESCE((SELECT sum(amount) FROM social_aid_donations \
-                WHERE status = 'posted'), 0) \
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0) \
           - COALESCE((SELECT sum(amount) FROM social_aid_disbursements \
-                WHERE status = 'posted'), 0), \
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0), \
             COALESCE((SELECT sum(amount) FROM social_aid_donations \
-                WHERE status = 'posted'), 0), \
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0), \
             COALESCE((SELECT sum(amount) FROM social_aid_disbursements \
-                WHERE status = 'posted'), 0)",
+                WHERE status = 'posted' \
+                    AND cooperative_id IS NOT DISTINCT FROM $1), 0)",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
     let (active_shareholder_count, active_share_count): (i64, i64) = sqlx::query_as(
         "SELECT \
-            (SELECT count(*) FROM shareholders WHERE status = 'active'), \
-            (SELECT count(*) FROM shares s WHERE s.status = 'active' AND EXISTS ( \
+            (SELECT count(*) FROM shareholders WHERE status = 'active' \
+                AND cooperative_id IS NOT DISTINCT FROM $1), \
+            (SELECT count(*) FROM shares s WHERE s.status = 'active' \
+                AND s.cooperative_id IS NOT DISTINCT FROM $1 AND EXISTS ( \
                 SELECT 1 FROM share_ownerships o \
                 WHERE o.share_id = s.id AND o.ended_at IS NULL))",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -219,20 +248,26 @@ pub async fn overview(pool: &PgPool) -> Result<OverviewRow, sqlx::Error> {
         votes_total,
     ): (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT \
-            (SELECT count(*) FROM governance_bodies WHERE status = 'active'), \
-            (SELECT count(*) FROM governance_memberships WHERE ended_at IS NULL), \
+            (SELECT count(*) FROM governance_bodies WHERE status = 'active' \
+                AND cooperative_id IS NOT DISTINCT FROM $1), \
+            (SELECT count(*) FROM governance_memberships WHERE ended_at IS NULL \
+                AND cooperative_id IS NOT DISTINCT FROM $1), \
             count(*) FILTER (WHERE d.status = 'draft'), \
             count(*) FILTER (WHERE d.status = 'open'), \
             count(*) FILTER (WHERE d.status = 'approved'), \
             count(*) FILTER (WHERE d.status = 'rejected'), \
             count(*) FILTER (WHERE d.status = 'cancelled'), \
-            (SELECT count(*) FROM governance_votes) \
-         FROM governance_decisions d",
+            (SELECT count(*) FROM governance_votes \
+                WHERE cooperative_id IS NOT DISTINCT FROM $1) \
+         FROM governance_decisions d \
+         WHERE d.cooperative_id IS NOT DISTINCT FROM $1",
     )
+    .bind(cooperative_id)
     .fetch_one(&mut *tx)
     .await?;
 
-    tx.rollback().await?; // read-only: nothing ever commits
+    // Read-only: the caller's transaction owns commit/rollback — this
+    // function never finalizes either.
     Ok(OverviewRow {
         financial_accounts_balance,
         financial_accounts_count,
@@ -286,11 +321,13 @@ pub struct AccountReportRow {
 }
 
 pub async fn accounts_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     status: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<AccountReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, AccountReportRow>(
         "SELECT a.id, a.name, a.account_type, a.status, a.currency, \
             COALESCE(( \
@@ -308,16 +345,19 @@ pub async fn accounts_report(
                     FROM social_aid_disbursements WHERE status = 'posted' \
                     GROUP BY fund_id, financial_account_id) db \
                     ON db.fund_id = f.id AND db.financial_account_id = a.id \
-                WHERE f.status <> 'cancelled'), 0) AS restricted_available, \
+                WHERE f.status <> 'cancelled' \
+                    AND f.cooperative_id IS NOT DISTINCT FROM $4), 0) AS restricted_available, \
             count(*) OVER() AS total_count \
          FROM financial_accounts a \
          WHERE ($1::text IS NULL OR a.status = $1) \
+           AND a.cooperative_id IS NOT DISTINCT FROM $4 \
          ORDER BY a.name, a.id LIMIT $2 OFFSET $3",
     )
     .bind(status)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -402,13 +442,16 @@ const MOVEMENT_WHERE: &str = "WHERE ($1::uuid IS NULL OR m.account_id = $1) \
   AND ($6::date IS NULL OR m.occurred_at < ($6::date + 1))";
 
 pub async fn movements_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &MovementFilter,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<MovementReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, MovementReportRow>(&format!(
         "{MOVEMENT_SELECT} {MOVEMENT_WHERE} \
+           AND m.cooperative_id IS NOT DISTINCT FROM $9 \
          ORDER BY m.occurred_at DESC, m.id LIMIT $7 OFFSET $8"
     ))
     .bind(filter.account_id)
@@ -419,7 +462,8 @@ pub async fn movements_report(
     .bind(filter.date_to)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -427,9 +471,11 @@ pub async fn movements_report(
 /// `transfer` source legs are classified internal so cooperative-wide
 /// economic flow never counts a location change twice (docs/15).
 pub async fn movements_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &MovementFilter,
 ) -> Result<MovementSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, MovementSummaryRow>(&format!(
         "SELECT \
             COALESCE(sum(m.amount) FILTER (WHERE m.direction = 'inflow' \
@@ -441,7 +487,8 @@ pub async fn movements_summary(
             count(*) AS movement_count \
          FROM account_movements m \
          JOIN financial_accounts a ON a.id = m.account_id \
-         {MOVEMENT_WHERE}"
+         {MOVEMENT_WHERE} \
+           AND m.cooperative_id IS NOT DISTINCT FROM $7"
     ))
     .bind(filter.account_id)
     .bind(filter.source_type.as_deref())
@@ -449,7 +496,8 @@ pub async fn movements_summary(
     .bind(filter.status.as_deref())
     .bind(filter.date_from)
     .bind(filter.date_to)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -508,11 +556,13 @@ const ASSESSMENT_REPORT_WHERE: &str = "  AND ($1::uuid IS NULL OR a.period_id = 
         AND a.amount - COALESCE(pa.paid,0) - COALESCE(ca.applied,0) <= 0))";
 
 pub async fn assessments_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &AssessmentFilter,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<AssessmentReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, AssessmentReportRow>(&format!(
         "SELECT a.id, a.period_id, p.period_number, p.name AS period_name, \
             a.shareholder_id, sp.first_name || ' ' || sp.last_name AS shareholder_name, \
@@ -524,6 +574,7 @@ pub async fn assessments_report(
             a.assessment_effective_date, a.generated_at, \
             count(*) OVER() AS total_count \
          {ASSESSMENT_REPORT_FROM} {ASSESSMENT_REPORT_WHERE} \
+           AND a.cooperative_id IS NOT DISTINCT FROM $6 \
          ORDER BY p.period_number DESC, a.id LIMIT $4 OFFSET $5"
     ))
     .bind(filter.period_id)
@@ -531,7 +582,8 @@ pub async fn assessments_report(
     .bind(filter.settlement.as_deref())
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -548,9 +600,11 @@ pub struct AssessmentSummaryRow {
 }
 
 pub async fn assessments_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &AssessmentFilter,
 ) -> Result<AssessmentSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, AssessmentSummaryRow>(&format!(
         "SELECT count(*) AS assessment_count, \
             COALESCE(sum(a.amount), 0) AS total_assessed, \
@@ -566,12 +620,14 @@ pub async fn assessments_summary(
                 AS partially_paid_count, \
             count(*) FILTER (WHERE COALESCE(pa.paid,0) + COALESCE(ca.applied,0) = 0) \
                 AS unpaid_count \
-         {ASSESSMENT_REPORT_FROM} {ASSESSMENT_REPORT_WHERE}"
+         {ASSESSMENT_REPORT_FROM} {ASSESSMENT_REPORT_WHERE} \
+           AND a.cooperative_id IS NOT DISTINCT FROM $4"
     ))
     .bind(filter.period_id)
     .bind(filter.shareholder_id)
     .bind(filter.settlement.as_deref())
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -603,10 +659,12 @@ pub struct PeriodReportRow {
 }
 
 pub async fn periods_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<PeriodReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, PeriodReportRow>(
         "SELECT p.id, p.period_number, p.name, p.status, p.due_date, \
             COALESCE(agg.cnt,0)::bigint AS assessment_count, \
@@ -642,11 +700,13 @@ pub async fn periods_report(
                 GROUP BY assessment_id) ca ON ca.assessment_id = a.id \
             WHERE a.status = 'active' GROUP BY a.period_id \
          ) agg ON agg.period_id = p.id \
+         WHERE p.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY p.period_number DESC, p.id LIMIT $1 OFFSET $2",
     )
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -675,11 +735,13 @@ pub struct ShareholderReportRow {
 }
 
 pub async fn shareholders_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<ShareholderReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let pattern = search
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -740,6 +802,7 @@ pub async fn shareholders_report(
              GROUP BY e.beneficiary_shareholder_id \
          ) rt ON rt.beneficiary_shareholder_id = s.id \
          WHERE s.status <> 'voided' \
+           AND s.cooperative_id IS NOT DISTINCT FROM $4 \
            AND ($1::text IS NULL OR \
                 lower(sp.first_name || ' ' || sp.last_name) LIKE $1 \
                 OR f.sequence_number::text = trim(both '%' from $1)) \
@@ -749,7 +812,8 @@ pub async fn shareholders_report(
     .bind(pattern)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -770,11 +834,13 @@ pub struct FamilyReportRow {
 }
 
 pub async fn families_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<FamilyReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let number: Option<i64> = search
         .map(str::trim)
         .and_then(|s| s.parse::<i64>().ok())
@@ -817,12 +883,14 @@ pub async fn families_report(
             WHERE fm.ended_at IS NULL GROUP BY fm.family_id \
          ) mem ON mem.family_id = f.id \
          WHERE ($1::bigint IS NULL OR f.sequence_number = $1) \
+           AND f.cooperative_id IS NOT DISTINCT FROM $4 \
          ORDER BY f.sequence_number, f.id LIMIT $2 OFFSET $3",
     )
     .bind(number)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -868,11 +936,13 @@ const PAYMENT_WHERE: &str = "WHERE ($1::text IS NULL OR p.status = $1) \
   AND ($4::date IS NULL OR p.received_at < ($4::date + 1))";
 
 pub async fn payments_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &PaymentFilter,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<PaymentReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, PaymentReportRow>(&format!(
         "SELECT p.id, p.payment_number, \
             pp.first_name || ' ' || pp.last_name AS payer_name, \
@@ -901,6 +971,7 @@ pub async fn payments_report(
              WHERE pa.status = 'active' GROUP BY pa.payment_id) db \
              ON db.payment_id = p.id \
          {PAYMENT_WHERE} \
+           AND p.cooperative_id IS NOT DISTINCT FROM $7 \
          ORDER BY p.payment_number DESC, p.id LIMIT $5 OFFSET $6"
     ))
     .bind(filter.status.as_deref())
@@ -909,7 +980,8 @@ pub async fn payments_report(
     .bind(filter.date_to)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -925,9 +997,11 @@ pub struct PaymentSummaryRow {
 /// Totals over the FULL filtered payment set (posted rows only —
 /// reversed payments carry zero current effect).
 pub async fn payments_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &PaymentFilter,
 ) -> Result<PaymentSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, PaymentSummaryRow>(&format!(
         "SELECT count(*) AS payment_count, \
             COALESCE(sum(p.amount) FILTER (WHERE p.status = 'posted'), 0) AS posted_amount, \
@@ -944,13 +1018,15 @@ pub async fn payments_summary(
          LEFT JOIN (SELECT source_payment_id, sum(amount) AS credited \
              FROM shareholder_credits WHERE status = 'active' \
              GROUP BY source_payment_id) cr ON cr.source_payment_id = p.id \
-         {PAYMENT_WHERE}"
+         {PAYMENT_WHERE} \
+           AND p.cooperative_id IS NOT DISTINCT FROM $5"
     ))
     .bind(filter.status.as_deref())
     .bind(filter.method.as_deref())
     .bind(filter.date_from)
     .bind(filter.date_to)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -983,10 +1059,12 @@ pub struct CreditSummaryRow {
 }
 
 pub async fn credits_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<CreditReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, CreditReportRow>(
         "SELECT c.id, c.credit_number, c.shareholder_id, \
             sp.first_name || ' ' || sp.last_name AS shareholder_name, \
@@ -1001,17 +1079,23 @@ pub async fn credits_report(
          LEFT JOIN (SELECT credit_id, sum(amount) AS applied \
              FROM credit_applications WHERE status = 'active' \
              GROUP BY credit_id) ap ON ap.credit_id = c.id \
+         WHERE c.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY c.credit_number DESC, c.id LIMIT $1 OFFSET $2",
     )
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
 /// Totals over ACTIVE credits only — reversed credits carry no current
 /// availability.
-pub async fn credits_summary(pool: &PgPool) -> Result<CreditSummaryRow, sqlx::Error> {
+pub async fn credits_summary(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+) -> Result<CreditSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, CreditSummaryRow>(
         "SELECT count(*) FILTER (WHERE c.status = 'active') AS credit_count, \
             COALESCE(sum(c.amount) FILTER (WHERE c.status = 'active'), 0) \
@@ -1023,9 +1107,11 @@ pub async fn credits_summary(pool: &PgPool) -> Result<CreditSummaryRow, sqlx::Er
          FROM shareholder_credits c \
          LEFT JOIN (SELECT credit_id, sum(amount) AS applied \
              FROM credit_applications WHERE status = 'active' \
-             GROUP BY credit_id) ap ON ap.credit_id = c.id",
+             GROUP BY credit_id) ap ON ap.credit_id = c.id \
+         WHERE c.cooperative_id IS NOT DISTINCT FROM $1",
     )
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -1062,10 +1148,12 @@ pub struct EntitlementSummaryRow {
 }
 
 pub async fn entitlements_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<EntitlementReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, EntitlementReportRow>(
         "SELECT e.id, e.entitlement_number, r.id AS return_id, r.return_number, r.share_number, \
             r.owner_display_name AS beneficiary_name, \
@@ -1088,15 +1176,21 @@ pub async fn entitlements_report(
              FROM share_return_settlements WHERE status = 'posted' \
              GROUP BY entitlement_id) s ON s.entitlement_id = e.id \
          WHERE e.status <> 'cancelled' \
+           AND e.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY e.entitlement_number DESC, e.id LIMIT $1 OFFSET $2",
     )
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
-pub async fn entitlements_summary(pool: &PgPool) -> Result<EntitlementSummaryRow, sqlx::Error> {
+pub async fn entitlements_summary(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+) -> Result<EntitlementSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, EntitlementSummaryRow>(
         "SELECT \
             COALESCE(sum(e.amount - COALESCE(s.settled,0)) \
@@ -1108,9 +1202,11 @@ pub async fn entitlements_summary(pool: &PgPool) -> Result<EntitlementSummaryRow
          LEFT JOIN (SELECT entitlement_id, sum(amount) AS settled \
              FROM share_return_settlements WHERE status = 'posted' \
              GROUP BY entitlement_id) s ON s.entitlement_id = e.id \
-         WHERE e.status <> 'cancelled'",
+         WHERE e.status <> 'cancelled' \
+           AND e.cooperative_id IS NOT DISTINCT FROM $1",
     )
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -1139,10 +1235,12 @@ pub struct InvestmentReportRow {
 }
 
 pub async fn investments_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<InvestmentReportRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, InvestmentReportRow>(
         "SELECT i.id, i.investment_number, i.name, i.investment_type, i.status, \
             COALESCE((SELECT sum(f.amount) FROM investment_fundings f \
@@ -1168,11 +1266,13 @@ pub async fn investments_report(
                 AS disposal_proceeds_received, \
             count(*) OVER() AS total_count \
          FROM investments i WHERE i.status <> 'cancelled' \
+           AND i.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY i.investment_number DESC, i.id LIMIT $1 OFFSET $2",
     )
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -1200,10 +1300,12 @@ pub struct SocialAidFundRow {
 }
 
 pub async fn social_aid_report(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<SocialAidFundRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, SocialAidFundRow>(
         "SELECT f.id AS fund_id, f.fund_number, f.name AS fund_name, f.status AS fund_status, \
             a.id AS account_id, a.name AS account_name, \
@@ -1227,11 +1329,13 @@ pub async fn social_aid_report(
              GROUP BY fund_id, financial_account_id) db \
              ON db.fund_id = f.id AND db.financial_account_id = a.id \
          WHERE f.status <> 'cancelled' \
+           AND f.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY f.fund_number DESC, a.name LIMIT $1 OFFSET $2",
     )
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -1250,8 +1354,10 @@ pub struct SocialAidFundSummaryRow {
 }
 
 pub async fn social_aid_fund_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
 ) -> Result<Vec<SocialAidFundSummaryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, SocialAidFundSummaryRow>(
         "SELECT f.id AS fund_id, f.fund_number, f.name AS fund_name, \
             f.status AS fund_status, \
@@ -1266,9 +1372,11 @@ pub async fn social_aid_fund_summary(
              FROM social_aid_disbursements WHERE status = 'posted' \
              GROUP BY fund_id) db ON db.fund_id = f.id \
          WHERE f.status <> 'cancelled' \
+           AND f.cooperative_id IS NOT DISTINCT FROM $1 \
          ORDER BY f.fund_number DESC",
     )
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -1295,8 +1403,10 @@ pub struct GovernanceRecentDecisionRow {
 }
 
 pub async fn governance_recent_decisions(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
 ) -> Result<Vec<GovernanceRecentDecisionRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, GovernanceRecentDecisionRow>(
         "SELECT d.id, d.decision_number, b.name AS body_name, d.title, \
             d.status, d.decision_on, d.effective_on, \
@@ -1305,9 +1415,11 @@ pub async fn governance_recent_decisions(
          FROM governance_decisions d \
          JOIN governance_bodies b ON b.id = d.body_id \
          WHERE d.status IN ('approved','rejected') \
+           AND d.cooperative_id IS NOT DISTINCT FROM $1 \
          ORDER BY d.finalized_at DESC, d.id LIMIT 10",
     )
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -1325,9 +1437,11 @@ pub struct MonthlyFlowRow {
 }
 
 pub async fn monthly_income_expense(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     months: i64,
 ) -> Result<Vec<MonthlyFlowRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, MonthlyFlowRow>(
         "SELECT m.month::date AS month, \
             COALESCE(i.total,0) AS income_total, \
@@ -1340,16 +1454,19 @@ pub async fn monthly_income_expense(
          LEFT JOIN ( \
              SELECT date_trunc('month', occurred_at \
                     AT TIME ZONE 'Europe/Istanbul')::date AS month, sum(amount) AS total \
-             FROM income_entries WHERE status = 'posted' GROUP BY 1) i \
+             FROM income_entries WHERE status = 'posted' \
+                AND cooperative_id IS NOT DISTINCT FROM $2 GROUP BY 1) i \
              ON i.month = m.month::date \
          LEFT JOIN ( \
              SELECT date_trunc('month', occurred_at \
                     AT TIME ZONE 'Europe/Istanbul')::date AS month, sum(amount) AS total \
-             FROM expense_entries WHERE status = 'posted' GROUP BY 1) e \
+             FROM expense_entries WHERE status = 'posted' \
+                AND cooperative_id IS NOT DISTINCT FROM $2 GROUP BY 1) e \
              ON e.month = m.month::date \
          ORDER BY m.month",
     )
     .bind(months as i32)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }

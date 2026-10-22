@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::auth::csrf;
 use crate::auth::extractor::CurrentAuth;
-use crate::auth::{audit, routes as auth_routes};
+use crate::auth::routes as auth_routes;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::tenant::repo::{self, CooperativeMembershipSummary};
@@ -74,12 +74,17 @@ pub async fn select_cooperative(
     })?;
 
     let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
-    let resolved = repo::resolve_membership(pool, auth.user_id, body.cooperative_id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "cooperative selection lookup failed");
-            ApiError::Internal
-        })?;
+    let resolved = repo::resolve_membership(
+        pool,
+        &auth.session_token_hash,
+        body.cooperative_id,
+        auth.authed_at,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "cooperative selection lookup failed");
+        ApiError::Internal
+    })?;
 
     let Some(row) = resolved else {
         tracing::info!(
@@ -96,28 +101,23 @@ pub async fn select_cooperative(
         return Err(ApiError::CooperativeNotReady);
     }
 
-    repo::set_session_cooperative(pool, auth.session_id, Some(body.cooperative_id))
+    // The definer writes `cooperative_context_switched` atomically with
+    // the session update (S2B) — attribution derives from the session,
+    // never from request parameters.
+    repo::set_session_cooperative(pool, auth.session_token_hash, body.cooperative_id)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "cooperative selection persist failed");
             ApiError::Internal
         })?;
 
-    audit::record_scoped(
-        pool,
-        audit::SecurityEventType::CooperativeContextSwitched,
-        Some(body.cooperative_id),
-        Some(auth.user_id),
-        Some(auth.session_id),
-        serde_json::json!({ "cooperative_name": row.cooperative_name }),
-    )
-    .await;
-
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Resolved tenant context — the endpoint that exercises `TenantCtx`
-/// end-to-end in P0 (header precedence, session default, fail-closed).
+/// end-to-end: it reports exactly the session scope business
+/// authorization uses (M1-P6 B4 — session-authoritative, header may only
+/// confirm, fail-closed).
 pub async fn cooperative_context(
     ctx: TenantCtx,
 ) -> Result<Json<CooperativeContextResponse>, ApiError> {
@@ -135,7 +135,7 @@ pub async fn my_cooperatives(
     auth: CurrentAuth,
 ) -> Result<Json<MyCooperativesResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
-    let cooperatives = repo::list_user_cooperatives(pool, auth.user_id)
+    let cooperatives = repo::list_user_cooperatives(pool, &auth.session_token_hash, auth.authed_at)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "cooperative list failed");

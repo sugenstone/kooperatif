@@ -23,7 +23,6 @@
 use std::collections::{HashMap, HashSet};
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -99,12 +98,21 @@ LEFT JOIN users rb ON rb.id = pay.reversed_by ";
 
 /// Payment list (§60): search folds over payer name, debtor name or an
 /// exact business payment number. Newest first (business number order).
+///
+/// `cooperative_id` is the verified business context (M1-P2-C3):
+/// `Some` scopes to that cooperative; `None` is reachable only in the
+/// proven never-bootstrapped lane and matches only legacy NULL rows
+/// (`IS NOT DISTINCT FROM`) — never a global listing. The indirect
+/// debtor search EXISTS stays reachable only through in-scope payment
+/// rows.
 pub async fn list_payments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<PaymentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let raw = search.map(str::trim).filter(|s| !s.is_empty());
     let folded: Option<String> = raw.map(|term| format!("%{}%", party_model::fold_search(term)));
     let number: Option<i64> = raw
@@ -112,7 +120,9 @@ pub async fn list_payments(
         .filter(|n| *n > 0);
 
     let sql = format!(
-        "SELECT *, count(*) OVER () AS total_count FROM ({PAYMENT_SELECT}) base \
+        "SELECT *, count(*) OVER () AS total_count FROM (\
+            {PAYMENT_SELECT} WHERE pay.cooperative_id IS NOT DISTINCT FROM $5\
+         ) base \
          WHERE ( \
             $1::text IS NULL \
             OR ($3::bigint IS NOT NULL AND base.payment_number = $3) \
@@ -136,17 +146,28 @@ pub async fn list_payments(
         .bind((page - 1) * page_size)
         .bind(number)
         .bind(page_size)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
-pub async fn find_payment(pool: &PgPool, id: Uuid) -> Result<Option<PaymentRow>, sqlx::Error> {
+/// Cooperative-scoped detail (C3): foreign payment ids return `None`.
+pub async fn find_payment(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<PaymentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let sql = format!(
-        "SELECT *, 0::bigint AS total_count FROM ({PAYMENT_SELECT} WHERE pay.id = $1) base"
+        "SELECT *, 0::bigint AS total_count FROM (\
+            {PAYMENT_SELECT} WHERE pay.id = $1 \
+            AND pay.cooperative_id IS NOT DISTINCT FROM $2\
+         ) base"
     );
     sqlx::query_as::<_, PaymentRow>(&sql)
         .bind(id)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *conn)
         .await
 }
 
@@ -190,17 +211,23 @@ LEFT JOIN families f ON f.id = m.family_id ";
 
 /// All allocation lines of one Payment — both active and reversed so
 /// the detail surface shows complete history (docs/19).
+/// Cooperative-scoped (C3): allocations of a foreign payment yield an
+/// empty list — never its settlement history.
 pub async fn payment_allocations(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     payment_id: Uuid,
 ) -> Result<Vec<AllocationRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let sql = format!(
         "{ALLOCATION_SELECT} WHERE al.payment_id = $1 \
+         AND al.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY p.period_number, al.id"
     );
     sqlx::query_as::<_, AllocationRow>(&sql)
         .bind(payment_id)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
@@ -223,10 +250,14 @@ pub struct AssessmentPaymentRow {
     pub reversal_reason: Option<String>,
 }
 
+/// Cooperative-scoped (C3): settlement history of a foreign
+/// assessment yields an empty list.
 pub async fn assessment_payments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     assessment_id: Uuid,
 ) -> Result<Vec<AssessmentPaymentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, AssessmentPaymentRow>(
         "SELECT al.id AS allocation_id, pay.id AS payment_id, pay.payment_number, \
             pay.status AS payment_status, al.amount, pay.currency, \
@@ -239,10 +270,12 @@ pub async fn assessment_payments(
          JOIN persons pp ON pp.id = pay.payer_person_id \
          LEFT JOIN shareholders ps ON ps.person_id = pp.id \
          WHERE al.assessment_id = $1 \
+           AND al.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY al.created_at DESC, al.id",
     )
     .bind(assessment_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -266,10 +299,14 @@ pub struct OpenAssessmentRow {
 /// Debtor-selection rows for the collection flow AND the shareholder
 /// payment surface: every ACTIVE assessment with its derived settled /
 /// remaining amounts.
+/// Cooperative-scoped (C3): a foreign shareholder yields an empty
+/// list — never their open debt.
 pub async fn shareholder_open_assessments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<OpenAssessmentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, OpenAssessmentRow>(
         "SELECT a.id, a.period_id, p.period_number, p.name AS period_name, \
             p.due_date, a.amount, a.currency, a.generated_at, \
@@ -287,10 +324,12 @@ pub async fn shareholder_open_assessments(
              ) settled GROUP BY assessment_id \
          ) al ON al.assessment_id = a.id \
          WHERE a.shareholder_id = $1 AND a.status = 'active' \
+           AND a.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY p.period_number DESC, a.id",
     )
     .bind(shareholder_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -306,9 +345,11 @@ pub struct FinancialSummaryRow {
 }
 
 pub async fn shareholder_financial_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<FinancialSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, FinancialSummaryRow>(
         "SELECT count(*) AS assessment_count, \
             count(*) FILTER (WHERE a.amount - COALESCE(al.paid, 0) > 0) AS open_assessment_count, \
@@ -325,10 +366,12 @@ pub async fn shareholder_financial_summary(
                  WHERE status = 'active' \
              ) settled GROUP BY assessment_id \
          ) al ON al.assessment_id = a.id \
-         WHERE a.shareholder_id = $1 AND a.status = 'active'",
+         WHERE a.shareholder_id = $1 AND a.status = 'active' \
+           AND a.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(shareholder_id)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -345,9 +388,11 @@ pub struct PeriodCollectionSummaryRow {
 }
 
 pub async fn period_financial_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     period_id: Uuid,
 ) -> Result<PeriodCollectionSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, PeriodCollectionSummaryRow>(
         "SELECT count(*) AS assessment_count, \
             COALESCE(sum(a.amount), 0) AS total_assessed, \
@@ -356,7 +401,8 @@ pub async fn period_financial_summary(
             (SELECT count(DISTINCT pa.payment_id) \
              FROM payment_allocations pa \
              JOIN assessments a2 ON a2.id = pa.assessment_id \
-             WHERE a2.period_id = $1 AND pa.status = 'active') AS contributing_payment_count \
+             WHERE a2.period_id = $1 AND pa.status = 'active' \
+               AND a2.cooperative_id IS NOT DISTINCT FROM $2) AS contributing_payment_count \
          FROM assessments a \
          LEFT JOIN ( \
              SELECT assessment_id, sum(amount) AS paid FROM ( \
@@ -367,10 +413,12 @@ pub async fn period_financial_summary(
                  WHERE status = 'active' \
              ) settled GROUP BY assessment_id \
          ) al ON al.assessment_id = a.id \
-         WHERE a.period_id = $1 AND a.status = 'active'",
+         WHERE a.period_id = $1 AND a.status = 'active' \
+           AND a.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(period_id)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -395,10 +443,14 @@ pub struct FamilyMemberCollectionRow {
     pub default_account_status: Option<String>,
 }
 
+/// Cooperative-scoped (C3): a foreign family yields an empty member
+/// context — membership rows carry the scope.
 pub async fn family_collection_context(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     family_id: Uuid,
 ) -> Result<Vec<FamilyMemberCollectionRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, FamilyMemberCollectionRow>(
         "SELECT s.id AS shareholder_id, sp.first_name, sp.last_name, \
             gp.first_name AS guardian_first_name, gp.last_name AS guardian_last_name, \
@@ -443,10 +495,12 @@ pub async fn family_collection_context(
              GROUP BY c.shareholder_id \
          ) cv ON cv.shareholder_id = s.id \
          WHERE m.family_id = $1 AND m.ended_at IS NULL \
+           AND m.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY sp.search_name, s.id",
     )
     .bind(family_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -547,16 +601,24 @@ pub struct PaymentOutcome {
 /// Resolve the payer inside the transaction: an existing Person or a
 /// newly created one. Creating a Person here records WHO paid — it
 /// never creates a Shareholder or any debtor role.
+/// `cooperative_id` scopes payer resolution (C3): a foreign Person is
+/// `PayerNotFound` — indistinguishable — and a newly created payer
+/// Person belongs to the verified cooperative.
 async fn resolve_payer(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     command: &CreatePayment,
 ) -> Result<(Uuid, bool), PaymentCommandError> {
     if let Some(id) = command.payer_person_id {
-        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM persons WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(PaymentCommandError::Database)?;
+        let exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM persons WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(cooperative_id)
+        .fetch_optional(tx.as_mut())
+        .await
+        .map_err(PaymentCommandError::Database)?;
         return Ok((exists.ok_or(PaymentCommandError::PayerNotFound)?, false));
     }
     let (Some(first), Some(last)) = (&command.payer_first_name, &command.payer_last_name) else {
@@ -564,12 +626,13 @@ async fn resolve_payer(
     };
     let search = party_model::fold_search(&format!("{first} {last}"));
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO persons (first_name, last_name, search_name) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(first)
     .bind(last)
     .bind(&search)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(PaymentCommandError::Database)?;
@@ -578,20 +641,25 @@ async fn resolve_payer(
 
 /// Lock the target Assessments `FOR UPDATE` in ascending id order —
 /// the deterministic order shared by every allocation command. Returns
-/// (id, amount, status) keyed by id.
+/// (id, amount, status, cooperative_id) keyed by id; the caller
+/// compares each row's cooperative against the verified scope (C3),
+/// so a foreign target is indistinguishable from an inactive one.
 async fn lock_assessments(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ids: &[Uuid],
-) -> Result<HashMap<Uuid, (Decimal, String)>, PaymentCommandError> {
-    let rows: Vec<(Uuid, Decimal, String)> = sqlx::query_as(
-        "SELECT id, amount, status FROM assessments \
-         WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+) -> Result<HashMap<Uuid, (Decimal, String, Option<Uuid>)>, PaymentCommandError> {
+    let rows: Vec<(Uuid, Decimal, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, amount, status, cooperative_id \
+         FROM public.app_lock_assessments($1)",
     )
     .bind(ids)
     .fetch_all(tx.as_mut())
     .await
     .map_err(PaymentCommandError::Database)?;
-    Ok(rows.into_iter().map(|(id, a, s)| (id, (a, s))).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(id, a, s, c)| (id, (a, s, c)))
+        .collect())
 }
 
 /// SUM of ACTIVE settlement effects per assessment — Payment
@@ -613,16 +681,22 @@ async fn paid_map(
 /// (unallocated) amount.
 fn validate_allocations(
     allocations: &[NewAllocation],
-    locked: &HashMap<Uuid, (Decimal, String)>,
+    locked: &HashMap<Uuid, (Decimal, String, Option<Uuid>)>,
     paid: &HashMap<Uuid, Decimal>,
     available: Decimal,
+    cooperative_id: Option<Uuid>,
 ) -> Result<(), PaymentCommandError> {
     let mut total = Decimal::ZERO;
     for allocation in allocations {
-        let Some((assessment_amount, status)) = locked.get(&allocation.assessment_id) else {
+        let Some((assessment_amount, status, assessment_coop)) =
+            locked.get(&allocation.assessment_id)
+        else {
             return Err(PaymentCommandError::InactiveAssessment);
         };
-        if status != "active" {
+        // C3: a target outside the verified scope is reported as
+        // InactiveAssessment — the existing indistinguishable error,
+        // never a disclosure.
+        if *assessment_coop != cooperative_id || status != "active" {
             return Err(PaymentCommandError::InactiveAssessment);
         }
         let already_paid = paid
@@ -652,18 +726,25 @@ fn validate_allocations(
 /// Payment (`replayed`), a different payload conflicts (409). A
 /// concurrent first-writer is handled by ON CONFLICT re-read.
 pub async fn create_payment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreatePayment,
 ) -> Result<PaymentOutcome, PaymentCommandError> {
-    let mut tx = pool.begin().await.map_err(PaymentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PaymentCommandError::Database)?;
 
     // 1. Idempotent replay short-circuit — before ANY side effect.
+    //    Scoped (C3): a foreign cooperative's key never replays ITS
+    //    payment. The key stays globally unique until C5, so a
+    //    cross-coop collision still lands in the ON CONFLICT re-read
+    //    as an indistinguishable NotFound.
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, payment_number, idempotency_fingerprint FROM payments \
-         WHERE idempotency_key = $1",
+         WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(PaymentCommandError::Database)?;
@@ -701,18 +782,22 @@ pub async fn create_payment(
     }
 
     // 2. Payer resolution (existing Person or new — never a debtor).
-    let (payer_person_id, created_person) = resolve_payer(&mut tx, &command).await?;
+    let (payer_person_id, created_person) =
+        resolve_payer(&mut tx, cooperative_id, &command).await?;
 
     // 2b. Destination Financial Account (STEP-008): lock FIRST in the
     // domain order accounts -> payments -> assessments shared with the
-    // transfer command. Must exist, be `active`, and hold TRY.
+    // transfer command. Must exist, be `active`, hold TRY — and live in
+    // the verified cooperative (C3; foreign account is the same
+    // indistinguishable error).
     let accounts = account_repo::lock_accounts(&mut tx, &[command.destination_account_id])
         .await
         .map_err(account_err)?;
-    let Some((status, currency)) = accounts.get(&command.destination_account_id) else {
+    let Some((status, currency, account_coop)) = accounts.get(&command.destination_account_id)
+    else {
         return Err(PaymentCommandError::AccountNotFoundOrInactive);
     };
-    if status != "active" || currency != "TRY" {
+    if *account_coop != cooperative_id || status != "active" || currency != "TRY" {
         return Err(PaymentCommandError::AccountNotFoundOrInactive);
     }
 
@@ -728,16 +813,27 @@ pub async fn create_payment(
     ids.sort_unstable();
     let locked = lock_assessments(&mut tx, &ids).await?;
     let paid = paid_map(&mut tx, &ids).await?;
-    validate_allocations(&command.allocations, &locked, &paid, command.amount)?;
+    validate_allocations(
+        &command.allocations,
+        &locked,
+        &paid,
+        command.amount,
+        cooperative_id,
+    )?;
 
-    // 4. Insert the Payment (posted at birth — one receipt = one row).
+    // 4. Insert the Payment (posted at birth — one receipt = one row)
+    //    carrying the verified cooperative scope (C3).
+    // payment_number is intentionally NOT bound: on the restricted
+    // lane `payments_number_pin` (0058) assigns it via
+    // allocate_document_number and rejects any caller-supplied value,
+    // so a sealed actor cannot choose document numbers.
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO payments \
              (payer_person_id, destination_account_id, amount, currency, \
               method, received_at, note, status, idempotency_key, \
-              idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, 'TRY', $4, $5, $6, 'posted', $7, $8, $9) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+              idempotency_fingerprint, created_by, cooperative_id) \
+         VALUES ($1, $2, $3, 'TRY', $4, $5, $6, 'posted', $7, $8, $9, $10) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, payment_number",
     )
     .bind(payer_person_id)
@@ -749,8 +845,16 @@ pub async fn create_payment(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(PaymentCommandError::Database)?;
 
     // A concurrent first-writer committed between our early check and
@@ -758,15 +862,18 @@ pub async fn create_payment(
     let (payment_id, payment_number) = match inserted {
         Some(row) => row,
         None => {
-            tx.rollback().await.map_err(PaymentCommandError::Database)?;
             let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
                 "SELECT id, payment_number, idempotency_fingerprint FROM payments \
-                 WHERE idempotency_key = $1",
+                 WHERE idempotency_key = $1 \
+                   AND cooperative_id IS NOT DISTINCT FROM $2",
             )
             .bind(&command.idempotency_key)
-            .fetch_optional(pool)
+            .bind(cooperative_id)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(PaymentCommandError::Database)?;
+            // Scoped re-read (C3): a conflicting row owned by another
+            // cooperative is indistinguishable from absence.
             let Some((id, number, fingerprint)) = existing else {
                 return Err(PaymentCommandError::NotFound);
             };
@@ -778,7 +885,7 @@ pub async fn create_payment(
                  WHERE payment_id = $1 AND status = 'active'",
             )
             .bind(id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(PaymentCommandError::Database)?;
             let credited: Decimal = sqlx::query_scalar(
@@ -786,7 +893,7 @@ pub async fn create_payment(
                  WHERE source_payment_id = $1 AND status = 'active'",
             )
             .bind(id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(PaymentCommandError::Database)?;
             let allocation_count: i64 = sqlx::query_scalar(
@@ -794,9 +901,10 @@ pub async fn create_payment(
                  WHERE payment_id = $1 AND status = 'active'",
             )
             .bind(id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(PaymentCommandError::Database)?;
+            tx.rollback().await.map_err(PaymentCommandError::Database)?;
             return Ok(PaymentOutcome {
                 payment_id: id,
                 payment_number: number,
@@ -810,17 +918,19 @@ pub async fn create_payment(
         }
     };
 
-    // 5. Allocation lines — same transaction, all-or-nothing.
+    // 5. Allocation lines — same transaction, all-or-nothing, each
+    //    stamped with the verified scope (C3).
     for allocation in &command.allocations {
         sqlx::query(
             "INSERT INTO payment_allocations \
-                 (payment_id, assessment_id, amount, created_by) \
-             VALUES ($1, $2, $3, $4)",
+                 (payment_id, assessment_id, amount, created_by, cooperative_id) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(payment_id)
         .bind(allocation.assessment_id)
         .bind(allocation.amount)
         .bind(actor)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(PaymentCommandError::Database)?;
@@ -840,6 +950,7 @@ pub async fn create_payment(
             source_id: payment_id,
             occurred_at: command.received_at,
             actor,
+            cooperative_id,
         },
     )
     .await
@@ -864,18 +975,21 @@ pub async fn create_payment(
 /// contract as creation; a (payment, assessment) pair can only ever
 /// receive ONE line.
 pub async fn add_allocations(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     payment_id: Uuid,
     allocations: Vec<NewAllocation>,
 ) -> Result<PaymentOutcome, PaymentCommandError> {
-    let mut tx = pool.begin().await.map_err(PaymentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PaymentCommandError::Database)?;
 
     // Payment lock FIRST — the shared lock prefix of every
-    // payment-scoped mutation.
+    // payment-scoped mutation. Scoped (C3): a foreign payment id is
+    // the indistinguishable NotFound.
     let payment: Option<(String, Decimal)> =
-        sqlx::query_as("SELECT status, amount FROM payments WHERE id = $1 FOR UPDATE")
+        sqlx::query_as("SELECT status, amount FROM public.app_lock_payment($1, $2)")
             .bind(payment_id)
+            .bind(cooperative_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(PaymentCommandError::Database)?;
@@ -927,18 +1041,25 @@ pub async fn add_allocations(
     ids.sort_unstable();
     let locked = lock_assessments(&mut tx, &ids).await?;
     let paid = paid_map(&mut tx, &ids).await?;
-    validate_allocations(&allocations, &locked, &paid, amount - allocated - credited)?;
+    validate_allocations(
+        &allocations,
+        &locked,
+        &paid,
+        amount - allocated - credited,
+        cooperative_id,
+    )?;
 
     for allocation in &allocations {
         sqlx::query(
             "INSERT INTO payment_allocations \
-                 (payment_id, assessment_id, amount, created_by) \
-             VALUES ($1, $2, $3, $4)",
+                 (payment_id, assessment_id, amount, created_by, cooperative_id) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(payment_id)
         .bind(allocation.assessment_id)
         .bind(allocation.amount)
         .bind(actor)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(PaymentCommandError::Database)?;
@@ -971,119 +1092,43 @@ pub struct ReverseOutcome {
 /// reversed with the same reason. Never a DELETE. Repeating the command
 /// is an idempotent replay.
 pub async fn reverse_payment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     payment_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<ReverseOutcome, PaymentCommandError> {
-    let mut tx = pool.begin().await.map_err(PaymentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PaymentCommandError::Database)?;
 
-    let payment: Option<(String, i64, Option<Uuid>, Decimal)> = sqlx::query_as(
-        "SELECT status, payment_number, destination_account_id, amount \
-         FROM payments WHERE id = $1 FOR UPDATE",
-    )
-    .bind(payment_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(PaymentCommandError::Database)?;
-    let Some((status, payment_number, destination_account_id, amount)) = payment else {
-        return Err(PaymentCommandError::NotFound);
-    };
-    if status != PaymentStatus::Posted.as_str() {
-        tx.rollback().await.map_err(PaymentCommandError::Database)?;
-        return Ok(ReverseOutcome {
-            replayed: true,
-            reversed_allocation_count: 0,
-            payment_number,
-        });
-    }
-
-    // STEP-008 account effect: the original movement row is PRESERVED
-    // and flipped to `reversed` (status-based model), excluded from the
-    // derived balance. Legacy NULL-account Payments have no effect.
-    // Guard: if the funds already left via a Transfer, reversing the
-    // inflow would take the balance negative — reject (negative
-    // balances are rejected domain-wide).
-    if let Some(account_id) = destination_account_id {
-        account_repo::lock_accounts(&mut tx, &[account_id])
-            .await
-            .map_err(account_err)?;
-        let balance = account_repo::locked_balance(&mut tx, account_id)
-            .await
-            .map_err(account_err)?;
-        if balance - amount < Decimal::ZERO {
-            return Err(PaymentCommandError::AccountEffectBlocked);
-        }
-        // PILOT-FIX-001 hard reservation: removing the Payment inflow
-        // must not leave the account's Social Aid reservation
-        // physically unbacked — restricted money is not freed by a
-        // reversal label.
-        let reserved = account_repo::locked_reserved_social_aid(&mut tx, account_id)
-            .await
-            .map_err(account_err)?;
-        if balance - amount < reserved {
-            return Err(PaymentCommandError::AccountEffectBlocked);
-        }
-        account_repo::reverse_movements_of_source(
-            &mut tx,
-            MovementSource::Payment,
-            payment_id,
-            now,
-            actor,
-            &reason,
-        )
-        .await
-        .map_err(account_err)?;
-    }
-
-    // STEP-009 credit effect: the Payment's Shareholder Credits are
-    // status-based reversed with the same actor/time/reason — unless
-    // one is already CONSUMED by an active Credit Application, in
-    // which case the reversal is rejected (no debt-settlement may be
-    // left backed by an invalid Payment; correct the application
-    // first). Lock order is preserved: payment -> account -> credits.
-    credit_repo::reconcile_credits_of_payment_reversal(&mut tx, payment_id, actor, &reason, now)
-        .await
-        .map_err(|error| match error {
-            credit_repo::CreditCommandError::Consumed => PaymentCommandError::CreditEffectBlocked,
-            credit_repo::CreditCommandError::Database(db) => PaymentCommandError::Database(db),
-            _ => PaymentCommandError::Database(sqlx::Error::Protocol(
-                "unexpected credit error during payment reversal".into(),
-            )),
-        })?;
-
-    let reversed = sqlx::query(
-        "UPDATE payment_allocations SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4 \
-         WHERE payment_id = $1 AND status = 'active'",
+    // R3C: the complete reversal package runs inside ONE
+    // permission-checked definer — payment lock + status, account
+    // balance/reservation checks, compensating movement reversal,
+    // shareholder-credit reconcile and allocation flips are atomic in
+    // the database. The runtime role cannot invoke a partial reversal.
+    let (replayed, reversed_count, payment_number): (bool, i64, i64) = sqlx::query_as(
+        "SELECT replayed, reversed_allocations, payment_number \
+         FROM public.app_payment_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(payment_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(PaymentCommandError::Database)?
-    .rows_affected();
-
-    sqlx::query(
-        "UPDATE payments SET status = 'reversed', reversed_at = $2, \
-            reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
-    )
-    .bind(payment_id)
-    .bind(now)
-    .bind(actor)
-    .bind(&reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(PaymentCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => PaymentCommandError::NotFound,
+        Some("account_not_found_or_inactive") => PaymentCommandError::AccountNotFoundOrInactive,
+        Some("account_effect_blocked") => PaymentCommandError::AccountEffectBlocked,
+        Some("credit_effect_blocked") => PaymentCommandError::CreditEffectBlocked,
+        _ => PaymentCommandError::Database(error),
+    })?;
 
     tx.commit().await.map_err(PaymentCommandError::Database)?;
     Ok(ReverseOutcome {
-        replayed: false,
-        reversed_allocation_count: reversed as i64,
+        replayed,
+        reversed_allocation_count: reversed_count,
         payment_number,
     })
 }
@@ -1092,18 +1137,22 @@ pub async fn reverse_payment(
 /// the Payment keeps satisfying its other obligations. Same payment ->
 /// allocation lock prefix as every other command.
 pub async fn reverse_allocation(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     payment_id: Uuid,
     allocation_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<ReverseOutcome, PaymentCommandError> {
-    let mut tx = pool.begin().await.map_err(PaymentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PaymentCommandError::Database)?;
 
+    // Scoped lock (C3): a foreign payment id is the indistinguishable
+    // NotFound.
     let payment: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, payment_number FROM payments WHERE id = $1 FOR UPDATE")
+        sqlx::query_as("SELECT status, payment_number FROM public.app_lock_payment($1, $2)")
             .bind(payment_id)
+            .bind(cooperative_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(PaymentCommandError::Database)?;
@@ -1111,15 +1160,14 @@ pub async fn reverse_allocation(
         return Err(PaymentCommandError::NotFound);
     };
 
-    let allocation: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM payment_allocations \
-         WHERE id = $1 AND payment_id = $2 FOR UPDATE",
-    )
-    .bind(allocation_id)
-    .bind(payment_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(PaymentCommandError::Database)?;
+    let allocation: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM public.app_lock_allocation($1, $2, $3)")
+            .bind(allocation_id)
+            .bind(payment_id)
+            .bind(cooperative_id)
+            .fetch_optional(tx.as_mut())
+            .await
+            .map_err(PaymentCommandError::Database)?;
     let Some((allocation_status,)) = allocation else {
         return Err(PaymentCommandError::NotFound);
     };
@@ -1132,18 +1180,15 @@ pub async fn reverse_allocation(
         });
     }
 
-    sqlx::query(
-        "UPDATE payment_allocations SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4 \
-         WHERE id = $1",
-    )
-    .bind(allocation_id)
-    .bind(now)
-    .bind(actor)
-    .bind(&reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(PaymentCommandError::Database)?;
+    sqlx::query("SELECT public.app_payment_allocation_reverse($1, $2, $3, $4, $5)")
+        .bind(allocation_id)
+        .bind(now)
+        .bind(actor)
+        .bind(&reason)
+        .bind(cooperative_id)
+        .execute(tx.as_mut())
+        .await
+        .map_err(PaymentCommandError::Database)?;
 
     tx.commit().await.map_err(PaymentCommandError::Database)?;
     Ok(ReverseOutcome {

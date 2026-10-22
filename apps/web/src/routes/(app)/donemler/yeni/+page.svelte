@@ -15,6 +15,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { parseTryInput } from '$lib/money';
 	import { PERIODS_PATH, type AssessmentRuleType, type PeriodDetail } from '@kooperatif/contracts';
@@ -27,6 +28,15 @@
 	let effectiveDate = $state('');
 	let submitError = $state<MessageKey | null>(null);
 	let submitting = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() =>
+			name !== '' ||
+			collectionStartDate !== '' ||
+			dueDate !== '' ||
+			baseAmount !== '' ||
+			effectiveDate !== ''
+	);
 
 	const isoDate = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -61,6 +71,7 @@
 					assessmentEffectiveDate: effectiveDate
 				}
 			});
+			formGuard.clear();
 			goto(resolve(`/donemler/${created.id}`));
 		} catch (error) {
 			submitError = apiErrorKey(error);

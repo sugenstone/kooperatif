@@ -100,7 +100,7 @@ fn unique_peer() -> SocketAddr {
 async fn setup(auth: AuthConfig) -> Option<TestApp> {
     let url = test_database_url()?;
     let pool = app_db::connect(&url).await.expect("database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -138,7 +138,7 @@ fn test_argon2() -> argon2::Argon2<'static> {
 async fn create_test_user(pool: &PgPool, username: &str, password: &str) -> (Uuid, String) {
     let argon2 = test_argon2();
     let hash = identity::hash_password(&argon2, password).expect("hash");
-    let user = users::create_user(pool, username, "Test Kullanıcı", &hash)
+    let user = users::create_user(pool, username, "Test Kullanıcı", &hash, password)
         .await
         .expect("user created");
     (user.id, user.username)
@@ -1187,7 +1187,14 @@ async fn database_constraints_enforce_identity_integrity() {
     // normalizes identically — is rejected by the database.
     let argon2 = test_argon2();
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    let result = users::create_user(&test.pool, &username.to_uppercase(), "Kopya", &hash).await;
+    let result = users::create_user(
+        &test.pool,
+        &username.to_uppercase(),
+        "Kopya",
+        &hash,
+        TEST_PASSWORD,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(users::CreateUserError::DuplicateUsername)

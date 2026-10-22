@@ -129,9 +129,14 @@ pub async fn bootstrap_initial_cooperative(
     .execute(&mut *tx)
     .await?;
 
+    // Disabled users must never receive an ACTIVE membership from
+    // bootstrap: membership is deliberately not created at all, so a
+    // later user reactivation cannot silently revive cooperative access
+    // — access then requires an explicit `add-member` decision.
     sqlx::query(
         "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
          SELECT $1, u.id, 'active' FROM users u \
+         WHERE u.status = 'active' \
          ON CONFLICT (cooperative_id, user_id) DO NOTHING",
     )
     .bind(coop_id)
@@ -144,6 +149,59 @@ pub async fn bootstrap_initial_cooperative(
     .bind(coop_id)
     .fetch_one(&mut *tx)
     .await?;
+
+    // Seed the known system categories BOUND to this cooperative.
+    // Since 0025 closed the NULL lane (cooperative_id NOT NULL + the
+    // 0010-era global seeds removed), the canonical ten are inserted
+    // here rather than claimed — same seed list, `created_by IS NULL`
+    // keeps them distinguishable as system rows. Idempotent at the
+    // bootstrap level: the whole function is single-shot and the body
+    // rolls back as one transaction.
+    sqlx::query(
+        "INSERT INTO financial_categories \
+             (category_type, name, created_by, cooperative_id) \
+         VALUES \
+             ('income',  'Diğer Gelir',               NULL, $1), \
+             ('income',  'Kira Geliri',               NULL, $1), \
+             ('income',  'Yatırım Geliri',            NULL, $1), \
+             ('expense', 'Genel Gider',               NULL, $1), \
+             ('expense', 'Kira',                      NULL, $1), \
+             ('expense', 'Ulaşım',                    NULL, $1), \
+             ('expense', 'Bakım / Onarım',            NULL, $1), \
+             ('expense', 'Elektrik / Su / İletişim',  NULL, $1), \
+             ('expense', 'Organizasyon',              NULL, $1), \
+             ('expense', 'Diğer Gider',               NULL, $1) \
+         ON CONFLICT (cooperative_id, category_type, lower(btrim(name))) \
+         DO NOTHING",
+    )
+    .bind(coop_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Fail closed (P0): after the seed claim, ANY remaining NULL
+    // business row is user-created data without an explicit owner —
+    // produced by pre-bootstrap operation in the NeverBootstrapped
+    // lane or by a 0021-skipped database. Silently assigning it would
+    // rewrite historical ownership, so the whole bootstrap aborts and
+    // rolls back. Recovery is a deliberate operator decision (the 0021
+    // backfill path), never an implicit side effect of this command.
+    // Table list mirrors 0021's claim list exactly; RBAC and
+    // security_events are excluded (separate NULL semantics).
+    // M1-P4-P3A: the scan runs through a SECURITY DEFINER function —
+    // under RLS (pilot: periods, governance_bodies) per-table EXISTS
+    // probes as the runtime principal would be silently filtered and
+    // the check would go fail-open.
+    let orphan: Option<String> = sqlx::query_scalar("SELECT public.app_bootstrap_orphan_scan()")
+        .fetch_one(&mut *tx)
+        .await?;
+    if let Some(table) = orphan {
+        return Err(sqlx::Error::Protocol(format!(
+            "bootstrap fail-closed: '{table}' contains business rows without \
+             a cooperative owner — refusing to silently assign historical \
+             ownership; resolve with a deliberate operator backfill (0021) \
+             before retrying"
+        )));
+    }
 
     tx.commit().await?;
     Ok((coop_id, member_count))
@@ -207,39 +265,47 @@ pub struct MembershipCooperativeRow {
 /// cooperative-switch endpoint. Returns the joined row only when a
 /// membership exists; the caller applies the status/business_enabled
 /// gates explicitly (fail closed).
+///
+/// M1-P4-S2A: credential-bound — resolves through the
+/// `app_session_membership` SECURITY DEFINER, which derives the user id
+/// from the presented session token hash inside the database (never a
+/// caller-supplied `user_id`). An invalid/expired session returns zero
+/// rows: same fail-closed shape as "not a member".
 pub async fn resolve_membership(
     pool: &sqlx::PgPool,
-    user_id: Uuid,
+    session_token_hash: &[u8; 32],
     cooperative_id: Uuid,
+    now: OffsetDateTime,
 ) -> Result<Option<MembershipCooperativeRow>, sqlx::Error> {
     sqlx::query_as::<_, MembershipCooperativeRow>(
-        "SELECT m.status AS membership_status, c.name AS cooperative_name, \
-                c.status AS cooperative_status, c.business_enabled \
-         FROM cooperative_memberships m \
-         JOIN cooperatives c ON c.id = m.cooperative_id \
-         WHERE m.user_id = $1 AND m.cooperative_id = $2",
+        "SELECT membership_status, cooperative_name, cooperative_status, \
+                business_enabled \
+         FROM public.app_session_membership($1, $2, $3)",
     )
-    .bind(user_id)
+    .bind(session_token_hash.as_slice())
     .bind(cooperative_id)
+    .bind(now)
     .fetch_optional(pool)
     .await
 }
 
 /// All memberships of a user with their cooperative — `/api/auth/me`
 /// and the cooperative list endpoint.
+///
+/// M1-P4-S2A: credential-bound via `app_session_memberships` — the
+/// result can never contain another user's rows.
 pub async fn list_user_cooperatives(
     pool: &sqlx::PgPool,
-    user_id: Uuid,
+    session_token_hash: &[u8; 32],
+    now: OffsetDateTime,
 ) -> Result<Vec<CooperativeMembershipSummary>, sqlx::Error> {
     sqlx::query_as::<_, CooperativeMembershipSummary>(
-        "SELECT m.cooperative_id, c.name, c.status, c.business_enabled, \
-                m.status AS membership_status \
-         FROM cooperative_memberships m \
-         JOIN cooperatives c ON c.id = m.cooperative_id \
-         WHERE m.user_id = $1 \
-         ORDER BY c.name",
+        "SELECT cooperative_id, name, status, business_enabled, \
+                membership_status \
+         FROM public.app_session_memberships($1, $2)",
     )
-    .bind(user_id)
+    .bind(session_token_hash.as_slice())
+    .bind(now)
     .fetch_all(pool)
     .await
 }
@@ -254,11 +320,12 @@ pub async fn list_user_cooperatives(
 /// pointing at a non-bootstrap row) — callers disambiguate with
 /// `never_bootstrapped`, which fails closed on inconsistency.
 pub async fn resolve_bootstrap(pool: &sqlx::PgPool) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+    // M1-P4-R4: marker+flag agreement is resolved inside the definer —
+    // cooperatives/installation_state are no longer SELECTable by the
+    // runtime role (enumeration closure).
     sqlx::query_as(
-        "SELECT c.id, c.name \
-         FROM installation_state s \
-         JOIN cooperatives c ON c.id = s.bootstrap_cooperative_id \
-         WHERE c.is_bootstrap",
+        "SELECT cooperative_id, cooperative_name \
+         FROM public.app_resolve_bootstrap()",
     )
     .fetch_optional(pool)
     .await
@@ -274,13 +341,10 @@ pub async fn resolve_bootstrap(pool: &sqlx::PgPool) -> Result<Option<(Uuid, Stri
 /// whose marker was not yet written (pre-0020 state mid-upgrade) is
 /// still treated as engaged rather than reopened.
 pub async fn bootstrap_completed(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM installation_state \
-                       WHERE bootstrap_cooperative_id IS NOT NULL) \
-            OR EXISTS(SELECT 1 FROM cooperatives WHERE is_bootstrap)",
-    )
-    .fetch_one(pool)
-    .await
+    // M1-P4-R4: same marker+flag rule behind the verified definer.
+    sqlx::query_scalar("SELECT public.app_bootstrap_completed()")
+        .fetch_one(pool)
+        .await
 }
 
 /// Whether the installation has provably NEVER run tenant bootstrap
@@ -296,51 +360,48 @@ pub async fn bootstrap_completed(pool: &sqlx::PgPool) -> Result<bool, sqlx::Erro
 /// Any other combination is a broken or previously-tenanted state and
 /// must fail closed — a missing `is_bootstrap` row alone is NEVER
 /// sufficient evidence.
+///
+/// M1-P4-S3: evaluated inside `app_session_legacy_lane_ok()` — the
+/// definer runs as the table owner, so FORCE RLS on `security_events`
+/// cannot silently empty the audit-evidence arm of this predicate.
 pub async fn never_bootstrapped(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM installation_state) \
-            AND NOT EXISTS(SELECT 1 FROM installation_state \
-                           WHERE bootstrap_cooperative_id IS NOT NULL) \
-            AND NOT EXISTS(SELECT 1 FROM cooperatives) \
-            AND NOT EXISTS(SELECT 1 FROM security_events \
-                           WHERE cooperative_id IS NOT NULL)",
-    )
-    .fetch_one(pool)
-    .await
+    sqlx::query_scalar("SELECT public.app_session_legacy_lane_ok()")
+        .fetch_one(pool)
+        .await
 }
 
-/// Whether the user holds an active membership in an active,
+/// Whether the session owner holds an active membership in an active,
 /// business-enabled cooperative — the M1 §5 gate predicate for
 /// not-yet-tenant-scoped business modules.
+///
+/// M1-P4-S2A: credential-bound via `app_session_business_membership_ok`
+/// (the session token hash, not a caller-supplied `user_id`, selects
+/// the principal).
 pub async fn has_enabled_business_membership(
     pool: &sqlx::PgPool,
-    user_id: Uuid,
+    session_token_hash: &[u8; 32],
+    now: OffsetDateTime,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(\
-            SELECT 1 FROM cooperative_memberships m \
-            JOIN cooperatives c ON c.id = m.cooperative_id \
-            WHERE m.user_id = $1 \
-              AND m.status = 'active' \
-              AND c.status = 'active' \
-              AND c.business_enabled)",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
+    sqlx::query_scalar("SELECT public.app_session_business_membership_ok($1, $2)")
+        .bind(session_token_hash.as_slice())
+        .bind(now)
+        .fetch_one(pool)
+        .await
 }
 
 /// Persist the UX-level default cooperative on the session row
 /// (M1-K1: convenience only — never a security decision on its own).
+///
+/// Credential-bound since M1-P4-P3B: the definer resolves the hash
+/// owner's current session and refuses non-members.
 pub async fn set_session_cooperative(
     pool: &sqlx::PgPool,
-    session_id: Uuid,
-    cooperative_id: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE user_sessions SET active_cooperative_id = $2 WHERE id = $1")
-        .bind(session_id)
+    token_hash: [u8; 32],
+    cooperative_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>("SELECT public.app_session_set_cooperative($1, $2)")
+        .bind(token_hash.as_slice())
         .bind(cooperative_id)
-        .execute(pool)
-        .await?;
-    Ok(())
+        .fetch_one(pool)
+        .await
 }

@@ -73,6 +73,7 @@ impl TestApp {
         .await;
         self.pool.close().await;
         if let Ok(admin) = sqlx::PgPool::connect(&self.admin_url).await {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -105,7 +106,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -163,7 +164,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "Test Kullanıcı", &hash)
+    users::create_user(pool, username, "Test Kullanıcı", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id

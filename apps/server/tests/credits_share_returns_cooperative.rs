@@ -91,6 +91,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -131,7 +132,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -190,7 +191,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c3c3 Test", &hash)
+    users::create_user(pool, username, "P1c3c3 Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -530,18 +531,31 @@ async fn make_payment(
 /// fixtures replicate exactly what shares::repo::create writes:
 /// share + initial_acquisition event + open ownership interval
 /// starting 2025-01-01 (before the 2026-01-01 effective return date).
+///
+/// C3: rows are bound to the CURRENT verified scope — the bootstrap
+/// cooperative when bootstrapped, NULL in the never-bootstrapped lane
+/// (scoped queries never see NULL rows, so NULL fixtures would be
+/// indistinguishable from absent ones).
 async fn make_share(pool: &PgPool, actor: Uuid, shareholder: Uuid) -> Uuid {
-    let share_id: Uuid =
-        sqlx::query_scalar("INSERT INTO shares (created_by) VALUES ($1) RETURNING id")
-            .bind(actor)
+    let coop: Option<Uuid> =
+        sqlx::query_scalar("SELECT bootstrap_cooperative_id FROM installation_state")
             .fetch_one(pool)
             .await
-            .expect("share");
+            .expect("installation scope");
+    let share_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO shares (created_by, cooperative_id, share_number) \
+         VALUES ($1, $2, allocate_document_number($2,'shares.share_number')) RETURNING id",
+    )
+    .bind(actor)
+    .bind(coop)
+    .fetch_one(pool)
+    .await
+    .expect("share");
     let event_id: Uuid = sqlx::query_scalar(
         "INSERT INTO share_events \
              (share_id, event_type, occurred_at, to_shareholder_id, acquisition_type, \
-              amount, currency, reason, actor_user_id) \
-         VALUES ($1, 'initial_acquisition', $2, $3, 'founder', $4, 'TRY', 'kurucu', $5) \
+              amount, currency, reason, actor_user_id, cooperative_id) \
+         VALUES ($1, 'initial_acquisition', $2, $3, 'founder', $4, 'TRY', 'kurucu', $5, $6) \
          RETURNING id",
     )
     .bind(share_id)
@@ -555,13 +569,15 @@ async fn make_share(pool: &PgPool, actor: Uuid, shareholder: Uuid) -> Uuid {
     .bind(shareholder)
     .bind(rust_decimal::Decimal::new(100, 2))
     .bind(actor)
+    .bind(coop)
     .fetch_one(pool)
     .await
     .expect("share event");
     sqlx::query(
         "INSERT INTO share_ownerships \
-             (share_id, shareholder_id, started_at, acquisition_type, source_event_id, created_by) \
-         VALUES ($1, $2, $3, 'founder', $4, $5)",
+             (share_id, shareholder_id, started_at, acquisition_type, source_event_id, created_by, \
+              cooperative_id) \
+         VALUES ($1, $2, $3, 'founder', $4, $5, $6)",
     )
     .bind(share_id)
     .bind(shareholder)
@@ -574,6 +590,7 @@ async fn make_share(pool: &PgPool, actor: Uuid, shareholder: Uuid) -> Uuid {
     )
     .bind(event_id)
     .bind(actor)
+    .bind(coop)
     .execute(pool)
     .await
     .expect("ownership");
@@ -1884,9 +1901,12 @@ async fn concurrent_idempotent_posts_single_write() {
 }
 
 #[tokio::test]
-async fn never_bootstrapped_lane_keeps_legacy_semantics() {
+async fn never_bootstrapped_lane_reads_but_cannot_write_unowned() {
     let Some(test) = setup().await else { return };
-    // No cooperative exists at all — the legacy global lane.
+    // No cooperative exists at all — the legacy global lane still
+    // opens for READS. C5-3 closed the write side: cooperative_id is
+    // NOT NULL on all business tables, so an ownerless write cannot
+    // commit.
     let legacy = create_user(&test.pool, "tek_alan").await;
     grant_role(&test.pool, legacy, "global-op", None, OPERATOR_PERMS).await;
     let (cookie, csrf) = login(&test.app, test.peer, "tek_alan").await;
@@ -1896,8 +1916,7 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
             request_json(&test, Method::GET, path, &cookie, None, None, None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
-    let shareholder = make_shareholder(&test, &cookie, &csrf, "Tek", 1).await;
-    let share = make_share(&test.pool, legacy, shareholder).await;
+
     let (status, body) = request_json(
         &test,
         Method::POST,
@@ -1905,10 +1924,18 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
         &cookie,
         Some(&csrf),
         None,
-        Some(initiate_body(share, "2026-01-01", "r-legacy-lane")),
+        Some(initiate_body(Uuid::new_v4(), "2026-01-01", "r-legacy-lane")),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        !status.is_success(),
+        "unowned business write must fail, got {status}: {body}"
+    );
+    let returns: i64 = sqlx::query_scalar("SELECT count(*) FROM share_returns")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(returns, 0, "no unowned share return may be written");
 
     test.cleanup().await;
 }

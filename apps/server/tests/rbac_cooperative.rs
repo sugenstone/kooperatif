@@ -82,6 +82,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -122,7 +123,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -181,7 +182,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c2a Test", &hash)
+    users::create_user(pool, username, "P1c2a Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -598,8 +599,12 @@ async fn membership_and_header_rules_apply_to_rbac() {
     test.cleanup().await;
 }
 
+/// NULL-attributed legacy/platform rows stay READ-visible to the
+/// bootstrap scope but are no longer mutable from it (M1-P6 B2/0069):
+/// platform-scoped rows are write-protected against every cooperative
+/// scope — only owner lane or the never-bootstrapped lane touches them.
 #[tokio::test]
-async fn null_legacy_roles_stay_manageable_in_bootstrap() {
+async fn null_legacy_roles_read_only_in_bootstrap() {
     let Some(test) = setup().await else { return };
     bootstrap_admin(&test.pool, "a_admin4").await;
     let (cookie, csrf) = login(&test.app, test.peer, "a_admin4").await;
@@ -619,7 +624,7 @@ async fn null_legacy_roles_stay_manageable_in_bootstrap() {
     .await
     .expect("perm");
 
-    // Visible in list and direct read.
+    // Visible in list and direct read (NULL inheritance preserved).
     let (status, body) =
         request_json(&test, Method::GET, "/api/roles", &cookie, None, None, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -638,21 +643,27 @@ async fn null_legacy_roles_stay_manageable_in_bootstrap() {
         .0,
         StatusCode::OK
     );
-    // Mutations allowed under verified attribution.
-    assert_eq!(
-        request_json(
-            &test,
-            Method::PATCH,
-            &format!("/api/roles/{null_role}"),
-            &cookie,
-            Some(&csrf),
-            None,
-            Some(json!({ "description": "legacy" })),
-        )
-        .await
-        .0,
-        StatusCode::OK
+    // Mutations are refused at the boundary definer.
+    let (status, _) = request_json(
+        &test,
+        Method::PATCH,
+        &format!("/api/roles/{null_role}"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "description": "legacy" })),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "NULL-scope role must not be mutable from a cooperative scope, got {status}"
     );
+    let description: String = sqlx::query_scalar("SELECT description FROM roles WHERE id = $1")
+        .bind(null_role)
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(description, "", "the row must be untouched");
 
     test.cleanup().await;
 }
@@ -777,8 +788,8 @@ async fn migrated_mutations_keep_last_admin_protection() {
         "lockout guard must still prevent last-admin stripping"
     );
 
-    // disable_user likewise runs the scoped guard: disabling the only
-    // administrator is refused.
+    // M1: the cooperative-scoped lifecycle is membership suspension —
+    // suspending the only administrator's membership is refused.
     let admin: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'a_admin6'")
         .fetch_one(&test.pool)
         .await
@@ -787,7 +798,7 @@ async fn migrated_mutations_keep_last_admin_protection() {
         request_json(
             &test,
             Method::POST,
-            &format!("/api/users/{admin}/disable"),
+            &format!("/api/users/{admin}/membership-suspend"),
             &cookie,
             Some(&csrf),
             None,
@@ -851,7 +862,11 @@ async fn scoped_lockout_covers_all_four_mutations() {
             format!("/api/users/{admin}/roles"),
             Some(json!({ "roleIds": [] })),
         ),
-        (Method::POST, format!("/api/users/{admin}/disable"), None),
+        (
+            Method::POST,
+            format!("/api/users/{admin}/membership-suspend"),
+            None,
+        ),
         (
             Method::POST,
             format!("/api/roles/{admin_role}/disable"),
@@ -942,7 +957,11 @@ async fn other_cooperative_admin_path_does_not_satisfy_lockout() {
             format!("/api/users/{admin}/roles"),
             Some(json!({ "roleIds": [] })),
         ),
-        (Method::POST, format!("/api/users/{admin}/disable"), None),
+        (
+            Method::POST,
+            format!("/api/users/{admin}/membership-suspend"),
+            None,
+        ),
         (
             Method::POST,
             format!("/api/roles/{admin_role}/disable"),
@@ -994,7 +1013,11 @@ async fn cross_cooperative_targets_are_invisible_to_mutations() {
             format!("/api/roles/{b_role}/permissions"),
             Some(json!({ "permissions": ["users.read"] })),
         ),
-        (Method::POST, format!("/api/users/{b_user}/disable"), None),
+        (
+            Method::POST,
+            format!("/api/users/{b_user}/membership-suspend"),
+            None,
+        ),
         (
             Method::PUT,
             format!("/api/users/{b_user}/roles"),
@@ -1168,14 +1191,14 @@ async fn api_assignments_carry_cooperative_never_null() {
     test.cleanup().await;
 }
 
-/// NULL-attributed legacy rows in the bootstrap scope: manageable
-/// (disable / permission-replace succeed when they are not the last
-/// admin path), but NOT assignable — the composite FK can only pair
-/// scope-owned roles, and the API refuses to write NULL assignments.
-/// A user's NULL-attributed assignment IS replaced in place by the
-/// scoped rewrite.
+/// NULL-attributed legacy rows in the bootstrap scope: since 0069 they
+/// are READ-inherited but NOT mutable — disable is an idempotent no-op,
+/// permission-replace is refused — and NOT assignable (the composite FK
+/// can only pair scope-owned roles). A user's NULL-attributed
+/// assignment survives a cooperative-scope rewrite: the replace touches
+/// only rows the scope owns.
 #[tokio::test]
-async fn null_legacy_rows_manageable_but_not_assignable() {
+async fn null_legacy_rows_immutable_and_not_assignable() {
     let Some(test) = setup().await else { return };
     let (_, coop) = bootstrap_admin(&test.pool, "a_admin9").await;
     let (cookie, csrf) = login(&test.app, test.peer, "a_admin9").await;
@@ -1203,23 +1226,49 @@ async fn null_legacy_rows_manageable_but_not_assignable() {
         .await
         .expect("cleanup null assignment");
 
-    // NULL role: disable + permission replace work (manageable).
-    for (method, path, body) in [
-        (
-            Method::POST,
-            format!("/api/roles/{null_role}/disable"),
-            None,
-        ),
-        (
-            Method::PUT,
-            format!("/api/roles/{null_role}/permissions"),
-            Some(json!({ "permissions": ["families.read"] })),
-        ),
-    ] {
-        let (status, body) =
-            request_json(&test, method, &path, &cookie, Some(&csrf), None, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "{path}: {body}");
-    }
+    // NULL role: disable is an idempotent no-op (the boundary definer
+    // refuses the write); permission replace is refused outright.
+    let (status, _) = request_json(
+        &test,
+        Method::POST,
+        &format!("/api/roles/{null_role}/disable"),
+        &cookie,
+        Some(&csrf),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        status == StatusCode::NO_CONTENT || !status.is_success(),
+        "unexpected disable status {status}"
+    );
+    let (status, body) = request_json(
+        &test,
+        Method::PUT,
+        &format!("/api/roles/{null_role}/permissions"),
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({ "permissions": ["families.read"] })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "NULL-scope permission rewrite must be denied: {body}"
+    );
+    let (role_status, perm_key): (String, String) = sqlx::query_as(
+        "SELECT r.status, p.key FROM roles r \
+           JOIN role_permissions rp ON rp.role_id = r.id \
+           JOIN permissions p ON p.id = rp.permission_id \
+          WHERE r.id = $1",
+    )
+    .bind(null_role)
+    .fetch_one(&test.pool)
+    .await
+    .expect("null role probe");
+    assert_eq!(role_status, "active", "the row must be untouched");
+    assert_eq!(perm_key, "shares.read");
 
     // NULL role is NOT assignable: same 400 as unknown/foreign roles.
     let target = create_user(&test.pool, "atama_hedefi").await;
@@ -1238,8 +1287,10 @@ async fn null_legacy_rows_manageable_but_not_assignable() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    // A user's legacy NULL assignment is inside the scope's rewrite
-    // window: PUT replaces it with a scoped row.
+    // A user's legacy NULL assignment is OUTSIDE the scope's rewrite
+    // window (0069): PUT adds the scoped row but the platform-lane
+    // assignment survives — cooperative administrators can no longer
+    // strip NULL-scope grants.
     let legacy_target = create_user(&test.pool, "eski_atamali").await;
     repo::add_member(&test.pool, "Ana Kooperatif", legacy_target, None)
         .await
@@ -1269,18 +1320,17 @@ async fn null_legacy_rows_manageable_but_not_assignable() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let rows: Vec<Option<Uuid>> =
-        sqlx::query_scalar("SELECT cooperative_id FROM user_role_assignments WHERE user_id = $1")
-            .bind(legacy_target)
-            .fetch_all(&test.pool)
-            .await
-            .expect("assignments");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(
-        rows[0],
-        Some(coop),
-        "NULL assignment must be replaced by a scoped one"
-    );
+    let rows: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT cooperative_id FROM user_role_assignments WHERE user_id = $1 \
+         ORDER BY cooperative_id NULLS FIRST",
+    )
+    .bind(legacy_target)
+    .fetch_all(&test.pool)
+    .await
+    .expect("assignments");
+    assert_eq!(rows.len(), 2, "scoped row added, NULL row survives");
+    assert_eq!(rows[0], None, "NULL-scope assignment must survive");
+    assert_eq!(rows[1], Some(coop), "the scoped row must land");
 
     test.cleanup().await;
 }
@@ -1413,7 +1463,7 @@ async fn migrated_mutations_attribute_audit_to_scope() {
         request_json(
             &test,
             Method::POST,
-            &format!("/api/users/{target}/disable"),
+            &format!("/api/users/{target}/membership-suspend"),
             &cookie,
             Some(&csrf),
             None,
@@ -1443,7 +1493,7 @@ async fn migrated_mutations_attribute_audit_to_scope() {
         "role_disabled",
         "role_permissions_changed",
         "role_assigned",
-        "user_disabled",
+        "cooperative_membership_suspended",
     ];
     for event in expected {
         let (count, scoped): (i64, i64) = sqlx::query_as(
@@ -1556,7 +1606,7 @@ async fn dual_membership_and_viewer_isolation() {
         request_json(
             &test,
             Method::POST,
-            &format!("/api/users/{target}/disable"),
+            &format!("/api/users/{target}/membership-suspend"),
             &cookie,
             Some(&csrf),
             None,
@@ -1575,7 +1625,7 @@ async fn dual_membership_and_viewer_isolation() {
         request_json(
             &test,
             Method::POST,
-            &format!("/api/users/{target2}/disable"),
+            &format!("/api/users/{target2}/membership-suspend"),
             &cookie,
             Some(&csrf),
             Some(&coop_str),
@@ -1590,7 +1640,7 @@ async fn dual_membership_and_viewer_isolation() {
         request_json(
             &test,
             Method::POST,
-            &format!("/api/users/{target}/enable"),
+            &format!("/api/users/{target}/membership-reactivate"),
             &cookie,
             Some(&csrf),
             Some(&coop_b.to_string()),
@@ -1648,7 +1698,11 @@ async fn dual_membership_and_viewer_isolation() {
             format!("/api/users/{target}/roles"),
             Some(json!({ "roleIds": [] })),
         ),
-        (Method::POST, format!("/api/users/{target}/disable"), None),
+        (
+            Method::POST,
+            format!("/api/users/{target}/membership-suspend"),
+            None,
+        ),
     ] {
         let (status, body) = request_json(
             &test,
@@ -1757,7 +1811,7 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
         request_json(
             &test,
             Method::POST,
-            &format!("/api/users/{admin}/disable"),
+            &format!("/api/platform/users/{admin}/disable"),
             &cookie,
             Some(&csrf),
             None,
@@ -1893,6 +1947,354 @@ async fn me_returns_bootstrap_scoped_authorization_hints() {
         l_perms.contains(&"roles.manage".to_string()),
         "NULL-attributed legacy grant must still resolve: {l_perms:?}"
     );
+
+    test.cleanup().await;
+}
+
+// ======================================================================
+// M1 — identity vs membership separation on the REAL restricted lane.
+// The router below runs its ENTIRE state pool as `kooperatif_app`, so
+// every handler goes through the sealed context, the membership
+// definer, and the platform-authority gate end to end.
+// ======================================================================
+
+const APP_ROLE: &str = "kooperatif_app";
+/// Restricted-principal password: `KOOPERATIF_APP_TEST_PASSWORD`
+/// overrides for CI; otherwise the documented local dev password.
+fn app_password() -> String {
+    app_db::test_app_role_password()
+}
+
+fn app_url(admin_url: &str) -> String {
+    let (scheme, rest) = admin_url.split_once("://").expect("url scheme");
+    let at = rest.find('@').expect("userinfo in url");
+    format!("{scheme}://{APP_ROLE}:{}{}", app_password(), &rest[at..])
+}
+
+/// `request_json` against an arbitrary router (the restricted lane).
+#[allow(clippy::too_many_arguments)]
+async fn request_on(
+    app: &Router,
+    peer: SocketAddr,
+    method: Method,
+    path: &str,
+    cookie: &str,
+    csrf: Option<&str>,
+    coop: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, String) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", ORIGIN);
+    if !cookie.is_empty() {
+        builder = builder.header("cookie", format!("kooperatif_session={cookie}"));
+    }
+    if let Some(token) = csrf {
+        builder = builder.header("x-csrf-token", token);
+    }
+    if let Some(c) = coop {
+        builder = builder.header("x-cooperative-id", c);
+    }
+    let payload = match body {
+        Some(value) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(value.to_string())
+        }
+        None => Body::empty(),
+    };
+    let mut request = builder.body(payload).expect("request");
+    request.extensions_mut().insert(ConnectInfo(peer));
+    let response = app.clone().oneshot(request).await.expect("infallible");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[tokio::test]
+async fn m1_restricted_lane_membership_and_platform_http() {
+    let Some(test) = setup().await else { return };
+
+    // Second router whose ONLY database connection is the real
+    // restricted runtime principal.
+    let base = test
+        .admin_url
+        .rsplit_once('/')
+        .map(|(b, _)| b.to_string())
+        .unwrap();
+    let app_pool = app_db::connect(&app_url(&format!("{base}/{}", test.database_name)))
+        .await
+        .expect("kooperatif_app pool");
+    let lane = router(
+        AppState {
+            db: Some(app_pool.clone()),
+            auth: Arc::new(AuthRuntime::new(
+                AuthConfig {
+                    allowed_origins: vec![ORIGIN.to_string()],
+                    cookie_secure: false,
+                    session_absolute_ttl_secs: 3600,
+                    session_idle_ttl_secs: 600,
+                    argon2_m_cost: ARGON2_M_COST_FLOOR,
+                    argon2_t_cost: 1,
+                    argon2_p_cost: 1,
+                    login_window_secs: 60,
+                    login_username_max_attempts: 100,
+                    login_ip_max_attempts: 100_000,
+                    forwarded_ip: false,
+                },
+                Arc::new(MutableClock::new(
+                    OffsetDateTime::parse(
+                        "2026-01-01T00:00:00Z",
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .expect("epoch"),
+                )),
+            )),
+        },
+        cors_layer(&[]),
+    );
+
+    // Cooperative administrator (users.manage in the bootstrap scope
+    // only — NOT platform authority), a plain member, and a platform
+    // administrator (NULL-scope grant).
+    let (_admin, coop) = bootstrap_admin(&test.pool, "m1adm").await;
+    let member = create_user(&test.pool, "m1uye").await;
+    repo::add_member(&test.pool, "Ana Kooperatif", member, None)
+        .await
+        .expect("membership");
+    let platform_admin = create_user(&test.pool, "m1plat").await;
+    grant_role(
+        &test.pool,
+        platform_admin,
+        "platform-rol",
+        None,
+        ADMIN_PERMS,
+    )
+    .await;
+
+    let (admin_cookie, admin_csrf) = login(&lane, test.peer, "m1adm").await;
+    let (member_cookie, _member_csrf) = login(&lane, test.peer, "m1uye").await;
+    let (plat_cookie, plat_csrf) = login(&lane, test.peer, "m1plat").await;
+
+    // UX flag: platformAdmin is session-derived — false for cooperative
+    // admin and member, true for the NULL-scope grant holder.
+    for (cookie, expected) in [
+        (&admin_cookie, false),
+        (&member_cookie, false),
+        (&plat_cookie, true),
+    ] {
+        let (status, body) = request_on(
+            &lane,
+            test.peer,
+            Method::GET,
+            "/api/auth/me",
+            cookie,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let body: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(body["platformAdmin"], json!(expected));
+    }
+
+    // A cooperative administrator can NEVER reach the global identity:
+    // the platform endpoint definer rejects cooperative authority.
+    let (status, body) = request_on(
+        &lane,
+        test.peer,
+        Method::POST,
+        &format!("/api/platform/users/{member}/disable"),
+        &admin_cookie,
+        Some(&admin_csrf),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("permission_denied"), "{body}");
+
+    // The member currently reaches the business surface (denied by
+    // RBAC, not by the gate).
+    let (status, body) = request_on(
+        &lane,
+        test.peer,
+        Method::GET,
+        "/api/roles",
+        &member_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("permission_denied"), "{body}");
+
+    // Cooperative-scoped membership suspension: 204, row suspended,
+    // global identity untouched.
+    let (status, body) = request_on(
+        &lane,
+        test.peer,
+        Method::POST,
+        &format!("/api/users/{member}/membership-suspend"),
+        &admin_cookie,
+        Some(&admin_csrf),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let m_status: String = sqlx::query_scalar(
+        "SELECT status FROM cooperative_memberships WHERE user_id = $1 AND cooperative_id = $2",
+    )
+    .bind(member)
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(m_status, "suspended");
+    let u_status: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(member)
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        u_status, "active",
+        "membership ops never touch users.status"
+    );
+
+    // The member's EXISTING session loses the cooperative at once —
+    // gate-level denial, while the global session itself stays valid.
+    let (status, body) = request_on(
+        &lane,
+        test.peer,
+        Method::GET,
+        "/api/roles",
+        &member_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.contains("cooperative_access_denied"),
+        "suspended membership must fail at the tenant gate: {body}"
+    );
+    let (status, _) = request_on(
+        &lane,
+        test.peer,
+        Method::GET,
+        "/api/auth/me",
+        &member_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "global session survives suspension");
+
+    // CSRF-less membership mutation is refused.
+    let (status, _) = request_on(
+        &lane,
+        test.peer,
+        Method::POST,
+        &format!("/api/users/{member}/membership-reactivate"),
+        &admin_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Platform lane: global disable → sessions revoked, identity
+    // disabled; membership row stays 'suspended' (not resurrected).
+    let (status, body) = request_on(
+        &lane,
+        test.peer,
+        Method::POST,
+        &format!("/api/platform/users/{member}/disable"),
+        &plat_cookie,
+        Some(&plat_csrf),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let u_status: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(member)
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(u_status, "disabled");
+    let (status, _) = request_on(
+        &lane,
+        test.peer,
+        Method::GET,
+        "/api/auth/me",
+        &member_cookie,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "disabled identity: sessions die"
+    );
+
+    // Global reactivation does NOT reopen the suspended membership.
+    let (status, body) = request_on(
+        &lane,
+        test.peer,
+        Method::POST,
+        &format!("/api/platform/users/{member}/enable"),
+        &plat_cookie,
+        Some(&plat_csrf),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let m_status: String = sqlx::query_scalar(
+        "SELECT status FROM cooperative_memberships WHERE user_id = $1 AND cooperative_id = $2",
+    )
+    .bind(member)
+    .bind(coop)
+    .fetch_one(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        m_status, "suspended",
+        "global re-enable must not reactivate"
+    );
+
+    // Audit provenance: membership event is cooperative-attributed,
+    // the global lifecycle event carries platform (NULL) attribution.
+    let scoped: Option<String> = sqlx::query_scalar(
+        "SELECT cooperative_id::text FROM security_events \
+         WHERE event_type = 'cooperative_membership_suspended' \
+           AND metadata->>'target_user_id' = $1",
+    )
+    .bind(member.to_string())
+    .fetch_optional(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(scoped.as_deref(), Some(coop.to_string().as_str()));
+    let global: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT cooperative_id FROM security_events \
+         WHERE event_type = 'user_disabled' AND metadata->>'user_id' = $1",
+    )
+    .bind(member.to_string())
+    .fetch_optional(&test.pool)
+    .await
+    .unwrap();
+    assert_eq!(global, Some(None), "user_disabled is a platform event");
 
     test.cleanup().await;
 }

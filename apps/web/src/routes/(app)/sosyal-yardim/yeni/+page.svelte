@@ -15,6 +15,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		SOCIAL_AID_FUNDS_PATH,
@@ -28,6 +29,10 @@
 	let endsOn = $state('');
 	let submitError = $state<MessageKey | null>(null);
 	let submitting = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() => name !== '' || description !== '' || startsOn !== '' || endsOn !== ''
+	);
 	let idempotencyKey = $state(crypto.randomUUID());
 
 	const ready = $derived(name.trim() !== '');
@@ -50,6 +55,7 @@
 				body: request
 			});
 			idempotencyKey = crypto.randomUUID();
+			formGuard.clear();
 			await goto(resolve(`/sosyal-yardim/${created.id}`));
 		} catch (error) {
 			submitError =

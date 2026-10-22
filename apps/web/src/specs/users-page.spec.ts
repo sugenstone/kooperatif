@@ -7,14 +7,15 @@ import UsersPage from '../routes/(app)/kullanicilar/+page.svelte';
 import { auth } from '$lib/auth/auth.svelte';
 
 /**
- * F9 (PILOT-FIX-001): the users list exposes the administrative
- * disable/enable lifecycle with a confirmation step, permission-gated
- * visibility (UX only — `users.manage` is enforced server-side), and
- * stable error surfacing (e.g. lockout_prevented).
+ * M1: the users list separates cooperative MEMBERSHIP lifecycle
+ * (suspend / reactivate / end — `users.manage` in this cooperative)
+ * from the GLOBAL account lifecycle (platform authority only, surfaced
+ * via the `platformAdmin` flag). Both go through a confirmation step;
+ * error surfacing (e.g. lockout_prevented) stays stable.
  */
 
 const TARGET = '33333333-3333-4333-8333-333333333333';
-const DISABLED = '44444444-4444-4444-8444-444444444444';
+const SUSPENDED = '44444444-4444-4444-8444-444444444444';
 
 const usersPayload = [
 	{
@@ -22,13 +23,15 @@ const usersPayload = [
 		username: 'aktif.kullanici',
 		displayName: 'Aktif Kullanıcı',
 		status: 'active',
+		membershipStatus: 'active',
 		roles: []
 	},
 	{
-		id: DISABLED,
+		id: SUSPENDED,
 		username: 'pasif.kullanici',
 		displayName: 'Pasif Kullanıcı',
 		status: 'disabled',
+		membershipStatus: 'suspended',
 		roles: []
 	}
 ];
@@ -58,6 +61,7 @@ beforeEach(() => {
 	auth.user = { id: 'u-1', username: 'admin', displayName: 'Admin' };
 	auth.csrfToken = 'csrf-raw';
 	auth.permissions = ['users.read', 'users.manage'];
+	auth.platformAdmin = false;
 });
 
 /** The disable/enable lifecycle is confirmed through an AlertDialog —
@@ -71,10 +75,11 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	auth.csrfToken = null;
 	auth.permissions = [];
+	auth.platformAdmin = false;
 });
 
-describe('users list — disable/enable lifecycle', () => {
-	it('shows status badges and posts disable with the CSRF token', async () => {
+describe('users list — membership lifecycle (cooperative scope)', () => {
+	it('shows membership badges and posts suspend with the CSRF token', async () => {
 		const calls: { url: string; init?: RequestInit }[] = [];
 		stubFetch(async (url, init) => {
 			calls.push({ url, init });
@@ -83,21 +88,21 @@ describe('users list — disable/enable lifecycle', () => {
 		});
 		render(UsersPage);
 
-		const disableButton = await screen.findByRole('button', { name: 'Devre Dışı Bırak' });
-		expect(screen.getByText('Aktif')).toBeInTheDocument();
-		expect(screen.getByText('Pasif')).toBeInTheDocument();
+		const suspendButton = await screen.findByRole('button', { name: 'Üyeliği Askıya Al' });
+		expect(screen.getByText('Aktif Üye')).toBeInTheDocument();
+		expect(screen.getByText('Askıda')).toBeInTheDocument();
 
-		await userEvent.click(disableButton);
-		await confirmLifecycleDialog('Devre Dışı Bırak');
+		await userEvent.click(suspendButton);
+		await confirmLifecycleDialog('Üyeliği Askıya Al');
 
 		await waitFor(() => {
 			const post = calls.find((c) => c.init?.method === 'POST');
-			expect(post?.url).toBe(`http://localhost:8080/api/users/${TARGET}/disable`);
+			expect(post?.url).toBe(`http://localhost:8080/api/users/${TARGET}/membership-suspend`);
 			expect(post?.init?.headers).toMatchObject({ 'x-csrf-token': 'csrf-raw' });
 		});
 	});
 
-	it('posts enable for a disabled user', async () => {
+	it('posts membership reactivate for a suspended member', async () => {
 		const calls: { url: string; init?: RequestInit }[] = [];
 		stubFetch(async (url, init) => {
 			calls.push({ url, init });
@@ -106,11 +111,29 @@ describe('users list — disable/enable lifecycle', () => {
 		});
 		render(UsersPage);
 
-		await userEvent.click(await screen.findByRole('button', { name: 'Etkinleştir' }));
-		await confirmLifecycleDialog('Etkinleştir');
+		await userEvent.click(await screen.findByRole('button', { name: 'Üyeliği Etkinleştir' }));
+		await confirmLifecycleDialog('Üyeliği Etkinleştir');
 		await waitFor(() => {
 			const post = calls.find((c) => c.init?.method === 'POST');
-			expect(post?.url).toBe(`http://localhost:8080/api/users/${DISABLED}/enable`);
+			expect(post?.url).toBe(`http://localhost:8080/api/users/${SUSPENDED}/membership-reactivate`);
+		});
+	});
+
+	it('posts membership end with the destructive confirmation', async () => {
+		const calls: { url: string; init?: RequestInit }[] = [];
+		stubFetch(async (url, init) => {
+			calls.push({ url, init });
+			if (init?.method === 'POST') return emptyResponse();
+			return jsonResponse(usersPayload);
+		});
+		render(UsersPage);
+
+		const endButtons = await screen.findAllByRole('button', { name: 'Üyeliği Sonlandır' });
+		await userEvent.click(endButtons[0]);
+		await confirmLifecycleDialog('Üyeliği Sonlandır');
+		await waitFor(() => {
+			const post = calls.find((c) => c.init?.method === 'POST');
+			expect(post?.url).toBe(`http://localhost:8080/api/users/${TARGET}/membership-end`);
 		});
 	});
 
@@ -122,7 +145,7 @@ describe('users list — disable/enable lifecycle', () => {
 		});
 		render(UsersPage);
 
-		await userEvent.click(await screen.findByRole('button', { name: 'Devre Dışı Bırak' }));
+		await userEvent.click(await screen.findByRole('button', { name: 'Üyeliği Askıya Al' }));
 		const dialog = await screen.findByRole('alertdialog');
 		await userEvent.click(within(dialog).getByRole('button', { name: 'Vazgeç' }));
 		expect(calls.every((c) => c.init?.method !== 'POST')).toBe(true);
@@ -137,19 +160,50 @@ describe('users list — disable/enable lifecycle', () => {
 		});
 		render(UsersPage);
 
-		await userEvent.click(await screen.findByRole('button', { name: 'Devre Dışı Bırak' }));
-		await confirmLifecycleDialog('Devre Dışı Bırak');
+		await userEvent.click(await screen.findByRole('button', { name: 'Üyeliği Askıya Al' }));
+		await confirmLifecycleDialog('Üyeliği Askıya Al');
 		const message = await screen.findByText(/son yönetim yolu|reddedildi/i, {}, { timeout: 3000 });
 		expect(message).toBeInTheDocument();
 	});
 
-	it('hides lifecycle actions without users.manage (UX only)', async () => {
+	it('hides membership actions without users.manage (UX only)', async () => {
 		auth.permissions = ['users.read'];
 		stubFetch(async () => jsonResponse(usersPayload));
 		render(UsersPage);
 
 		await screen.findByText('Aktif Kullanıcı');
-		expect(screen.queryByRole('button', { name: 'Devre Dışı Bırak' })).not.toBeInTheDocument();
-		expect(screen.queryByRole('button', { name: 'Etkinleştir' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Üyeliği Askıya Al' })).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Üyeliği Sonlandır' })).not.toBeInTheDocument();
+	});
+});
+
+describe('users list — global account lifecycle (platform only)', () => {
+	it('never renders global account controls without platformAdmin', async () => {
+		stubFetch(async () => jsonResponse(usersPayload));
+		render(UsersPage);
+
+		await screen.findByText('Aktif Kullanıcı');
+		expect(
+			screen.queryByRole('button', { name: 'Hesabı Devre Dışı Bırak' })
+		).not.toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: 'Hesabı Etkinleştir' })).not.toBeInTheDocument();
+	});
+
+	it('posts platform disable when platformAdmin', async () => {
+		auth.platformAdmin = true;
+		const calls: { url: string; init?: RequestInit }[] = [];
+		stubFetch(async (url, init) => {
+			calls.push({ url, init });
+			if (init?.method === 'POST') return emptyResponse();
+			return jsonResponse(usersPayload);
+		});
+		render(UsersPage);
+
+		await userEvent.click(await screen.findByRole('button', { name: 'Hesabı Devre Dışı Bırak' }));
+		await confirmLifecycleDialog('Hesabı Devre Dışı Bırak');
+		await waitFor(() => {
+			const post = calls.find((c) => c.init?.method === 'POST');
+			expect(post?.url).toBe(`http://localhost:8080/api/platform/users/${TARGET}/disable`);
+		});
 	});
 });

@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
+use sqlx::Acquire;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -74,33 +74,35 @@ pub enum CreditCommandError {
 
 /// Lock a Shareholder's ACTIVE credit rows `FOR UPDATE` in ascending
 /// `credit_number` order — the single deterministic consumption order
-/// (FIFO by creation). Returns (id -> amount).
+/// (FIFO by creation). Returns (id -> amount). M1-P2-C3: scoped —
+/// foreign rows are never locked or consumed.
 async fn lock_credits(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<(Uuid, Decimal)>, CreditCommandError> {
-    sqlx::query_as(
-        "SELECT id, amount FROM shareholder_credits \
-         WHERE shareholder_id = $1 AND status = 'active' \
-         ORDER BY credit_number FOR UPDATE",
-    )
-    .bind(shareholder_id)
-    .fetch_all(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)
+    sqlx::query_as("SELECT id, amount FROM public.app_lock_credits($2, $1)")
+        .bind(shareholder_id)
+        .bind(cooperative_id)
+        .fetch_all(tx.as_mut())
+        .await
+        .map_err(CreditCommandError::Database)
 }
 
 /// Active applications per credit — recomputed under the credit locks.
 async fn applied_map(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     credit_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Decimal>, CreditCommandError> {
     let rows: Vec<(Uuid, Decimal)> = sqlx::query_as(
         "SELECT credit_id, sum(amount) FROM credit_applications \
          WHERE credit_id = ANY($1) AND status = 'active' \
+           AND cooperative_id IS NOT DISTINCT FROM $2 \
          GROUP BY credit_id",
     )
     .bind(credit_ids)
+    .bind(cooperative_id)
     .fetch_all(tx.as_mut())
     .await
     .map_err(CreditCommandError::Database)?;
@@ -131,6 +133,12 @@ pub async fn settled_map(
 }
 
 /// Insert one credit application inside the caller's transaction.
+/// M1-P2-C3: `cooperative_id` is inherited from the LOCKED parent
+/// credit row (lock_credits holds it `FOR UPDATE` in this transaction),
+/// so the application always lives in its credit's cooperative — the
+/// same value the C2 composite keys force on both parents — without
+/// threading context through every credits caller ahead of that
+/// module's own scoping batch.
 #[allow(clippy::too_many_arguments)]
 async fn insert_application(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -145,8 +153,9 @@ async fn insert_application(
     sqlx::query(
         "INSERT INTO credit_applications \
             (credit_id, assessment_id, amount, currency, mode, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, 'TRY', $4, 'active', $5, $6, $7)",
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id) \
+         VALUES ($1, $2, $3, 'TRY', $4, 'active', $5, $6, $7, \
+             (SELECT cooperative_id FROM shareholder_credits WHERE id = $1))",
     )
     .bind(credit_id)
     .bind(assessment_id)
@@ -193,6 +202,7 @@ async fn insert_application(
 #[allow(clippy::too_many_arguments)]
 async fn consume_credit_fifo(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
     assessment_ids: &[Uuid],
     mode: ApplicationMode,
@@ -206,9 +216,9 @@ async fn consume_credit_fifo(
         return Ok(applied);
     }
 
-    let credits = lock_credits(tx, shareholder_id).await?;
+    let credits = lock_credits(tx, cooperative_id, shareholder_id).await?;
     let credit_ids: Vec<Uuid> = credits.iter().map(|(id, _)| *id).collect();
-    let used = applied_map(tx, &credit_ids).await?;
+    let used = applied_map(tx, cooperative_id, &credit_ids).await?;
     let mut available: Vec<(Uuid, Decimal)> = credits
         .iter()
         .map(|(id, amount)| (*id, *amount - used.get(id).copied().unwrap_or_default()))
@@ -227,9 +237,13 @@ async fn consume_credit_fifo(
         }
         // Lock the assessment row: serializes vs. concurrent manual
         // applications and re-derives remaining under the lock.
+        // Scoped: a foreign id is indistinguishable from absence —
+        // the sweep simply skips it (defense in depth; callers already
+        // pass verified in-scope ids).
         let row: Option<(Decimal, String)> =
-            sqlx::query_as("SELECT amount, status FROM assessments WHERE id = $1 FOR UPDATE")
+            sqlx::query_as("SELECT amount, status FROM public.app_lock_assessment($1, $2)")
                 .bind(assessment_id)
+                .bind(cooperative_id)
                 .fetch_optional(tx.as_mut())
                 .await
                 .map_err(CreditCommandError::Database)?;
@@ -290,6 +304,7 @@ async fn consume_credit_fifo(
 /// deterministic consumption order chosen by the caller.
 pub async fn auto_apply_to_assessments(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     targets: &[(Uuid, Uuid)], // (assessment_id, shareholder_id)
 ) -> Result<HashMap<Uuid, Decimal>, CreditCommandError> {
@@ -313,6 +328,7 @@ pub async fn auto_apply_to_assessments(
             .unwrap_or_default();
         let applied = consume_credit_fifo(
             tx,
+            cooperative_id,
             shareholder_id,
             &ids,
             ApplicationMode::Automatic,
@@ -396,28 +412,36 @@ fn credit_row(r: CreditRowSql) -> CreditRow {
 /// Credit ledger of one Shareholder (docs/13 "Fazla Ödemeler" tab):
 /// origins + derived per-credit availability, newest first.
 pub async fn list_shareholder_credits(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<CreditRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let rows = sqlx::query_as::<_, CreditRowSql>(&format!(
-        "{CREDIT_SELECT} WHERE c.shareholder_id = $1 ORDER BY c.credit_number DESC"
+        "{CREDIT_SELECT} WHERE c.shareholder_id = $1 \
+         AND c.cooperative_id IS NOT DISTINCT FROM $2 ORDER BY c.credit_number DESC"
     ))
     .bind(shareholder_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows.into_iter().map(credit_row).collect())
 }
 
 /// Credits sourced from one Payment (payment detail surface).
 pub async fn list_payment_credits(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     payment_id: Uuid,
 ) -> Result<Vec<CreditRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let rows = sqlx::query_as::<_, CreditRowSql>(&format!(
-        "{CREDIT_SELECT} WHERE c.source_payment_id = $1 ORDER BY c.credit_number"
+        "{CREDIT_SELECT} WHERE c.source_payment_id = $1 \
+         AND c.cooperative_id IS NOT DISTINCT FROM $2 ORDER BY c.credit_number"
     ))
     .bind(payment_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows.into_iter().map(credit_row).collect())
 }
@@ -467,28 +491,37 @@ struct ApplicationRowSql {
 
 /// Application history of one Shareholder's credits (credit-side view).
 pub async fn list_shareholder_applications(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<ApplicationRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let rows = sqlx::query_as::<_, ApplicationRowSql>(&format!(
-        "{APPLICATION_SELECT} WHERE c.shareholder_id = $1 ORDER BY ap.created_at DESC, ap.id"
+        "{APPLICATION_SELECT} WHERE c.shareholder_id = $1 \
+         AND ap.cooperative_id IS NOT DISTINCT FROM $2 \
+         ORDER BY ap.created_at DESC, ap.id"
     ))
     .bind(shareholder_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows.into_iter().map(application_row).collect())
 }
 
 /// Application history against one Assessment (assessment-side view).
 pub async fn list_assessment_applications(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     assessment_id: Uuid,
 ) -> Result<Vec<ApplicationRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let rows = sqlx::query_as::<_, ApplicationRowSql>(&format!(
-        "{APPLICATION_SELECT} WHERE ap.assessment_id = $1 ORDER BY ap.created_at, ap.id"
+        "{APPLICATION_SELECT} WHERE ap.assessment_id = $1 \
+         AND ap.cooperative_id IS NOT DISTINCT FROM $2 ORDER BY ap.created_at, ap.id"
     ))
     .bind(assessment_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows.into_iter().map(application_row).collect())
 }
@@ -503,9 +536,11 @@ pub struct CreditSummaryRow {
 }
 
 pub async fn shareholder_credit_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<CreditSummaryRow, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, CreditSummaryRow>(
         "SELECT count(*) FILTER (WHERE c.status = 'active') AS credit_count, \
             COALESCE(sum(c.amount) FILTER (WHERE c.status = 'active'), 0) AS total_originated, \
@@ -518,10 +553,11 @@ pub async fn shareholder_credit_summary(
              SELECT credit_id, sum(amount) AS applied FROM credit_applications \
              WHERE status = 'active' GROUP BY credit_id \
          ) ap ON ap.credit_id = c.id \
-         WHERE c.shareholder_id = $1",
+         WHERE c.shareholder_id = $1 AND c.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(shareholder_id)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -529,9 +565,11 @@ pub async fn shareholder_credit_summary(
 /// amount − active allocations − active credits (the reconciliation
 /// invariant of docs/03, now with the excess disposition term).
 pub async fn payment_unassigned_remainder(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     payment_id: Uuid,
 ) -> Result<Option<Decimal>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_scalar(
         "SELECT p.amount - COALESCE(al.allocated, 0) - COALESCE(cr.credited, 0) \
          FROM payments p \
@@ -541,10 +579,11 @@ pub async fn payment_unassigned_remainder(
          LEFT JOIN (SELECT source_payment_id, sum(amount) AS credited FROM shareholder_credits \
                     WHERE status = 'active' GROUP BY source_payment_id) cr \
             ON cr.source_payment_id = p.id \
-         WHERE p.id = $1",
+         WHERE p.id = $1 AND p.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(payment_id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
@@ -577,19 +616,23 @@ pub struct AssignOutcome {
 /// The command then auto-offsets the beneficiary's existing open
 /// Assessments — oldest due date first — inside the same transaction.
 pub async fn assign_credit(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: AssignCredit,
     now: OffsetDateTime,
 ) -> Result<AssignOutcome, CreditCommandError> {
-    let mut tx = pool.begin().await.map_err(CreditCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(CreditCommandError::Database)?;
 
-    // 1. Idempotent replay short-circuit — before ANY side effect.
+    // 1. Idempotent replay short-circuit — before ANY side effect
+    //    (scoped: a foreign row under the global key is
+    //    indistinguishable — C3/C5).
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, credit_number, idempotency_fingerprint FROM shareholder_credits \
-         WHERE idempotency_key = $1",
+         WHERE idempotency_key = $1 AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(CreditCommandError::Database)?;
@@ -612,8 +655,9 @@ pub async fn assign_credit(
     //    recomputed, so two concurrent assignments can never create
     //    more credit than the remainder funds.
     let payment: Option<(String, Decimal)> =
-        sqlx::query_as("SELECT status, amount FROM payments WHERE id = $1 FOR UPDATE")
+        sqlx::query_as("SELECT status, amount FROM public.app_lock_payment($1, $2)")
             .bind(command.payment_id)
+            .bind(cooperative_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(CreditCommandError::Database)?;
@@ -624,13 +668,16 @@ pub async fn assign_credit(
         return Err(CreditCommandError::PaymentNotPosted);
     }
 
-    // 3. Beneficiary: an explicit Shareholder, never voided.
-    let beneficiary: Option<String> =
-        sqlx::query_scalar("SELECT status FROM shareholders WHERE id = $1")
-            .bind(command.shareholder_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(CreditCommandError::Database)?;
+    // 3. Beneficiary: an explicit Shareholder IN SCOPE, never voided.
+    let beneficiary: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM shareholders WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(command.shareholder_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(CreditCommandError::Database)?;
     match beneficiary.as_deref() {
         Some("active") | Some("inactive") => {}
         _ => return Err(CreditCommandError::BeneficiaryInvalid),
@@ -660,43 +707,60 @@ pub async fn assign_credit(
 
     // 5. The credit origin — an entitlement row only; NO account
     //    movement (the money already entered via the Payment).
-    let insert_result: Result<(Uuid, i64), CreditCommandError> = sqlx::query_as(
-        "INSERT INTO shareholder_credits \
-            (source_payment_id, shareholder_id, amount, currency, status, note, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, 'TRY', 'active', $4, $5, $6, $7) \
-         RETURNING id, credit_number",
-    )
-    .bind(command.payment_id)
-    .bind(command.shareholder_id)
-    .bind(command.amount)
-    .bind(&command.note)
-    .bind(&command.idempotency_key)
-    .bind(&command.fingerprint)
-    .bind(actor)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(|error| {
-        if is_unique_violation(&error) {
-            CreditCommandError::IdempotencyRace
+    //    Runs in a savepoint so a losing idempotency race does not
+    //    abort the outer transaction before the winner re-read.
+    let insert_result: Result<(Uuid, i64), CreditCommandError> = {
+        let mut sp = tx.begin().await.map_err(CreditCommandError::Database)?;
+        // credit_number intentionally unbound: `shareholder_credits_number_pin`
+        // (0058) assigns it on every lane and rejects caller-supplied
+        // values on the restricted lane.
+        let r = sqlx::query_as(
+            "INSERT INTO shareholder_credits \
+                (source_payment_id, shareholder_id, amount, currency, status, note, \
+                 idempotency_key, idempotency_fingerprint, created_by, cooperative_id) \
+             VALUES ($1, $2, $3, 'TRY', 'active', $4, $5, $6, $7, \
+                 (SELECT cooperative_id FROM payments WHERE id = $1)) \
+             RETURNING id, credit_number",
+        )
+        .bind(command.payment_id)
+        .bind(command.shareholder_id)
+        .bind(command.amount)
+        .bind(&command.note)
+        .bind(&command.idempotency_key)
+        .bind(&command.fingerprint)
+        .bind(actor)
+        .fetch_one(&mut *sp)
+        .await
+        .map_err(|error| {
+            if is_unique_violation(&error) {
+                CreditCommandError::IdempotencyRace
+            } else {
+                CreditCommandError::Database(error)
+            }
+        });
+        if r.is_err() {
+            sp.rollback().await.map_err(CreditCommandError::Database)?;
         } else {
-            CreditCommandError::Database(error)
+            sp.commit().await.map_err(CreditCommandError::Database)?;
         }
-    });
+        r
+    };
     let (credit_id, credit_number) = match insert_result {
         Ok(row) => row,
         Err(CreditCommandError::IdempotencyRace) => {
             // First-writer won the race — the winner's row is now
             // committed; replay its outcome when payloads match.
-            tx.rollback().await.map_err(CreditCommandError::Database)?;
             let winner: Option<(Uuid, i64, String)> = sqlx::query_as(
                 "SELECT id, credit_number, idempotency_fingerprint \
-                 FROM shareholder_credits WHERE idempotency_key = $1",
+                 FROM shareholder_credits WHERE idempotency_key = $1 \
+                   AND cooperative_id IS NOT DISTINCT FROM $2",
             )
             .bind(&command.idempotency_key)
-            .fetch_optional(pool)
+            .bind(cooperative_id)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(CreditCommandError::Database)?;
+            tx.rollback().await.map_err(CreditCommandError::Database)?;
             return match winner {
                 Some((id, number, fp)) if fp == command.fingerprint => Ok(AssignOutcome {
                     credit_id: id,
@@ -720,14 +784,17 @@ pub async fn assign_credit(
         "SELECT a.id FROM assessments a \
          JOIN periods p ON p.id = a.period_id \
          WHERE a.shareholder_id = $1 AND a.status = 'active' \
+           AND a.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY p.due_date ASC, a.id ASC",
     )
     .bind(command.shareholder_id)
+    .bind(cooperative_id)
     .fetch_all(tx.as_mut())
     .await
     .map_err(CreditCommandError::Database)?;
     let applied = consume_credit_fifo(
         &mut tx,
+        cooperative_id,
         command.shareholder_id,
         &open,
         ApplicationMode::Automatic,
@@ -768,22 +835,26 @@ pub struct ApplyOutcome {
 /// path — never a second arithmetic): the Assessment's own Shareholder
 /// is the only legal credit source; FIFO across their active credits.
 pub async fn apply_credit(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: ApplyCredit,
 ) -> Result<ApplyOutcome, CreditCommandError> {
-    let mut tx = pool.begin().await.map_err(CreditCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(CreditCommandError::Database)?;
 
     // 1. Idempotent replay — same key + identical payload replays the
     //    recorded outcome; same key + different payload is a hard 409
     //    (ADR-006). The key is stamped on exactly ONE application row
     //    per command (UNIQUE index); the applied total equals the
-    //    command amount by construction.
+    //    command amount by construction. Scoped: a foreign row under
+    //    the global key is indistinguishable (C3/C5).
     let keyed: Option<(Option<String>, Uuid)> = sqlx::query_as(
         "SELECT idempotency_fingerprint, assessment_id \
-         FROM credit_applications WHERE idempotency_key = $1",
+         FROM credit_applications WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(CreditCommandError::Database)?;
@@ -792,12 +863,15 @@ pub async fn apply_credit(
             tx.rollback().await.map_err(CreditCommandError::Database)?;
             return Err(CreditCommandError::IdempotencyConflict);
         }
-        let assessment_amount: Decimal =
-            sqlx::query_scalar("SELECT amount FROM assessments WHERE id = $1")
-                .bind(assessment_id)
-                .fetch_one(tx.as_mut())
-                .await
-                .map_err(CreditCommandError::Database)?;
+        let assessment_amount: Decimal = sqlx::query_scalar(
+            "SELECT amount FROM assessments WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(assessment_id)
+        .bind(cooperative_id)
+        .fetch_one(tx.as_mut())
+        .await
+        .map_err(CreditCommandError::Database)?;
         let settled = settled_map(&mut tx, &[assessment_id])
             .await
             .map_err(CreditCommandError::Database)?
@@ -815,12 +889,15 @@ pub async fn apply_credit(
     // 2. Target: an ACTIVE assessment (never voided, never
     //    over-settled). The shareholder on the row is the ONLY legal
     //    credit owner — another shareholder's credit cannot settle it.
-    let target: Option<(Uuid, Decimal, String)> =
-        sqlx::query_as("SELECT shareholder_id, amount, status FROM assessments WHERE id = $1")
-            .bind(command.assessment_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(CreditCommandError::Database)?;
+    let target: Option<(Uuid, Decimal, String)> = sqlx::query_as(
+        "SELECT shareholder_id, amount, status FROM assessments WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(command.assessment_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(CreditCommandError::Database)?;
     let Some((shareholder_id, assessment_amount, status)) = target else {
         return Err(CreditCommandError::NotFound);
     };
@@ -830,9 +907,9 @@ pub async fn apply_credit(
 
     // 3. Lock the shareholder's credits (asc), then the assessment —
     //    the canonical credits -> assessments order.
-    let credits = lock_credits(&mut tx, shareholder_id).await?;
+    let credits = lock_credits(&mut tx, cooperative_id, shareholder_id).await?;
     let credit_ids: Vec<Uuid> = credits.iter().map(|(id, _)| *id).collect();
-    let used = applied_map(&mut tx, &credit_ids).await?;
+    let used = applied_map(&mut tx, cooperative_id, &credit_ids).await?;
     let available: Decimal = credits
         .iter()
         .map(|(id, amount)| *amount - used.get(id).copied().unwrap_or_default())
@@ -843,8 +920,9 @@ pub async fn apply_credit(
     }
 
     let locked: Option<(Decimal, String)> =
-        sqlx::query_as("SELECT amount, status FROM assessments WHERE id = $1 FOR UPDATE")
+        sqlx::query_as("SELECT amount, status FROM public.app_lock_assessment($1, $2)")
             .bind(command.assessment_id)
+            .bind(cooperative_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(CreditCommandError::Database)?;
@@ -870,33 +948,50 @@ pub async fn apply_credit(
 
     // 4. FIFO consumption across the shareholder's active credits;
     //    the client's key is stamped on every produced row so a
-    //    network retry replays instead of double-applying.
-    let applied = consume_credit_fifo(
-        &mut tx,
-        shareholder_id,
-        &[command.assessment_id],
-        ApplicationMode::Manual,
-        Some(&command.idempotency_key),
-        Some(&command.fingerprint),
-        Some(command.amount),
-        actor,
-    )
-    .await;
+    //    network retry replays instead of double-applying. Runs in a
+    //    savepoint so a losing idempotency race does not abort the
+    //    outer transaction before the winner re-read.
+    let applied = {
+        let mut sp = tx.begin().await.map_err(CreditCommandError::Database)?;
+        let r = consume_credit_fifo(
+            &mut sp,
+            cooperative_id,
+            shareholder_id,
+            &[command.assessment_id],
+            ApplicationMode::Manual,
+            Some(&command.idempotency_key),
+            Some(&command.fingerprint),
+            Some(command.amount),
+            actor,
+        )
+        .await;
+        match r {
+            Err(CreditCommandError::IdempotencyRace) => {
+                sp.rollback().await.map_err(CreditCommandError::Database)?;
+                r
+            }
+            other => {
+                sp.commit().await.map_err(CreditCommandError::Database)?;
+                other
+            }
+        }
+    };
     let applied = match applied {
         Ok(applied) => applied,
         Err(CreditCommandError::IdempotencyRace) => {
             // Concurrent same-key command committed first — replay
             // its recorded outcome when the payload is identical.
-            tx.rollback().await.map_err(CreditCommandError::Database)?;
             let winner: Option<(Option<String>, Uuid)> = sqlx::query_as(
                 "SELECT idempotency_fingerprint, assessment_id \
-                 FROM credit_applications WHERE idempotency_key = $1",
+                 FROM credit_applications WHERE idempotency_key = $1 \
+                   AND cooperative_id IS NOT DISTINCT FROM $2",
             )
             .bind(&command.idempotency_key)
-            .fetch_optional(pool)
+            .bind(cooperative_id)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(CreditCommandError::Database)?;
-            return match winner {
+            let outcome = match winner {
                 Some((fp, assessment_id))
                     if fp.as_deref() == Some(command.fingerprint.as_str()) =>
                 {
@@ -906,10 +1001,12 @@ pub async fn apply_credit(
                                 WHERE assessment_id = a.id AND status = 'active'), 0) \
                              - COALESCE((SELECT sum(amount) FROM credit_applications \
                                 WHERE assessment_id = a.id AND status = 'active'), 0) \
-                         FROM assessments a WHERE a.id = $1",
+                         FROM assessments a WHERE a.id = $1 \
+                           AND a.cooperative_id IS NOT DISTINCT FROM $2",
                     )
                     .bind(assessment_id)
-                    .fetch_one(pool)
+                    .bind(cooperative_id)
+                    .fetch_one(&mut *tx)
                     .await
                     .map_err(CreditCommandError::Database)?;
                     Ok(ApplyOutcome {
@@ -920,6 +1017,8 @@ pub async fn apply_credit(
                 }
                 _ => Err(CreditCommandError::IdempotencyConflict),
             };
+            tx.rollback().await.map_err(CreditCommandError::Database)?;
+            return outcome;
         }
         Err(other) => return Err(other),
     };
@@ -946,19 +1045,21 @@ pub async fn apply_credit(
 /// derived remaining reopens and the credit's derived availability
 /// returns — no Account Movement is ever created.
 pub async fn reverse_application(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     application_id: Uuid,
     reason: &str,
     now: OffsetDateTime,
 ) -> Result<bool, CreditCommandError> {
-    let mut tx = pool.begin().await.map_err(CreditCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(CreditCommandError::Database)?;
 
     let application: Option<(String, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT status, credit_id, assessment_id FROM credit_applications \
-         WHERE id = $1 FOR UPDATE",
+        "SELECT status, credit_id, assessment_id \
+         FROM public.app_lock_credit_application($1, $2)",
     )
     .bind(application_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(CreditCommandError::Database)?;
@@ -971,30 +1072,31 @@ pub async fn reverse_application(
     }
 
     // Canonical order: credit lock, then assessment lock — both must be
-    // held so a concurrent consumption/reversal serializes here.
-    sqlx::query("SELECT id FROM shareholder_credits WHERE id = $1 FOR UPDATE")
+    // held so a concurrent consumption/reversal serializes here. Both
+    // ids come from the scoped application row; their scopes are
+    // composite-FK-bound to it.
+    sqlx::query("SELECT id FROM public.app_lock_credit($1, $2)")
         .bind(credit_id)
+        .bind(cooperative_id)
         .fetch_one(tx.as_mut())
         .await
         .map_err(CreditCommandError::Database)?;
-    sqlx::query("SELECT id FROM assessments WHERE id = $1 FOR UPDATE")
+    sqlx::query("SELECT id FROM public.app_lock_assessment($1, $2)")
         .bind(assessment_id)
+        .bind(cooperative_id)
         .fetch_one(tx.as_mut())
         .await
         .map_err(CreditCommandError::Database)?;
 
-    sqlx::query(
-        "UPDATE credit_applications SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4 \
-         WHERE id = $1",
-    )
-    .bind(application_id)
-    .bind(now)
-    .bind(actor)
-    .bind(reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)?;
+    sqlx::query("SELECT public.app_credit_application_reverse($1, $2, $3, $4, $5)")
+        .bind(application_id)
+        .bind(now)
+        .bind(actor)
+        .bind(reason)
+        .bind(cooperative_id)
+        .execute(tx.as_mut())
+        .await
+        .map_err(CreditCommandError::Database)?;
 
     tx.commit().await.map_err(CreditCommandError::Database)?;
     Ok(false)
@@ -1004,112 +1106,39 @@ pub async fn reverse_application(
 /// Rejected while the credit still funds active applications — reverse
 /// those first; there is no silent cascading destruction of history.
 pub async fn reverse_credit(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     credit_id: Uuid,
     reason: &str,
     now: OffsetDateTime,
 ) -> Result<bool, CreditCommandError> {
-    let mut tx = pool.begin().await.map_err(CreditCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(CreditCommandError::Database)?;
 
-    let credit: Option<String> =
-        sqlx::query_scalar("SELECT status FROM shareholder_credits WHERE id = $1 FOR UPDATE")
+    // R3C: the consumed-application guard now lives INSIDE the
+    // definer — a runtime caller cannot reverse a credit that still
+    // funds an active application by skipping the repository check.
+    let replayed: bool =
+        sqlx::query_scalar("SELECT public.app_credit_reverse_tx($1, $2, $3, $4, $5)")
             .bind(credit_id)
-            .fetch_optional(tx.as_mut())
+            .bind(now)
+            .bind(actor)
+            .bind(reason)
+            .bind(cooperative_id)
+            .fetch_one(tx.as_mut())
             .await
-            .map_err(CreditCommandError::Database)?;
-    let Some(status) = credit else {
-        return Err(CreditCommandError::NotFound);
-    };
-    if status != "active" {
-        tx.rollback().await.map_err(CreditCommandError::Database)?;
-        return Ok(true);
-    }
-
-    let consumed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM credit_applications \
-         WHERE credit_id = $1 AND status = 'active')",
-    )
-    .bind(credit_id)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)?;
-    if consumed {
-        return Err(CreditCommandError::Consumed);
-    }
-
-    sqlx::query(
-        "UPDATE shareholder_credits SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
-    )
-    .bind(credit_id)
-    .bind(now)
-    .bind(actor)
-    .bind(reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)?;
+            .map_err(|error| match crate::db::package_error_token(&error) {
+                Some("not_found") => CreditCommandError::NotFound,
+                Some("consumed") => CreditCommandError::Consumed,
+                _ => CreditCommandError::Database(error),
+            })?;
 
     tx.commit().await.map_err(CreditCommandError::Database)?;
-    Ok(false)
+    Ok(replayed)
 }
 
-/// Payment-reversal integration (docs/06: "excess effects are reversed
-/// appropriately"). Called inside the payment transaction AFTER the
-/// payment row is locked.
-///
-///   * Any ACTIVE application funded by this Payment's credits →
-///     `Consumed` (409): the entitlement already settled debt — the
-///     applications must be corrected first; no silent corruption.
-///   * Otherwise the Payment's active credit origins are status-based
-///     reversed with the same actor/time/reason.
-pub async fn reconcile_credits_of_payment_reversal(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    payment_id: Uuid,
-    actor: Uuid,
-    reason: &str,
-    now: OffsetDateTime,
-) -> Result<i64, CreditCommandError> {
-    // Lock the payment's credit rows (canonical order credits ->
-    // assessments is preserved: no assessment lock needed because we
-    // refuse when ANY active application exists rather than touching
-    // them).
-    let credit_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM shareholder_credits \
-         WHERE source_payment_id = $1 AND status = 'active' \
-         ORDER BY credit_number FOR UPDATE",
-    )
-    .bind(payment_id)
-    .fetch_all(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)?;
-    if credit_ids.is_empty() {
-        return Ok(0);
-    }
-    let consumed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM credit_applications \
-         WHERE credit_id = ANY($1) AND status = 'active')",
-    )
-    .bind(&credit_ids)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)?;
-    if consumed {
-        return Err(CreditCommandError::Consumed);
-    }
-    let reversed = sqlx::query(
-        "UPDATE shareholder_credits SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = ANY($1)",
-    )
-    .bind(&credit_ids)
-    .bind(now)
-    .bind(actor)
-    .bind(reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(CreditCommandError::Database)?
-    .rows_affected();
-    Ok(reversed as i64)
-}
+// Payment-reversal credit integration moved inside
+// `app_payment_reverse_tx` (M1-P4-R3C): the credit reconcile, the
+// consumed-application guard and the compensating movement flip are
+// one atomic definer call — a partial reversal is not callable by
+// the runtime role.

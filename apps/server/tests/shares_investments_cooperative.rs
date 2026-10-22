@@ -92,6 +92,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -132,7 +133,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -191,7 +192,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c3c4 Test", &hash)
+    users::create_user(pool, username, "P1c3c4 Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -1484,9 +1485,11 @@ async fn concurrent_idempotent_posts_single_write() {
 }
 
 #[tokio::test]
-async fn never_bootstrapped_lane_keeps_legacy_semantics() {
+async fn never_bootstrapped_lane_reads_but_cannot_write_unowned() {
     let Some(test) = setup().await else { return };
-    // No bootstrap at all — the global lane is untouched.
+    // No bootstrap at all — the global lane still opens for READS.
+    // C5-3 closed the write side: cooperative_id is NOT NULL on all
+    // business tables, so an ownerless write cannot commit.
     let legacy = create_user(&test.pool, "kuresel").await;
     grant_role(&test.pool, legacy, "global-op", None, OPERATOR_PERMS).await;
     let (cookie, csrf) = login(&test.app, test.peer, "kuresel").await;
@@ -1496,20 +1499,30 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
             request_json(&test, Method::GET, path, &cookie, None, None, None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
-    let shareholder = make_shareholder(&test, &cookie, &csrf, "Eski", 1).await;
-    let share = make_share(&test, &cookie, &csrf, shareholder).await;
-    assert_eq!(share["status"], "active");
-    make_investment(&test, &cookie, &csrf, "Arsa", "i-legacy").await;
-    // Pre-tenant rows: the global lane writes its usual NULL
-    // attribution.
-    let (null_lane,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM security_events \
-         WHERE cooperative_id IS NULL AND event_type = 'share_created'",
+
+    let (status, body) = request_json(
+        &test,
+        Method::POST,
+        "/api/investments",
+        &cookie,
+        Some(&csrf),
+        None,
+        Some(json!({
+            "name": "Arsa",
+            "investmentType": "real_estate",
+            "idempotencyKey": "i-legacy",
+        })),
     )
-    .fetch_one(&test.pool)
-    .await
-    .unwrap();
-    assert_eq!(null_lane, 1);
+    .await;
+    assert!(
+        !status.is_success(),
+        "unowned business write must fail, got {status}: {body}"
+    );
+    let investments: i64 = sqlx::query_scalar("SELECT count(*) FROM investments")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(investments, 0, "no unowned investment may be written");
 
     test.cleanup().await;
 }

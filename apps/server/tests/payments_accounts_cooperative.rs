@@ -94,6 +94,7 @@ impl TestApp {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -134,7 +135,7 @@ async fn setup() -> Option<TestApp> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -193,7 +194,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1c3c2 Test", &hash)
+    users::create_user(pool, username, "P1c3c2 Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -1408,8 +1409,12 @@ async fn credit_effect_blocked_parity() {
     // global-auth; fixtures must not depend on it).
     let credit: Uuid = sqlx::query_scalar(
         "INSERT INTO shareholder_credits \
-         (source_payment_id, shareholder_id, amount, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, '200.00', 'fix-credit', 'fix-fp', $3) RETURNING id",
+         (source_payment_id, shareholder_id, amount, idempotency_key, idempotency_fingerprint, created_by, cooperative_id, credit_number) \
+         VALUES ($1, $2, '200.00', 'fix-credit', 'fix-fp', $3, \
+             (SELECT cooperative_id FROM payments WHERE id = $1), \
+             allocate_document_number( \
+                 (SELECT cooperative_id FROM payments WHERE id = $1), \
+                 'shareholder_credits.credit_number')) RETURNING id",
     )
     .bind(payment_id.parse::<Uuid>().unwrap())
     .bind(shareholder)
@@ -1419,8 +1424,9 @@ async fn credit_effect_blocked_parity() {
     .expect("credit fixture");
     let application: Uuid = sqlx::query_scalar(
         "INSERT INTO credit_applications \
-         (credit_id, assessment_id, amount, mode, created_by) \
-         VALUES ($1, $2, '200.00', 'manual', $3) RETURNING id",
+         (credit_id, assessment_id, amount, mode, created_by, cooperative_id) \
+         VALUES ($1, $2, '200.00', 'manual', $3, \
+             (SELECT cooperative_id FROM shareholder_credits WHERE id = $1)) RETURNING id",
     )
     .bind(credit)
     .bind(assessment)
@@ -1488,9 +1494,12 @@ async fn credit_effect_blocked_parity() {
 }
 
 #[tokio::test]
-async fn never_bootstrapped_lane_keeps_legacy_semantics() {
+async fn never_bootstrapped_lane_reads_but_cannot_write_unowned() {
     let Some(test) = setup().await else { return };
-    // No bootstrap at all — the documented legacy global lane.
+    // No bootstrap at all — the documented legacy global lane still
+    // opens for READS. C5-3 closed the write side: business rows are
+    // cooperative-owned NOT NULL, so a lane without a cooperative
+    // cannot produce one.
     let user = create_user(&test.pool, "eski_serit").await;
     grant_role(&test.pool, user, "legacy-op", None, OPERATOR_PERMS).await;
     let (cookie, csrf) = login(&test.app, test.peer, "eski_serit").await;
@@ -1505,19 +1514,24 @@ async fn never_bootstrapped_lane_keeps_legacy_semantics() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let account = make_account(&test, &cookie, &csrf, "Eski Kasa").await;
+
+    // A business write in the ownerless lane must fail and leave zero
+    // writes — ownership is mandatory since 0025.
     let (status, body) = request_json(
         &test,
         Method::POST,
-        "/api/payments",
+        "/api/financial-accounts",
         &cookie,
         Some(&csrf),
         None,
-        Some(payment_body(account, "25.00", "p-legacy", vec![])),
+        Some(json!({ "name": "Eski Kasa", "accountType": "cash" })),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(count(&test.pool, "account_movements").await, 1);
+    assert!(
+        !status.is_success(),
+        "unowned business write must fail, got {status}: {body}"
+    );
+    assert_eq!(count(&test.pool, "financial_accounts").await, 0);
 
     test.cleanup().await;
 }

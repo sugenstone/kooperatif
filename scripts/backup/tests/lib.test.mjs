@@ -17,6 +17,7 @@ import {
 	retentionPlan,
 	sha256File,
 	validateManifest,
+	verifyExpectedDatabase,
 	writeStatus
 } from '../lib.mjs';
 
@@ -272,4 +273,53 @@ test('manifest path helper', () => {
 		manifestPathFor('/x/k.dump'),
 		'/x/k.dump.manifest.json'
 	);
+});
+
+// --- expected-database guard (M1-P2 B1) -------------------------------------
+
+test('loadConfig accepts a valid expected database name', () => {
+	const cfg = loadConfig({ expectedDatabase: 'kooperatif_dev' });
+	assert.equal(cfg.expectedDatabase, 'kooperatif_dev');
+});
+
+test('loadConfig rejects empty or malformed expected database names', () => {
+	for (const bad of ['', '   ', '9kooperatif', 'koop eratif', 'koop;drop', 'x'.repeat(64)]) {
+		assert.throws(
+			() => loadConfig({ expectedDatabase: bad }),
+			/KOOPERATIF_EXPECTED_DATABASE/,
+			`must reject ${JSON.stringify(bad)}`
+		);
+	}
+});
+
+test('expected database defaults to unset when not configured', () => {
+	const saved = process.env.KOOPERATIF_EXPECTED_DATABASE;
+	delete process.env.KOOPERATIF_EXPECTED_DATABASE;
+	try {
+		assert.equal(loadConfig({}).expectedDatabase, null);
+	} finally {
+		if (saved !== undefined) process.env.KOOPERATIF_EXPECTED_DATABASE = saved;
+	}
+});
+
+test('verifyExpectedDatabase refuses a wrong source before any dump', () => {
+	const cfg = loadConfig({ expectedDatabase: 'kooperatif_dev' });
+	const wrongSource = () => 'kooperatif';
+	assert.throws(() => verifyExpectedDatabase(cfg, wrongSource), /identity mismatch/);
+});
+
+test('verifyExpectedDatabase accepts the matching source', () => {
+	const cfg = loadConfig({ expectedDatabase: 'kooperatif_dev' });
+	const rightSource = () => 'kooperatif_dev';
+	assert.doesNotThrow(() => verifyExpectedDatabase(cfg, rightSource));
+});
+
+test('verifyExpectedDatabase is a no-op when unset and never queries', () => {
+	const cfg = { expectedDatabase: null, conn: {} };
+	let queried = false;
+	verifyExpectedDatabase(cfg, () => {
+		queried = true;
+		return 'anything';
+	});
+	assert.equal(queried, false);
 });

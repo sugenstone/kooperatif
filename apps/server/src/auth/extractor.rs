@@ -38,6 +38,16 @@ pub struct CurrentAuth {
     /// extractor treats it as a fallback hint only — membership is
     /// re-validated per request.
     pub active_cooperative_id: Option<Uuid>,
+    /// SHA-256 hash of the presented session token (M1-P4-P2B). Fed to
+    /// `app_open_request_context` so the *database* derives the user id
+    /// from the session row when stamping `app.user_id` — the caller
+    /// never supplies a user UUID as proof of identity.
+    pub session_token_hash: [u8; 32],
+    /// The application-clock instant this authentication was resolved
+    /// (M1-P4-P2B). Session expiry inside `app_open_request_context`
+    /// is evaluated against this value — the same clock domain that
+    /// wrote the session — not the database wall clock.
+    pub authed_at: OffsetDateTime,
 }
 
 impl FromRequestParts<AppState> for CurrentAuth {
@@ -64,7 +74,7 @@ impl FromRequestParts<AppState> for CurrentAuth {
                 ApiError::Internal
             })?;
 
-        let (session_row, user_row) = match classified {
+        let session_row = match classified {
             Ok(pair) => pair,
             Err(rejection) => {
                 return Err(match rejection {
@@ -82,24 +92,26 @@ impl FromRequestParts<AppState> for CurrentAuth {
         // Bounded last-seen refresh (write at most once / 5 minutes).
         if let Err(error) = session::touch_if_needed(
             pool,
-            &session_row,
+            token_hash,
             state.auth.config.session_idle_ttl_secs,
             now,
         )
         .await
         {
-            tracing::warn!(error = %error, session_id = %session_row.id, "session touch failed");
+            tracing::warn!(error = %error, session_id = %session_row.session_id, "session touch failed");
         }
 
         Ok(CurrentAuth {
-            user_id: user_row.id,
-            username: user_row.username,
-            display_name: user_row.display_name,
-            session_id: session_row.id,
+            user_id: session_row.user_id,
+            username: session_row.username,
+            display_name: session_row.display_name,
+            session_id: session_row.session_id,
             session_created_at: session_row.created_at,
             session_expires_at: session_row.expires_at,
             csrf_token: session_row.csrf_token,
             active_cooperative_id: session_row.active_cooperative_id,
+            session_token_hash: token_hash,
+            authed_at: now,
         })
     }
 }

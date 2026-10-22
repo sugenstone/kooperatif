@@ -139,6 +139,49 @@ async function main() {
 		stage('Fresh target + restore', restoreRes.status === 0);
 		if (restoreRes.status !== 0) throw new BackupError(`restore failed: ${restoreRes.stdout}${restoreRes.stderr}`);
 
+		// --- M1-P4-BR1: privilege reconstruction -------------------------------
+		// The artifact is --no-owner/--no-privileges by design (portable
+		// across clusters). A restored DB is data-complete but NOT
+		// application-ready until the kooperatif_app grant surface and
+		// PUBLIC-revocation hardening are rebuilt from regrants.sql.
+		const regrantRes = node(
+			'regrants.mjs',
+			[
+				'--target-db', RESTORE_DB,
+				'--confirm', RESTORE_DB,
+				'--target-url', `postgres://${PGUSER}:${PGPASS}@localhost:${PGPORT}/postgres`
+			],
+			env
+		);
+		stage('Privilege reconstruction', regrantRes.status === 0);
+		if (regrantRes.status !== 0) {
+			throw new BackupError(`regrants failed: ${regrantRes.stdout}${regrantRes.stderr}`);
+		}
+
+		// The reconstruction stage itself asserts fingerprint equality
+		// against the generated regrants.sql header, so effective
+		// privileges match the clean-migration baseline exactly.
+		const APPPASS = process.env.KOOPERATIF_APP_PASSWORD || 'kooperatif_app_dev_password';
+		const appSql = (sql) =>
+			compose(
+				['exec', '-T', '-e', `PGPASSWORD=${APPPASS}`, 'postgres', 'psql',
+				 '-U', 'kooperatif_app', '-d', RESTORE_DB, '-t', '-A', '-c', sql],
+				{ capture: true, allowFail: true }
+			);
+
+		// Restricted-role smoke: the real kooperatif_app principal on the
+		// restored DB. RLS must answer the query (privilege present, rows
+		// filtered), seal functions must be callable, and functions whose
+		// PUBLIC grant was revoked in migrations must stay non-executable.
+		let appProbe = appSql('SELECT count(*) FROM persons');
+		stage('App-role read path (RLS-filtered)', appProbe.status === 0 && appProbe.stdout.trim() === '0');
+		appProbe = appSql('SELECT app_ctx_ok()');
+		stage('Seal check callable', appProbe.status === 0 && appProbe.stdout.trim() === 'f');
+		appProbe = appSql("SELECT public.app_audit_transition()");
+		stage('PUBLIC-revoked function denied', appProbe.status !== 0 && /permission denied/i.test(appProbe.stderr ?? ''));
+		appProbe = appSql("SELECT has_table_privilege('kooperatif_app','payments','UPDATE')");
+		stage('No implicit write grant', appProbe.status === 0 && appProbe.stdout.trim() === 'f');
+
 		// --- Verification battery ---------------------------------------------
 		const expect = (name, sql, want) => {
 			const got = adminSql(sql, RESTORE_DB);
@@ -172,7 +215,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 31],
+			['permissions', 34],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -697,9 +740,9 @@ async function main() {
 			'1'
 		);
 		expect(
-			'Realtime: all 37 domain triggers restored',
+			'Realtime: all 43 domain triggers restored',
 			"SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'rt_%' AND NOT tgisinternal",
-			'37'
+			'43'
 		);
 		expect(
 			'Realtime: notify channel callable post-restore',

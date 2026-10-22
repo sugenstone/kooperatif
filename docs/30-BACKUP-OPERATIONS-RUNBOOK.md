@@ -112,14 +112,41 @@ the domain reversal/correction model (`docs/19`), never a restore.
 5. **Post-restore verification** runs automatically (migration ledger
    vs. manifest, required extensions). For deeper proof run
    `pnpm backup:drill` or query the restored DB.
-6. **Repoint/complete.** Either point the application at the restored
+6. **Privilege reconstruction (M1-P4-BR1) — mandatory.** Dump artifacts
+   are `--no-owner --no-privileges` on purpose (cross-cluster
+   portability); data restore success is **not** application readiness.
+   After a restore the `kooperatif_app` grant surface and the explicit
+   PUBLIC EXECUTE revocations are missing, and the migration ledger is
+   already at the latest version so migrations cannot rebuild them.
+   Rebuild deterministically:
+
+   ```sh
+   pnpm backup:regrants -- \
+     --target-db kooperatif_restore --confirm kooperatif_restore
+   ```
+
+   Prerequisites that fail closed: the `kooperatif_app` role must exist
+   on the target cluster with the hardened attribute set
+   (`LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`
+   — on a fresh cluster create it exactly like that), and the target's
+   `_sqlx_migrations` ledger must match the generation version of
+   `scripts/backup/regrants.sql`. The procedure is idempotent and ends
+   with a fingerprint check: the effective privilege set must equal the
+   generated baseline exactly, or the command reports failure.
+
+   The restored database is only **application-ready** when the regrant
+   fingerprint check and a restricted-role smoke test have passed
+   (`pnpm backup:drill` exercises both automatically). Granting broader
+   privileges "just to make the app work" is forbidden — regrants is
+   the supported path.
+7. **Repoint/complete.** Either point the application at the restored
    database, or repeat the restore onto the production database with
    `--allow-source-target --allow-destructive-restore` after a final
    human confirmation. Record the action, artifact name, checksum and
    operator in the incident log.
-7. **Recover credentials/configuration** from the secret store — dumps
+8. **Recover credentials/configuration** from the secret store — dumps
    intentionally do not carry environment configuration.
-8. **Controlled reopening.** Smoke-check the application, then resume
+9. **Controlled reopening.** Smoke-check the application, then resume
    writes. Data written between the backup timestamp and the incident
    is lost under a logical-dump regime — that gap is why WAL/PITR is a
    production requirement (§2).

@@ -55,6 +55,21 @@ pub struct Config {
     /// other environments (the server then runs degraded and `/ready`
     /// reports the database as `unconfigured`).
     pub database_url: Option<String>,
+    /// Restricted runtime principal (M1-P4-P1). `Some` overrides
+    /// `database_url` for `serve`; admin/CLI paths always use
+    /// `database_url`. Required in production.
+    pub app_database_url: Option<String>,
+    /// Explicit non-production opt-in for serving on the
+    /// administrative principal when `KOOPERATIF_APP_DATABASE_URL` is
+    /// unset (M1-P4-P2A). Never accepted in production — without this
+    /// flag the server refuses to start on a privileged principal, so
+    /// the administrative fallback can never happen silently.
+    pub allow_admin_runtime: bool,
+    /// Optional fail-closed database-identity guard (M1-P2 B1).
+    /// When set, server startup and every mutating CLI path verify
+    /// `current_database()` on the configured connection before any
+    /// write. `None` preserves the previous behavior.
+    pub expected_database: Option<String>,
     /// Allowed CORS origins. Empty means same-origin only (no CORS
     /// headers are emitted).
     pub cors_origins: Vec<String>,
@@ -179,6 +194,64 @@ impl Config {
             );
         }
 
+        // M1-P4-P1: credential lanes. `KOOPERATIF_DATABASE_URL` is the
+        // administrative/migration principal (schema owner). The API
+        // runtime prefers `KOOPERATIF_APP_DATABASE_URL` — the
+        // restricted, non-superuser `kooperatif_app` role created by
+        // migration 0032. When unset the runtime falls back to the
+        // admin URL so existing dev setups keep working until RLS is
+        // enabled (P3), at which point serving on the owner account
+        // would silently bypass every policy.
+        let app_database_url = non_empty(lookup("KOOPERATIF_APP_DATABASE_URL"));
+        if env == AppEnv::Production && app_database_url.is_none() {
+            problems.push(
+                "KOOPERATIF_APP_DATABASE_URL is required when KOOPERATIF_ENV=production \
+                 (runtime must not run as the schema-owner/migration principal)"
+                    .to_string(),
+            );
+        }
+
+        // M1-P4-P2A: the admin-principal fallback for `serve` must be an
+        // explicit operator decision in development, never silent.
+        // Setting it in production is rejected outright — production may
+        // never serve on the schema owner.
+        let allow_admin_runtime = match non_empty(lookup("KOOPERATIF_ALLOW_ADMIN_RUNTIME")) {
+            None => false,
+            Some(raw) => match raw.as_str() {
+                "true" => {
+                    if env == AppEnv::Production {
+                        problems.push(
+                            "KOOPERATIF_ALLOW_ADMIN_RUNTIME=true is not allowed in production"
+                                .to_string(),
+                        );
+                    }
+                    true
+                }
+                "false" => false,
+                other => {
+                    problems.push(format!(
+                        "KOOPERATIF_ALLOW_ADMIN_RUNTIME has invalid value '{other}' \
+                         (expected true|false)"
+                    ));
+                    false
+                }
+            },
+        };
+
+        // A present-but-empty or malformed value is rejected outright:
+        // a guard that silently parses to "off" would defeat its purpose.
+        let expected_database = match lookup("KOOPERATIF_EXPECTED_DATABASE") {
+            None => None,
+            Some(raw) if is_valid_database_name(&raw) => Some(raw),
+            Some(_) => {
+                problems.push(
+                    "KOOPERATIF_EXPECTED_DATABASE must be a valid PostgreSQL identifier"
+                        .to_string(),
+                );
+                None
+            }
+        };
+
         let cors_origins = non_empty(lookup("KOOPERATIF_CORS_ORIGINS"))
             .map(|raw| {
                 raw.split(',')
@@ -200,6 +273,9 @@ impl Config {
             host,
             port,
             database_url,
+            app_database_url,
+            allow_admin_runtime,
+            expected_database,
             cors_origins,
             auth,
         })
@@ -424,6 +500,17 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
+/// Unquoted PostgreSQL identifier shape (also rejects empty names).
+fn is_valid_database_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +556,10 @@ mod tests {
                 "postgres://user:pass@db:5432/kooperatif".to_string(),
             ),
             (
+                "KOOPERATIF_APP_DATABASE_URL",
+                "postgres://app:pass@db:5432/kooperatif".to_string(),
+            ),
+            (
                 "KOOPERATIF_ALLOWED_ORIGINS",
                 "https://kooperatif.example.com".to_string(),
             ),
@@ -478,6 +569,7 @@ mod tests {
         assert_eq!(config.env, AppEnv::Production);
         assert_eq!(config.host, "0.0.0.0");
         assert!(config.database_url.is_some());
+        assert!(config.app_database_url.is_some());
         assert_eq!(
             config.auth.allowed_origins,
             vec!["https://kooperatif.example.com".to_string()]
@@ -485,6 +577,100 @@ mod tests {
         assert!(
             config.auth.cookie_secure,
             "production cookies must be Secure"
+        );
+    }
+
+    #[test]
+    fn production_requires_restricted_app_database_url() {
+        let config = Config::from_source(&lookup_from(HashMap::from([
+            ("KOOPERATIF_ENV", "production".to_string()),
+            (
+                "KOOPERATIF_DATABASE_URL",
+                "postgres://user:pass@db:5432/kooperatif".to_string(),
+            ),
+            (
+                "KOOPERATIF_ALLOWED_ORIGINS",
+                "https://kooperatif.example.com".to_string(),
+            ),
+        ])))
+        .expect_err("production without an app database url must fail");
+
+        assert!(
+            config
+                .problems
+                .iter()
+                .any(|problem| problem.contains("KOOPERATIF_APP_DATABASE_URL")),
+            "error must name KOOPERATIF_APP_DATABASE_URL: {config:?}"
+        );
+    }
+
+    #[test]
+    fn development_falls_back_to_admin_url_for_runtime() {
+        let config = Config::from_source(&lookup_from(HashMap::from([(
+            "KOOPERATIF_DATABASE_URL",
+            "postgres://user:pass@db:5432/kooperatif".to_string(),
+        )])))
+        .expect("valid development config");
+
+        assert!(config.app_database_url.is_none());
+        assert!(config.database_url.is_some());
+        assert!(!config.allow_admin_runtime);
+    }
+
+    #[test]
+    fn development_accepts_explicit_admin_runtime_opt_in() {
+        let config = Config::from_source(&lookup_from(HashMap::from([
+            (
+                "KOOPERATIF_DATABASE_URL",
+                "postgres://user:pass@db:5432/kooperatif".to_string(),
+            ),
+            ("KOOPERATIF_ALLOW_ADMIN_RUNTIME", "true".to_string()),
+        ])))
+        .expect("explicit dev opt-in is valid");
+        assert!(config.allow_admin_runtime);
+    }
+
+    #[test]
+    fn production_rejects_admin_runtime_opt_in() {
+        let config = Config::from_source(&lookup_from(HashMap::from([
+            ("KOOPERATIF_ENV", "production".to_string()),
+            (
+                "KOOPERATIF_DATABASE_URL",
+                "postgres://user:pass@db:5432/kooperatif".to_string(),
+            ),
+            (
+                "KOOPERATIF_APP_DATABASE_URL",
+                "postgres://app:pass@db:5432/kooperatif".to_string(),
+            ),
+            (
+                "KOOPERATIF_ALLOWED_ORIGINS",
+                "https://kooperatif.example.com".to_string(),
+            ),
+            ("KOOPERATIF_ALLOW_ADMIN_RUNTIME", "true".to_string()),
+        ])))
+        .expect_err("admin-runtime opt-in must be rejected in production");
+        assert!(
+            config
+                .problems
+                .iter()
+                .any(|problem| problem.contains("KOOPERATIF_ALLOW_ADMIN_RUNTIME")),
+            "error must name KOOPERATIF_ALLOW_ADMIN_RUNTIME: {config:?}"
+        );
+    }
+
+    #[test]
+    fn admin_runtime_opt_in_rejects_invalid_values() {
+        let config = Config::from_source(&lookup_from(HashMap::from([(
+            "KOOPERATIF_ALLOW_ADMIN_RUNTIME",
+            "yes".to_string(),
+        )])))
+        .expect_err("invalid boolean must fail");
+        assert!(
+            config
+                .problems
+                .iter()
+                .any(|problem| problem.contains("KOOPERATIF_ALLOW_ADMIN_RUNTIME")),
+            "error must name KOOPERATIF_ALLOW_ADMIN_RUNTIME: {config:?}"
         );
     }
 
@@ -620,6 +806,47 @@ mod tests {
                 .any(|problem| problem.contains("KOOPERATIF_PORT")),
             "error must name KOOPERATIF_PORT: {config:?}"
         );
+    }
+
+    #[test]
+    fn expected_database_defaults_to_off() {
+        let config = Config::from_source(&lookup_from(HashMap::new())).expect("valid config");
+        assert!(config.expected_database.is_none());
+    }
+
+    #[test]
+    fn expected_database_accepts_valid_identifier() {
+        let config = Config::from_source(&lookup_from(HashMap::from([(
+            "KOOPERATIF_EXPECTED_DATABASE",
+            "kooperatif_dev".to_string(),
+        )])))
+        .expect("valid config");
+        assert_eq!(config.expected_database.as_deref(), Some("kooperatif_dev"));
+    }
+
+    #[test]
+    fn expected_database_rejects_empty_and_malformed_names() {
+        for value in [
+            "",
+            "  ",
+            "9kooperatif",
+            "kooperatif;drop",
+            "koop eratif",
+            "x".repeat(64).as_str(),
+        ] {
+            let config = Config::from_source(&lookup_from(HashMap::from([(
+                "KOOPERATIF_EXPECTED_DATABASE",
+                value.to_string(),
+            )])))
+            .expect_err("malformed expected database must fail");
+            assert!(
+                config
+                    .problems
+                    .iter()
+                    .any(|problem| problem.contains("KOOPERATIF_EXPECTED_DATABASE")),
+                "error must name the variable for value {value:?}: {config:?}"
+            );
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		addDecimals,
@@ -317,6 +318,21 @@
 	let submitError = $state<MessageKey | null>(null);
 	// One idempotency key per form session: retries replay safely (ADR-006).
 	let idempotencyKey = $state(crypto.randomUUID());
+	// M1-P7-A (T7.2): a partially built collection (payer choice, selected
+	// obligations, amounts) must survive an accidental switch/navigation.
+	// Auto-applied account defaults do NOT count as operator input.
+	const formGuard = useDirtyForm(
+		() =>
+			selectedPayer !== null ||
+			payerFirstName !== '' ||
+			payerLastName !== '' ||
+			rows.length > 0 ||
+			familyContext !== null ||
+			paymentAmount !== '' ||
+			receivedAt !== '' ||
+			note !== '' ||
+			accountManuallySet
+	);
 
 	function payerReady(): boolean {
 		if (payerMode === 'new') {
@@ -355,6 +371,7 @@
 				body: request
 			});
 			idempotencyKey = crypto.randomUUID();
+			formGuard.clear();
 			await goto(resolve(`/tahsilatlar/${response.payment.id}`));
 		} catch (error) {
 			submitError =

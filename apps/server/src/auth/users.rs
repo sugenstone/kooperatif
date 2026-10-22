@@ -29,22 +29,29 @@ pub enum CreateUserError {
 /// the database's lower(username) unique index guarantees uniqueness
 /// under the normalization rule regardless of the caller.
 /// Duplicate normalized usernames surface as `DuplicateUsername`.
+///
+/// `password` additionally seeds `login_verifier` — the DB-side bcrypt
+/// verifier checked by `app_session_open` (M1-P4-P3B). This is a
+/// privileged/admin lane only: the runtime role holds no INSERT on
+/// `users`.
 pub async fn create_user(
     pool: &PgPool,
     username: &str,
     display_name: &str,
     password_hash: &str,
+    password: &str,
 ) -> Result<UserRow, CreateUserError> {
     let normalized = crate::auth::identity::normalize_username(username);
     let row = sqlx::query_as::<_, UserRow>(
-        "INSERT INTO users (username, display_name, password_hash) \
-         VALUES ($1, $2, $3) \
+        "INSERT INTO users (username, display_name, password_hash, login_verifier) \
+         VALUES ($1, $2, $3, crypt($4, gen_salt('bf'))) \
          RETURNING id, username, display_name, status, password_hash, \
                    created_at, updated_at, last_login_at",
     )
     .bind(&normalized)
     .bind(display_name)
     .bind(password_hash)
+    .bind(password)
     .fetch_one(pool)
     .await;
     match row {

@@ -34,6 +34,15 @@ oturumda `active_cooperative_id` yalnızca UX varsayılanı.
 ayrı görüntüleyebilir; yetki sızıntısı olmaz çünkü her istek backend'de
 üyeliğe karşı doğrulanır.
 
+> **Ek (M1-P7-A — üstlenme/supersession):** K1'in "sekmeler bağımsız"
+> beklentisi sahip onayıyla geri alındı. Geçerli model **oturum-otoriter
+> tek aktif kooperatif**tir (P6-B4/B5'te uygulandı, P6-B6'da denetlendi):
+> `X-Cooperative-Id` bir *seçici* değil yalnızca teyit (assertion)
+> başlığıdır; bir sekmenin yetkili switch'i diğer sekmelerde yakınsamayı
+> tetikler. Ayrıntı: `implementation/M1-TENANT-ISOLATION-TEST-MATRIX.md`
+> T7.1 notu. Bu tarihî kayıt değiştirilmedi; üstlenme bu ekle
+> belgelenmiştir.
+
 ## M1-K2 — `persons` (gerçek kişiler) global mi, kooperatife mi ait?
 
 **Öneri: Kooperatife ait (A).**

@@ -65,6 +65,7 @@ impl TestDb {
             .connect(&self.admin_url)
             .await
         {
+            app_db::assert_disposable_test_database_name(&self.database_name);
             let _ = sqlx::query(&format!(
                 "DROP DATABASE IF EXISTS {} WITH (FORCE)",
                 self.database_name
@@ -102,7 +103,7 @@ async fn setup() -> Option<TestDb> {
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("test database connectivity");
-    app_db::run_migrations(&pool)
+    app_db::run_test_migrations(&pool)
         .await
         .expect("migrations applied");
     let clock = Arc::new(MutableClock::new(
@@ -147,7 +148,7 @@ async fn create_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).expect("test parameters"),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).expect("hash");
-    users::create_user(pool, username, "P1b Test", &hash)
+    users::create_user(pool, username, "P1b Test", &hash, TEST_PASSWORD)
         .await
         .expect("user created")
         .id
@@ -206,13 +207,35 @@ async fn membership_status(pool: &PgPool, coop: Uuid, user: Uuid, status: &str) 
     .expect("membership status");
 }
 
-fn ctx_for(user_id: Uuid, cooperative_id: Uuid) -> TenantCtx {
+/// M1-P4-R4 — `require_in_cooperative` resolves permissions through
+/// the credential-bound definer `app_session_permissions_scoped`, so
+/// the test context must carry a token hash that exists in
+/// `user_sessions`. A fabricated hash can no longer resolve rights.
+async fn ctx_for(pool: &PgPool, user_id: Uuid, cooperative_id: Uuid) -> TenantCtx {
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let mut token_hash = [0u8; 32];
+    token_hash[..16].copy_from_slice(a.as_bytes());
+    token_hash[16..].copy_from_slice(b.as_bytes());
+    let session_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO user_sessions \
+         (user_id, token_hash, csrf_token, expires_at, idle_expires_at) \
+         VALUES ($1, $2, 'csrf', now() + interval '1 hour', \
+                now() + interval '1 hour') RETURNING id",
+    )
+    .bind(user_id)
+    .bind(token_hash.as_slice())
+    .fetch_one(pool)
+    .await
+    .expect("session row for credential-bound resolution");
     TenantCtx {
         auth: CurrentAuth {
             user_id,
             username: "test".into(),
             display_name: "Test".into(),
-            session_id: Uuid::new_v4(),
+            session_id,
+            session_token_hash: token_hash,
+            authed_at: OffsetDateTime::UNIX_EPOCH,
             session_created_at: OffsetDateTime::now_utc(),
             session_expires_at: OffsetDateTime::now_utc(),
             csrf_token: "csrf".into(),
@@ -472,31 +495,51 @@ async fn require_in_cooperative_enforces_verified_context() {
     .await;
 
     // Granted in A.
-    authz::require_in_cooperative(&test.state, &ctx_for(user, coop_a), "shares.manage")
-        .await
-        .expect("A-scope permission granted");
+    authz::require_in_cooperative(
+        &test.state,
+        &ctx_for(&test.pool, user, coop_a).await,
+        "shares.manage",
+    )
+    .await
+    .expect("A-scope permission granted");
 
     // Not granted permission in A → denied.
-    let denied = authz::require_in_cooperative(&test.state, &ctx_for(user, coop_a), "roles.manage")
-        .await
-        .expect_err("ungranted permission must deny");
+    let denied = authz::require_in_cooperative(
+        &test.state,
+        &ctx_for(&test.pool, user, coop_a).await,
+        "roles.manage",
+    )
+    .await
+    .expect_err("ungranted permission must deny");
     assert!(matches!(denied, ApiError::PermissionDenied));
 
     // Member of B but no scoped rights there → denied.
-    authz::require_in_cooperative(&test.state, &ctx_for(user, coop_b), "shares.manage")
-        .await
-        .expect_err("no cross-coop privilege");
+    authz::require_in_cooperative(
+        &test.state,
+        &ctx_for(&test.pool, user, coop_b).await,
+        "shares.manage",
+    )
+    .await
+    .expect_err("no cross-coop privilege");
 
     // Nonexistent cooperative → denied, never global fallback.
-    authz::require_in_cooperative(&test.state, &ctx_for(user, Uuid::new_v4()), "shares.manage")
-        .await
-        .expect_err("invalid scope must deny");
+    authz::require_in_cooperative(
+        &test.state,
+        &ctx_for(&test.pool, user, Uuid::new_v4()).await,
+        "shares.manage",
+    )
+    .await
+    .expect_err("invalid scope must deny");
 
     // Suspended membership → denied immediately.
     membership_status(&test.pool, coop_a, user, "suspended").await;
-    authz::require_in_cooperative(&test.state, &ctx_for(user, coop_a), "shares.manage")
-        .await
-        .expect_err("suspended membership denies");
+    authz::require_in_cooperative(
+        &test.state,
+        &ctx_for(&test.pool, user, coop_a).await,
+        "shares.manage",
+    )
+    .await
+    .expect_err("suspended membership denies");
 
     test.cleanup().await;
 }
@@ -734,7 +777,8 @@ async fn scoped_advisory_lock_isolates_per_cooperative() {
         .id;
 
     // Transaction holds the A-scoped guard lock.
-    let tx_a = authz::begin_guarded_transaction(&test.pool, Some(coop_a))
+    let mut conn_a = test.pool.acquire().await.expect("conn A");
+    let tx_a = authz::begin_guarded_transaction(&mut conn_a, Some(coop_a))
         .await
         .expect("A guard tx");
 
@@ -766,7 +810,8 @@ async fn scoped_advisory_lock_isolates_per_cooperative() {
     // The legacy global key is a DIFFERENT lock space: a scoped lock
     // does not contend with the never-bootstrapped lane's bigint key,
     // and vice versa.
-    let tx_global = authz::begin_guarded_transaction(&test.pool, None)
+    let mut conn_g = test.pool.acquire().await.expect("conn G");
+    let tx_global = authz::begin_guarded_transaction(&mut conn_g, None)
         .await
         .expect("global guard tx must not contend with scoped locks");
 
@@ -774,6 +819,8 @@ async fn scoped_advisory_lock_isolates_per_cooperative() {
     // waits for checked-out connections to be returned.
     tx_global.rollback().await.expect("global rollback");
     tx_a.rollback().await.expect("A rollback");
+    drop(conn_g);
+    drop(conn_a);
 
     test.cleanup().await;
 }
@@ -797,7 +844,8 @@ async fn guarded_tx_evaluates_post_mutation_count_atomically() {
 
     // Inside the guarded tx: delete the assignment, then the scoped
     // count observes ZERO and the caller would roll back.
-    let mut tx = authz::begin_guarded_transaction(&test.pool, Some(coop_a))
+    let mut conn_t = test.pool.acquire().await.expect("conn T");
+    let mut tx = authz::begin_guarded_transaction(&mut conn_t, Some(coop_a))
         .await
         .expect("guard tx");
     sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
@@ -810,6 +858,7 @@ async fn guarded_tx_evaluates_post_mutation_count_atomically() {
         .expect("count");
     assert_eq!(count, 0, "post-mutation state must see zero paths");
     tx.rollback().await.expect("rollback");
+    drop(conn_t);
 
     // Rolled back — the path survived outside the tx.
     let mut tx = test.pool.begin().await.expect("tx");
