@@ -17,7 +17,9 @@
  *   cross-tab switch is already committed server-side and cannot be
  *   vetoed locally).
  */
-const guards = new Map<symbol, () => boolean>();
+import { SvelteMap } from 'svelte/reactivity';
+
+const guards = new SvelteMap<symbol, () => boolean>();
 let bypassNext = false;
 
 /** True while at least one mounted form reports unsaved changes. */

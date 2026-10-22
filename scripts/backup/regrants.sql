@@ -2,11 +2,11 @@
 -- (M1-P4-BR1, ADR-013). Regenerate with:
 --   pnpm backup:regrants -- --generate --baseline-url postgres://…
 --
--- Generated: 2026-10-22T21:35:08.109Z
+-- Generated: 2026-10-22T22:25:06.981Z
 -- Baseline:  migration version 72, 607 ACL statements
--- Expected post-apply fingerprint: 940:3f5f2f587ade8a65cc9303be37f3d711
+-- Expected post-apply fingerprint: 940:53204261facb9afbe05a2697675a4df6
 -- Expected RLS fingerprint:      178:a44e3e09c01f04667c8fb8c4e3ccd918
--- Revision:  e22fc832100b994db689ed908d6e6f667b4375db
+-- Revision:  7b36b947d6ff41b59c33d87130ab5f9139ab259e
 --
 -- Fail-closed preflight: the kooperatif_app role must exist with the
 -- hardened attribute set, and the target must be a fully-migrated

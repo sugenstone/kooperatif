@@ -16,7 +16,6 @@
 	 * mask on this and every sibling tab.
 	 */
 	import { page } from '$app/state';
-	import { resolve } from '$app/paths';
 	import ErrorState from '$lib/components/error-state.svelte';
 	import ListSkeleton from '$lib/components/list-skeleton.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';

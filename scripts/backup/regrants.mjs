@@ -55,57 +55,71 @@ export const APP_ROLE = 'kooperatif_app';
 // kooperatif_app or PUBLIC across tables/columns/functions/schema.
 // Owner-privilege entries are excluded on purpose — the dump is
 // owner-agnostic and a cross-cluster restore may legitimately run
-// under a different owning principal. The fingerprint is therefore
-// portable: it describes the *application-role* surface only.
+// under a different owning principal.
+//
+// Grantees serialize as ROLE NAMES, never OIDs: role OIDs are
+// cluster-local, so an oid-keyed hash cannot be compared across
+// clusters (first CI run defect — identical grant surfaces produced
+// different hashes on different clusters). Name-keyed serialization
+// keeps the fingerprint portable while still detecting missing,
+// extra, and altered privileges, including SECURITY DEFINER EXECUTE
+// grants on functions.
 export const FINGERPRINT_SQL = `
 WITH a AS (
-  SELECT 'r' AS k, c.oid::regclass::text AS n, x.grantee::bigint AS g,
+  SELECT 'r' AS k, c.oid::regclass::text AS n,
+         CASE WHEN x.grantee=0 THEN 'PUBLIC'
+              ELSE x.grantee::regrole::text END AS g,
          x.privilege_type::text AS p
   FROM pg_class c, LATERAL aclexplode(c.relacl) x
   WHERE c.relnamespace='public'::regnamespace
     AND c.relkind IN ('r','v','f','p','S')
   UNION ALL
   SELECT 'c', a2.attrelid::regclass::text||'.'||a2.attname,
-         x.grantee::bigint, x.privilege_type
+         CASE WHEN x.grantee=0 THEN 'PUBLIC'
+              ELSE x.grantee::regrole::text END, x.privilege_type
   FROM pg_attribute a2
   JOIN pg_class c2 ON c2.oid=a2.attrelid,
   LATERAL aclexplode(a2.attacl) x
   WHERE c2.relnamespace='public'::regnamespace
     AND a2.attnum>0 AND NOT a2.attisdropped
   UNION ALL
-  SELECT 'f', p.oid::regprocedure::text, x.grantee::bigint, x.privilege_type
+  SELECT 'f', p.oid::regprocedure::text,
+         CASE WHEN x.grantee=0 THEN 'PUBLIC'
+              ELSE x.grantee::regrole::text END, x.privilege_type
   FROM pg_proc p, LATERAL aclexplode(p.proacl) x
   WHERE p.pronamespace='public'::regnamespace
   UNION ALL
-  SELECT 'n', n.nspname::text, x.grantee::bigint, x.privilege_type
+  SELECT 'n', n.nspname::text,
+         CASE WHEN x.grantee=0 THEN 'PUBLIC'
+              ELSE x.grantee::regrole::text END, x.privilege_type
   FROM pg_namespace n, LATERAL aclexplode(n.nspacl) x
   WHERE n.nspname='public'
   UNION ALL
   -- ACL-materialization markers: a non-NULL acl (even owner-only, e.g.
   -- materialized by a migration's REVOKE … FROM PUBLIC) is part of the
   -- intended catalog state and must be reconstructed verbatim.
-  SELECT 'x', c.oid::regclass::text, 0::bigint, 'acl'
+  SELECT 'x', c.oid::regclass::text, '-'::text, 'acl'
   FROM pg_class c
   WHERE c.relnamespace='public'::regnamespace
     AND c.relkind IN ('r','v','f','p','S') AND c.relacl IS NOT NULL
   UNION ALL
-  SELECT 'x', p.oid::regprocedure::text, 0::bigint, 'acl'
+  SELECT 'x', p.oid::regprocedure::text, '-'::text, 'acl'
   FROM pg_proc p
   WHERE p.pronamespace='public'::regnamespace AND p.proacl IS NOT NULL
   UNION ALL
-  SELECT 'x', a3.attrelid::regclass::text||'.'||a3.attname, 0::bigint, 'acl'
+  SELECT 'x', a3.attrelid::regclass::text||'.'||a3.attname, '-'::text, 'acl'
   FROM pg_attribute a3
   JOIN pg_class c3 ON c3.oid=a3.attrelid
   WHERE c3.relnamespace='public'::regnamespace
     AND a3.attnum>0 AND NOT a3.attisdropped AND a3.attacl IS NOT NULL
   UNION ALL
-  SELECT 'x', n2.nspname::text, 0::bigint, 'acl'
+  SELECT 'x', n2.nspname::text, '-'::text, 'acl'
   FROM pg_namespace n2
   WHERE n2.nspname='public' AND n2.nspacl IS NOT NULL
 )
 SELECT count(*)||':'||md5(string_agg(k||'|'||n||'|'||g||'|'||p,'|' ORDER BY k,n,g,p))
 FROM a
-WHERE g IN ('${APP_ROLE}'::regrole::oid::bigint, 0)`;
+WHERE g IN ('${APP_ROLE}','PUBLIC','-')`;
 
 // RLS/force-RLS + policy fingerprint (M1-P8-A Batch 4): the ACL
 // fingerprint alone cannot see row-security regressions — a dropped
