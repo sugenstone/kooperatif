@@ -25,18 +25,54 @@
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
+	import { live } from '$lib/realtime/realtime.svelte';
 	import {
 		USERS_PATH,
-		userDisablePath,
-		userEnablePath,
+		platformUserDisablePath,
+		platformUserEnablePath,
+		userMembershipEndPath,
+		userMembershipReactivatePath,
+		userMembershipSuspendPath,
 		type UserWithRoles
 	} from '@kooperatif/contracts';
+
+	/**
+	 * M1 separation: cooperative administrators act on the MEMBERSHIP
+	 * (suspend / reactivate / end — scoped to this cooperative); global
+	 * account disable/enable is platform authority and only renders when
+	 * the backend reported `platformAdmin`.
+	 */
+	type MembershipAction = 'suspend' | 'reactivate' | 'end';
+	type PlatformAction = 'disable' | 'enable';
+	type PendingAction = { user: UserWithRoles } & (
+		{ kind: 'membership'; action: MembershipAction } | { kind: 'platform'; action: PlatformAction }
+	);
+
+	const MEMBERSHIP_PATHS: Record<MembershipAction, (id: string) => string> = {
+		suspend: userMembershipSuspendPath,
+		reactivate: userMembershipReactivatePath,
+		end: userMembershipEndPath
+	};
+	const MEMBERSHIP_LABELS: Record<MembershipAction, MessageKey> = {
+		suspend: 'users.suspendMembership',
+		reactivate: 'users.reactivateMembership',
+		end: 'users.endMembership'
+	};
+	const MEMBERSHIP_CONFIRMS: Record<MembershipAction, MessageKey> = {
+		suspend: 'users.confirmSuspendMembership',
+		reactivate: 'users.confirmReactivateMembership',
+		end: 'users.confirmEndMembership'
+	};
+	const PLATFORM_PATHS: Record<PlatformAction, (id: string) => string> = {
+		disable: platformUserDisablePath,
+		enable: platformUserEnablePath
+	};
 
 	let users = $state<UserWithRoles[] | null>(null);
 	let loadError = $state<MessageKey | null>(null);
 	let actionError = $state<MessageKey | null>(null);
 	let toggling = $state<string | null>(null);
-	let pending: { user: UserWithRoles; status: 'disabled' | 'active' } | null = $state(null);
+	let pending = $state<PendingAction | null>(null);
 
 	async function refresh(): Promise<void> {
 		loadError = null;
@@ -49,11 +85,15 @@
 
 	async function confirmStatusChange(): Promise<void> {
 		if (toggling !== null || pending === null) return;
-		const { user, status } = pending;
+		const { user } = pending;
+		const path =
+			pending.kind === 'membership'
+				? MEMBERSHIP_PATHS[pending.action](user.id)
+				: PLATFORM_PATHS[pending.action](user.id);
 		toggling = user.id;
 		actionError = null;
 		try {
-			await apiFetch(status === 'disabled' ? userDisablePath(user.id) : userEnablePath(user.id), {
+			await apiFetch(path, {
 				method: 'POST',
 				csrfToken: auth.csrfToken
 			});
@@ -66,8 +106,31 @@
 		}
 	}
 
+	function pendingLabel(p: PendingAction | null): MessageKey {
+		if (!p) return 'users.status';
+		return p.kind === 'membership'
+			? MEMBERSHIP_LABELS[p.action]
+			: p.action === 'disable'
+				? 'users.disable'
+				: 'users.enable';
+	}
+
+	function pendingConfirm(p: PendingAction | null): MessageKey {
+		if (!p) return 'users.status';
+		return p.kind === 'membership'
+			? MEMBERSHIP_CONFIRMS[p.action]
+			: p.action === 'disable'
+				? 'users.confirmDisable'
+				: 'users.confirmEnable';
+	}
+
 	$effect(() => {
 		void refresh();
+		// M1-P5 B3: membership/role/session changes emit an `authz`
+		// invalidation — refresh the member list when it arrives.
+		return live.onInvalidate((domains) => {
+			if (domains === '*' || domains.has('authz')) void refresh();
+		});
 	});
 </script>
 
@@ -100,6 +163,7 @@
 							<TableHead>{t('users.username')}</TableHead>
 							<TableHead>{t('users.roles')}</TableHead>
 							<TableHead>{t('users.status')}</TableHead>
+							<TableHead>{t('users.membership')}</TableHead>
 							<TableHead class="text-right">{t('users.manageRoles')}</TableHead>
 						</TableRow>
 					</TableHeader>
@@ -130,15 +194,75 @@
 										<StatusBadge label={t('users.disabled')} tone="danger" />
 									{/if}
 								</TableCell>
+								<TableCell>
+									{#if user.membershipStatus === 'active'}
+										<StatusBadge label={t('users.membership.active')} tone="success" />
+									{:else if user.membershipStatus === 'suspended'}
+										<StatusBadge label={t('users.membership.suspended')} tone="warning" />
+									{:else if user.membershipStatus === 'ended'}
+										<StatusBadge label={t('users.membership.ended')} tone="danger" />
+									{:else}
+										<StatusBadge label={t('users.membership.none')} tone="neutral" />
+									{/if}
+								</TableCell>
 								<TableCell class="text-right">
-									<div class="flex justify-end gap-2">
-										{#if can('users.manage')}
+									<div class="flex flex-wrap justify-end gap-2">
+										{#if can('users.manage') && user.membershipStatus !== null}
+											{#if user.membershipStatus === 'active'}
+												<Button
+													variant="outline"
+													size="sm"
+													disabled={toggling !== null}
+													onclick={() =>
+														(pending = { user, kind: 'membership', action: 'suspend' })}
+												>
+													{t('users.suspendMembership')}
+												</Button>
+												<Button
+													variant="outline"
+													size="sm"
+													disabled={toggling !== null}
+													onclick={() => (pending = { user, kind: 'membership', action: 'end' })}
+												>
+													{t('users.endMembership')}
+												</Button>
+											{:else if user.membershipStatus === 'suspended'}
+												<Button
+													variant="outline"
+													size="sm"
+													disabled={toggling !== null}
+													onclick={() =>
+														(pending = { user, kind: 'membership', action: 'reactivate' })}
+												>
+													{t('users.reactivateMembership')}
+												</Button>
+												<Button
+													variant="outline"
+													size="sm"
+													disabled={toggling !== null}
+													onclick={() => (pending = { user, kind: 'membership', action: 'end' })}
+												>
+													{t('users.endMembership')}
+												</Button>
+											{:else}
+												<Button
+													variant="outline"
+													size="sm"
+													disabled={toggling !== null}
+													onclick={() =>
+														(pending = { user, kind: 'membership', action: 'reactivate' })}
+												>
+													{t('users.reactivateMembership')}
+												</Button>
+											{/if}
+										{/if}
+										{#if auth.platformAdmin}
 											{#if user.status === 'active'}
 												<Button
 													variant="outline"
 													size="sm"
 													disabled={toggling !== null}
-													onclick={() => (pending = { user, status: 'disabled' })}
+													onclick={() => (pending = { user, kind: 'platform', action: 'disable' })}
 												>
 													{t('users.disable')}
 												</Button>
@@ -147,7 +271,7 @@
 													variant="outline"
 													size="sm"
 													disabled={toggling !== null}
-													onclick={() => (pending = { user, status: 'active' })}
+													onclick={() => (pending = { user, kind: 'platform', action: 'enable' })}
 												>
 													{t('users.enable')}
 												</Button>
@@ -175,10 +299,10 @@
 		<AlertDialog.Content>
 			<AlertDialog.Header>
 				<AlertDialog.Title>
-					{pending?.status === 'disabled' ? t('users.disable') : t('users.enable')}
+					{t(pendingLabel(pending))}
 				</AlertDialog.Title>
 				<AlertDialog.Description>
-					{pending?.status === 'disabled' ? t('users.confirmDisable') : t('users.confirmEnable')}
+					{t(pendingConfirm(pending))}
 					{#if pending}
 						— {pending.user.displayName}
 					{/if}
@@ -189,7 +313,7 @@
 					{t('common.cancel')}
 				</AlertDialog.Cancel>
 				<AlertDialog.Action disabled={toggling !== null} onclick={() => void confirmStatusChange()}>
-					{pending?.status === 'disabled' ? t('users.disable') : t('users.enable')}
+					{t(pendingLabel(pending))}
 				</AlertDialog.Action>
 			</AlertDialog.Footer>
 		</AlertDialog.Content>

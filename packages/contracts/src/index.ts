@@ -41,11 +41,19 @@ export {
 	sessionPath
 } from './auth';
 export type {
+	ActivateCooperativeRequest,
 	AssignedRole,
+	CooperativeStatus,
+	CreateCooperativeRequest,
+	CreateCooperativeResponse,
+	CreateMembershipRequest,
 	CreateRoleRequest,
+	Membership,
+	MembershipStatus,
 	Permission,
 	PermissionKey,
 	PermissionSetRequest,
+	PlatformCooperative,
 	Role,
 	RoleStatus,
 	UpdateRoleRequest,
@@ -53,16 +61,26 @@ export type {
 	UserWithRoles
 } from './rbac';
 export {
+	MEMBERSHIPS_PATH,
 	PERMISSION_KEYS,
 	PERMISSIONS_PATH,
+	PLATFORM_COOPERATIVES_PATH,
 	ROLES_PATH,
 	USERS_PATH,
+	platformCooperativeActivatePath,
+	platformCooperativeArchivePath,
+	platformCooperativePath,
+	platformCooperativeReactivatePath,
+	platformCooperativeSuspendPath,
+	platformUserDisablePath,
+	platformUserEnablePath,
 	roleDisablePath,
 	roleEnablePath,
 	rolePath,
 	rolePermissionsPath,
-	userDisablePath,
-	userEnablePath,
+	userMembershipEndPath,
+	userMembershipReactivatePath,
+	userMembershipSuspendPath,
 	userRolesPath
 } from './rbac';
 export type {

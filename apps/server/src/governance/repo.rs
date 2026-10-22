@@ -20,7 +20,7 @@
 //! approval gating. Finalization records the formally decided outcome
 //! plus a frozen electorate/tally snapshot.
 
-use sqlx::PgPool;
+use sqlx::Acquire;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -76,9 +76,11 @@ pub struct BodyListRow {
 /// Server-side list (ADR-010): status/search filters, stable
 /// `body_number DESC` ordering.
 pub async fn list_bodies(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &BodyFilter,
 ) -> Result<Vec<BodyListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, BodyListRow>(
         "SELECT b.id, b.body_number, b.name, b.body_type, b.status, \
                 (SELECT count(*) FROM governance_memberships m \
@@ -87,7 +89,8 @@ pub async fn list_bodies(
                 b.created_at, \
                 count(*) OVER () AS total_count \
          FROM governance_bodies b \
-         WHERE ($1::text IS NULL OR b.status = $1) \
+         WHERE b.cooperative_id IS NOT DISTINCT FROM $5 \
+           AND ($1::text IS NULL OR b.status = $1) \
            AND ($2::text IS NULL OR b.name ILIKE '%' || $2 || '%' \
                 OR b.body_type ILIKE '%' || $2 || '%' \
                 OR b.body_number::text = $2) \
@@ -98,7 +101,8 @@ pub async fn list_bodies(
     .bind(&filter.search)
     .bind(filter.page_size)
     .bind((filter.page - 1) * filter.page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -146,11 +150,19 @@ pub struct BodyDetail {
     pub memberships: Vec<MembershipRow>,
 }
 
-pub async fn get_body_detail(pool: &PgPool, id: Uuid) -> Result<Option<BodyDetail>, sqlx::Error> {
-    let body: Option<BodyRow> = sqlx::query_as(&format!("{BODY_SELECT} WHERE id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+pub async fn get_body_detail(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<BodyDetail>, sqlx::Error> {
+    let mut conn = db.conn().await?;
+    let body: Option<BodyRow> = sqlx::query_as(&format!(
+        "{BODY_SELECT} WHERE id = $1 AND cooperative_id IS NOT DISTINCT FROM $2"
+    ))
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(body) = body else {
         return Ok(None);
     };
@@ -159,7 +171,7 @@ pub async fn get_body_detail(pool: &PgPool, id: Uuid) -> Result<Option<BodyDetai
          ORDER BY (m.ended_at IS NULL) DESC, m.started_at DESC, m.id"
     ))
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(Some(BodyDetail { body, memberships }))
 }
@@ -190,9 +202,11 @@ pub struct DecisionListRow {
 /// Server-side list (ADR-010): body/status/search filters, stable
 /// `decision_number DESC` ordering.
 pub async fn list_decisions(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &DecisionFilter,
 ) -> Result<Vec<DecisionListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, DecisionListRow>(
         "SELECT d.id, d.decision_number, d.body_id, b.name AS body_name, \
                 d.title, d.status, d.decision_on, d.effective_on, \
@@ -202,7 +216,8 @@ pub async fn list_decisions(
                 count(*) OVER () AS total_count \
          FROM governance_decisions d \
          JOIN governance_bodies b ON b.id = d.body_id \
-         WHERE ($1::uuid IS NULL OR d.body_id = $1) \
+         WHERE d.cooperative_id IS NOT DISTINCT FROM $6 \
+           AND ($1::uuid IS NULL OR d.body_id = $1) \
            AND ($2::text IS NULL OR d.status = $2) \
            AND ($3::text IS NULL OR d.title ILIKE '%' || $3 || '%' \
                 OR d.decision_number::text = $3) \
@@ -214,7 +229,8 @@ pub async fn list_decisions(
     .bind(&filter.search)
     .bind(filter.page_size)
     .bind((filter.page - 1) * filter.page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -284,14 +300,19 @@ pub struct DecisionDetail {
 }
 
 pub async fn get_decision_detail(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<DecisionDetail>, sqlx::Error> {
-    let decision: Option<DecisionRow> =
-        sqlx::query_as(&format!("{DECISION_SELECT} WHERE d.id = $1"))
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+    let mut conn = db.conn().await?;
+    let decision: Option<DecisionRow> = sqlx::query_as(&format!(
+        "{DECISION_SELECT} WHERE d.id = $1 \
+         AND d.cooperative_id IS NOT DISTINCT FROM $2"
+    ))
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(decision) = decision else {
         return Ok(None);
     };
@@ -299,7 +320,7 @@ pub async fn get_decision_detail(
         "{VOTE_SELECT} WHERE v.decision_id = $1 ORDER BY v.cast_at, v.id"
     ))
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let eligible = sqlx::query_as::<_, MembershipRow>(&format!(
         "{MEMBERSHIP_SELECT} \
@@ -307,7 +328,7 @@ pub async fn get_decision_detail(
          ORDER BY m.started_at, m.id"
     ))
     .bind(decision.body_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(Some(DecisionDetail {
         decision,
@@ -335,16 +356,20 @@ pub struct BodyOutcome {
 }
 
 pub async fn create_body(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateBody,
 ) -> Result<BodyOutcome, GovernanceRepoError> {
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, body_number, idempotency_fingerprint \
-         FROM governance_bodies WHERE idempotency_key = $1",
+         FROM governance_bodies WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
     if let Some((id, number, fingerprint)) = existing {
@@ -358,12 +383,17 @@ pub async fn create_body(
         });
     }
 
+    // M1-P3-B6: the allocator runs inside the INSERT's own transaction
+    // — a concurrent idempotency loser rolls its allocation back with
+    // the tx, so a replay never consumes a document number.
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO governance_bodies \
             (name, body_type, description, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, 'active', $4, $5, $6) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             body_number) \
+         VALUES ($1, $2, $3, 'active', $4, $5, $6, $7, \
+             allocate_document_number($7, 'governance_bodies.body_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, body_number",
     )
     .bind(&command.name)
@@ -372,19 +402,30 @@ pub async fn create_body(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(GovernanceRepoError::Database)?;
 
     let Some((id, number)) = inserted else {
         let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
             "SELECT id, body_number, idempotency_fingerprint \
-             FROM governance_bodies WHERE idempotency_key = $1",
+             FROM governance_bodies WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
         )
         .bind(&command.idempotency_key)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(GovernanceRepoError::Database)?;
+        tx.rollback().await.map_err(GovernanceRepoError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(GovernanceRepoError::NotFound);
         };
@@ -398,6 +439,7 @@ pub async fn create_body(
         });
     };
 
+    tx.commit().await.map_err(GovernanceRepoError::Database)?;
     Ok(BodyOutcome {
         body_id: id,
         body_number: number,
@@ -410,14 +452,16 @@ pub async fn create_body(
 /// closed leaving stranded open ballots or seats that pretend to be
 /// electable. Historical decisions/memberships are untouched.
 pub async fn close_body(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     body_id: Uuid,
 ) -> Result<(), GovernanceRepoError> {
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
     let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM governance_bodies WHERE id = $1 FOR UPDATE")
+        sqlx::query_scalar("SELECT status FROM public.app_lock_governance_body($1, $2)")
             .bind(body_id)
+            .bind(cooperative_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(GovernanceRepoError::Database)?;
@@ -444,17 +488,13 @@ pub async fn close_body(
         return Err(GovernanceRepoError::BodyBusy);
     }
 
-    sqlx::query(
-        "UPDATE governance_bodies \
-         SET status = 'closed', closed_at = now(), closed_by = $2, \
-             updated_at = now() \
-         WHERE id = $1",
-    )
-    .bind(body_id)
-    .bind(actor)
-    .execute(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
+    sqlx::query("SELECT public.app_governance_body_close($1, $2, $3)")
+        .bind(body_id)
+        .bind(actor)
+        .bind(cooperative_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(GovernanceRepoError::Database)?;
     tx.commit().await.map_err(GovernanceRepoError::Database)
 }
 
@@ -480,16 +520,20 @@ pub struct MembershipOutcome {
 /// enforced by the partial unique index — a concurrent second seat
 /// answers ActiveMembershipExists, never a duplicate row.
 pub async fn create_membership(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateMembership,
 ) -> Result<MembershipOutcome, GovernanceRepoError> {
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
     let existing: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT id, idempotency_fingerprint \
-         FROM governance_memberships WHERE idempotency_key = $1",
+         FROM governance_memberships WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
     if let Some((id, fingerprint)) = existing {
@@ -502,13 +546,12 @@ pub async fn create_membership(
         });
     }
 
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
-
     // Lock the body first: membership creation serializes against body
     // close and keeps the body-active check consistent.
     let body_status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM governance_bodies WHERE id = $1 FOR UPDATE")
+        sqlx::query_scalar("SELECT status FROM public.app_lock_governance_body($1, $2)")
             .bind(command.body_id)
+            .bind(cooperative_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(GovernanceRepoError::Database)?;
@@ -519,56 +562,70 @@ pub async fn create_membership(
         return Err(GovernanceRepoError::InactiveBody);
     }
 
-    let person_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM persons WHERE id = $1)")
-            .bind(command.person_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(GovernanceRepoError::Database)?;
+    let person_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM persons WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2)",
+    )
+    .bind(command.person_id)
+    .bind(cooperative_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(GovernanceRepoError::Database)?;
     if !person_exists {
         return Err(GovernanceRepoError::NotFound);
     }
 
-    let inserted: Option<Uuid> = match sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO governance_memberships \
-            (body_id, person_id, title, started_at, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
-         RETURNING id",
-    )
-    .bind(command.body_id)
-    .bind(command.person_id)
-    .bind(&command.title)
-    .bind(command.started_at)
-    .bind(&command.idempotency_key)
-    .bind(&command.fingerprint)
-    .bind(actor)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(id) => Some(id),
-        Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
-            let key = db.constraint().unwrap_or_default().to_string();
-            if key.contains("idempotency_key") {
-                None // concurrent replay — fall through to replay read
-            } else {
-                tx.rollback().await.ok();
-                return Err(GovernanceRepoError::ActiveMembershipExists);
+    // Savepoint: a unique-violation error must not abort the outer tx —
+    // the idempotency winner re-read below runs on the same connection.
+    let inserted: Option<Uuid> = {
+        let mut sp = tx.begin().await.map_err(GovernanceRepoError::Database)?;
+        match sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO governance_memberships \
+                (body_id, person_id, title, started_at, \
+                 idempotency_key, idempotency_fingerprint, created_by, cooperative_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             RETURNING id",
+        )
+        .bind(command.body_id)
+        .bind(command.person_id)
+        .bind(&command.title)
+        .bind(command.started_at)
+        .bind(&command.idempotency_key)
+        .bind(&command.fingerprint)
+        .bind(actor)
+        .bind(cooperative_id)
+        .fetch_one(&mut *sp)
+        .await
+        {
+            Ok(id) => {
+                sp.commit().await.map_err(GovernanceRepoError::Database)?;
+                Some(id)
             }
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                sp.rollback().await.ok();
+                let key = db.constraint().unwrap_or_default().to_string();
+                if key.contains("idempotency") {
+                    None // concurrent replay — fall through to replay read
+                } else {
+                    return Err(GovernanceRepoError::ActiveMembershipExists);
+                }
+            }
+            Err(error) => return Err(GovernanceRepoError::Database(error)),
         }
-        Err(error) => return Err(GovernanceRepoError::Database(error)),
     };
 
     let Some(membership_id) = inserted else {
-        tx.commit().await.map_err(GovernanceRepoError::Database)?;
         let existing: Option<(Uuid, String)> = sqlx::query_as(
             "SELECT id, idempotency_fingerprint \
-             FROM governance_memberships WHERE idempotency_key = $1",
+             FROM governance_memberships WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
         )
         .bind(&command.idempotency_key)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(GovernanceRepoError::Database)?;
+        tx.commit().await.map_err(GovernanceRepoError::Database)?;
         let Some((id, fingerprint)) = existing else {
             return Err(GovernanceRepoError::NotFound);
         };
@@ -593,18 +650,20 @@ pub async fn create_membership(
 /// eligibility check under the decision lock always sees committed
 /// membership state. History is preserved: only end markers are set.
 pub async fn end_membership(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     membership_id: Uuid,
     ended_at: OffsetDateTime,
     reason: &str,
 ) -> Result<(), GovernanceRepoError> {
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
     let row: Option<(OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
-        "SELECT started_at, ended_at FROM governance_memberships \
-         WHERE id = $1 FOR UPDATE",
+        "SELECT started_at, ended_at \
+         FROM public.app_lock_governance_membership($1, $2)",
     )
     .bind(membership_id)
+    .bind(cooperative_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
@@ -614,19 +673,15 @@ pub async fn end_membership(
     if existing_end.is_some() || ended_at <= started_at {
         return Err(GovernanceRepoError::InvalidState);
     }
-    sqlx::query(
-        "UPDATE governance_memberships \
-         SET ended_at = $2, ended_by = $3, end_reason = $4, \
-             updated_at = now() \
-         WHERE id = $1",
-    )
-    .bind(membership_id)
-    .bind(ended_at)
-    .bind(actor)
-    .bind(reason)
-    .execute(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
+    sqlx::query("SELECT public.app_governance_membership_end($1, $2, $3, $4, $5)")
+        .bind(membership_id)
+        .bind(ended_at)
+        .bind(actor)
+        .bind(reason)
+        .bind(cooperative_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(GovernanceRepoError::Database)?;
     tx.commit().await.map_err(GovernanceRepoError::Database)
 }
 
@@ -652,16 +707,20 @@ pub struct DecisionOutcomeRow {
 }
 
 pub async fn create_decision(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateDecision,
 ) -> Result<DecisionOutcomeRow, GovernanceRepoError> {
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, decision_number, idempotency_fingerprint \
-         FROM governance_decisions WHERE idempotency_key = $1",
+         FROM governance_decisions WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
     if let Some((id, number, fingerprint)) = existing {
@@ -675,10 +734,10 @@ pub async fn create_decision(
         });
     }
 
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
     let body_status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM governance_bodies WHERE id = $1 FOR UPDATE")
+        sqlx::query_scalar("SELECT status FROM public.app_lock_governance_body($1, $2)")
             .bind(command.body_id)
+            .bind(cooperative_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(GovernanceRepoError::Database)?;
@@ -689,39 +748,55 @@ pub async fn create_decision(
         return Err(GovernanceRepoError::InactiveBody);
     }
 
-    let inserted: Option<(Uuid, i64)> = match sqlx::query_as::<_, (Uuid, i64)>(
-        "INSERT INTO governance_decisions \
-            (body_id, title, decision_text, decision_on, effective_on, \
-             status, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8) \
-         RETURNING id, decision_number",
-    )
-    .bind(command.body_id)
-    .bind(&command.title)
-    .bind(&command.decision_text)
-    .bind(command.decision_on)
-    .bind(command.effective_on)
-    .bind(&command.idempotency_key)
-    .bind(&command.fingerprint)
-    .bind(actor)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(row) => row,
-        Err(sqlx::Error::Database(db)) if db.is_unique_violation() => None,
-        Err(error) => return Err(GovernanceRepoError::Database(error)),
+    // Savepoint: a unique-violation error must not abort the outer tx —
+    // the idempotency winner re-read below runs on the same connection.
+    let inserted: Option<(Uuid, i64)> = {
+        let mut sp = tx.begin().await.map_err(GovernanceRepoError::Database)?;
+        match sqlx::query_as::<_, (Uuid, i64)>(
+            "INSERT INTO governance_decisions \
+                (body_id, title, decision_text, decision_on, effective_on, \
+                 status, idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+                 decision_number) \
+             VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8, $9, \
+                 allocate_document_number($9, 'governance_decisions.decision_number')) \
+             RETURNING id, decision_number",
+        )
+        .bind(command.body_id)
+        .bind(&command.title)
+        .bind(&command.decision_text)
+        .bind(command.decision_on)
+        .bind(command.effective_on)
+        .bind(&command.idempotency_key)
+        .bind(&command.fingerprint)
+        .bind(actor)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *sp)
+        .await
+        {
+            Ok(row) => {
+                sp.commit().await.map_err(GovernanceRepoError::Database)?;
+                row
+            }
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                sp.rollback().await.ok();
+                None
+            }
+            Err(error) => return Err(GovernanceRepoError::Database(error)),
+        }
     };
 
     let Some((id, number)) = inserted else {
-        tx.rollback().await.ok();
         let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
             "SELECT id, decision_number, idempotency_fingerprint \
-             FROM governance_decisions WHERE idempotency_key = $1",
+             FROM governance_decisions WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
         )
         .bind(&command.idempotency_key)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(GovernanceRepoError::Database)?;
+        tx.rollback().await.ok();
         let Some((id, number, fingerprint)) = existing else {
             return Err(GovernanceRepoError::NotFound);
         };
@@ -747,20 +822,24 @@ pub async fn create_decision(
 /// while status = 'draft'. Once voting opens the text is frozen so the
 /// recorded electorate and history always describe what was voted on.
 pub async fn update_decision(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     decision_id: Uuid,
     title: &str,
     decision_text: &str,
     decision_on: Date,
     effective_on: Option<Date>,
 ) -> Result<(), GovernanceRepoError> {
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM governance_decisions WHERE id = $1 FOR UPDATE")
-            .bind(decision_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(GovernanceRepoError::Database)?;
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM governance_decisions WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(decision_id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(GovernanceRepoError::Database)?;
     let Some(status) = status else {
         return Err(GovernanceRepoError::NotFound);
     };
@@ -771,13 +850,14 @@ pub async fn update_decision(
         "UPDATE governance_decisions \
          SET title = $2, decision_text = $3, decision_on = $4, \
              effective_on = $5, updated_at = now() \
-         WHERE id = $1",
+         WHERE id = $1 AND cooperative_id IS NOT DISTINCT FROM $6",
     )
     .bind(decision_id)
     .bind(title)
     .bind(decision_text)
     .bind(decision_on)
     .bind(effective_on)
+    .bind(cooperative_id)
     .execute(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
@@ -786,82 +866,63 @@ pub async fn update_decision(
 
 /// draft -> open: voting begins. Content freezes from this point.
 pub async fn open_decision(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     decision_id: Uuid,
 ) -> Result<(), GovernanceRepoError> {
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
-    let row: Option<(String, Uuid)> = sqlx::query_as(
-        "SELECT status, body_id FROM governance_decisions \
-         WHERE id = $1 FOR UPDATE",
-    )
-    .bind(decision_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
-    let Some((status, body_id)) = row else {
-        return Err(GovernanceRepoError::NotFound);
-    };
-    if status != "draft" {
-        return Err(GovernanceRepoError::InvalidState);
-    }
-    let body_status: String =
-        sqlx::query_scalar("SELECT status FROM governance_bodies WHERE id = $1")
-            .bind(body_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(GovernanceRepoError::Database)?;
-    if body_status != "active" {
-        return Err(GovernanceRepoError::InactiveBody);
-    }
-    sqlx::query(
-        "UPDATE governance_decisions \
-         SET status = 'open', opened_at = now(), opened_by = $2, \
-             updated_at = now() \
-         WHERE id = $1",
-    )
-    .bind(decision_id)
-    .bind(actor)
-    .execute(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
+    // R3C: the draft + body-active preconditions live inside the
+    // definer — a standalone call can no longer open a decision on a
+    // closed body.
+    sqlx::query("SELECT public.app_governance_decision_open_tx($1, $2, $3)")
+        .bind(decision_id)
+        .bind(actor)
+        .bind(cooperative_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| match crate::db::package_error_token(&error) {
+            Some("not_found") => GovernanceRepoError::NotFound,
+            Some("invalid_state") => GovernanceRepoError::InvalidState,
+            Some("inactive_body") => GovernanceRepoError::InactiveBody,
+            _ => GovernanceRepoError::Database(error),
+        })?;
     tx.commit().await.map_err(GovernanceRepoError::Database)
 }
 
 /// draft -> cancelled: drafts may be withdrawn with a recorded reason;
 /// history is preserved, never deleted.
 pub async fn cancel_decision(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     decision_id: Uuid,
     reason: &str,
 ) -> Result<(), GovernanceRepoError> {
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM governance_decisions WHERE id = $1 FOR UPDATE")
-            .bind(decision_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(GovernanceRepoError::Database)?;
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM governance_decisions WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(decision_id)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(GovernanceRepoError::Database)?;
     let Some(status) = status else {
         return Err(GovernanceRepoError::NotFound);
     };
     if status != "draft" {
         return Err(GovernanceRepoError::InvalidState);
     }
-    sqlx::query(
-        "UPDATE governance_decisions \
-         SET status = 'cancelled', cancelled_at = now(), \
-             cancelled_by = $2, cancellation_reason = $3, \
-             updated_at = now() \
-         WHERE id = $1",
-    )
-    .bind(decision_id)
-    .bind(actor)
-    .bind(reason)
-    .execute(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
+    sqlx::query("SELECT public.app_governance_decision_cancel($1, $2, $3, $4)")
+        .bind(decision_id)
+        .bind(actor)
+        .bind(reason)
+        .bind(cooperative_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(GovernanceRepoError::Database)?;
     tx.commit().await.map_err(GovernanceRepoError::Database)
 }
 
@@ -890,16 +951,20 @@ pub struct VoteOutcome {
 /// lock serializes against a concurrent membership end; the unique
 /// (decision, person) index makes a double vote impossible.
 pub async fn cast_vote(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CastVote,
 ) -> Result<VoteOutcome, GovernanceRepoError> {
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
     let existing: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT id, idempotency_fingerprint \
-         FROM governance_votes WHERE idempotency_key = $1",
+         FROM governance_votes WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
     if let Some((id, fingerprint)) = existing {
@@ -912,14 +977,13 @@ pub async fn cast_vote(
         });
     }
 
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
-
     // Canonical lock prefix: decision row first, membership row second.
     let decision: Option<(String, Uuid)> = sqlx::query_as(
         "SELECT status, body_id FROM governance_decisions \
-         WHERE id = $1 FOR UPDATE",
+         WHERE id = $1 AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
     )
     .bind(command.decision_id)
+    .bind(cooperative_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
@@ -931,12 +995,12 @@ pub async fn cast_vote(
     }
 
     let membership: Option<(Uuid, OffsetDateTime)> = sqlx::query_as(
-        "SELECT id, started_at FROM governance_memberships \
-         WHERE body_id = $1 AND person_id = $2 AND ended_at IS NULL \
-         FOR UPDATE",
+        "SELECT id, started_at \
+         FROM public.app_lock_governance_voter($1, $2, $3)",
     )
     .bind(body_id)
     .bind(command.person_id)
+    .bind(cooperative_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(GovernanceRepoError::Database)?;
@@ -947,59 +1011,70 @@ pub async fn cast_vote(
         return Err(GovernanceRepoError::NotEligible);
     }
 
-    let inserted: Option<Uuid> = match sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO governance_votes \
-            (decision_id, membership_id, person_id, choice, note, \
-             recorded_by, idempotency_key, idempotency_fingerprint) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-         RETURNING id",
-    )
-    .bind(command.decision_id)
-    .bind(membership_id)
-    .bind(command.person_id)
-    .bind(command.choice.as_str())
-    .bind(&command.note)
-    .bind(actor)
-    .bind(&command.idempotency_key)
-    .bind(&command.fingerprint)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(id) => Some(id),
-        Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
-            if db
-                .constraint()
-                .unwrap_or_default()
-                .contains("one_per_member")
-            {
-                tx.rollback().await.ok();
-                return Err(GovernanceRepoError::AlreadyVoted);
+    // Savepoint: a unique-violation error must not abort the outer tx —
+    // the idempotency winner re-read below runs on the same connection.
+    let inserted: Option<Uuid> = {
+        let mut sp = tx.begin().await.map_err(GovernanceRepoError::Database)?;
+        match sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO governance_votes \
+                (decision_id, membership_id, person_id, choice, note, \
+                 recorded_by, idempotency_key, idempotency_fingerprint, cooperative_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             RETURNING id",
+        )
+        .bind(command.decision_id)
+        .bind(membership_id)
+        .bind(command.person_id)
+        .bind(command.choice.as_str())
+        .bind(&command.note)
+        .bind(actor)
+        .bind(&command.idempotency_key)
+        .bind(&command.fingerprint)
+        .bind(cooperative_id)
+        .fetch_one(&mut *sp)
+        .await
+        {
+            Ok(id) => {
+                sp.commit().await.map_err(GovernanceRepoError::Database)?;
+                Some(id)
             }
-            None // concurrent idempotency replay — read back after commit
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                sp.rollback().await.ok();
+                // Several unique indexes may report the loser of a
+                // concurrent write (scoped idempotency vs one_per_member)
+                // — the reported constraint depends on index order, so the
+                // idempotency key is always resolved first below and
+                // one_per_member only claims violations with no key match.
+                None
+            }
+            Err(error) => return Err(GovernanceRepoError::Database(error)),
         }
-        Err(error) => return Err(GovernanceRepoError::Database(error)),
     };
 
     let Some(vote_id) = inserted else {
-        tx.rollback().await.ok();
         let existing: Option<(Uuid, String)> = sqlx::query_as(
             "SELECT id, idempotency_fingerprint \
-             FROM governance_votes WHERE idempotency_key = $1",
+             FROM governance_votes WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
         )
         .bind(&command.idempotency_key)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(GovernanceRepoError::Database)?;
-        let Some((id, fingerprint)) = existing else {
-            return Err(GovernanceRepoError::NotFound);
-        };
-        if fingerprint != command.fingerprint {
-            return Err(GovernanceRepoError::IdempotencyConflict);
+        tx.rollback().await.ok();
+        if let Some((id, fingerprint)) = existing {
+            if fingerprint != command.fingerprint {
+                return Err(GovernanceRepoError::IdempotencyConflict);
+            }
+            return Ok(VoteOutcome {
+                vote_id: id,
+                replayed: true,
+            });
         }
-        return Ok(VoteOutcome {
-            vote_id: id,
-            replayed: true,
-        });
+        // No row under this key: the violation was one_per_member —
+        // the member already cast a different vote on this decision.
+        return Err(GovernanceRepoError::AlreadyVoted);
     };
 
     tx.commit().await.map_err(GovernanceRepoError::Database)?;
@@ -1027,63 +1102,27 @@ pub struct FinalizeDecision {
 /// a replayed finalize finds status != 'open' and answers
 /// InvalidState (no duplicate finalization side effects).
 pub async fn finalize_decision(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: FinalizeDecision,
 ) -> Result<(), GovernanceRepoError> {
-    let mut tx = pool.begin().await.map_err(GovernanceRepoError::Database)?;
-    let row: Option<(String, Uuid)> = sqlx::query_as(
-        "SELECT status, body_id FROM governance_decisions \
-         WHERE id = $1 FOR UPDATE",
-    )
-    .bind(command.decision_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
-    let Some((status, body_id)) = row else {
-        return Err(GovernanceRepoError::NotFound);
-    };
-    if status != "open" {
-        return Err(GovernanceRepoError::InvalidState);
-    }
-
-    let eligible: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM governance_memberships \
-         WHERE body_id = $1 AND ended_at IS NULL",
-    )
-    .bind(body_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
-    let (approve, reject, abstain): (i64, i64, i64) = sqlx::query_as(
-        "SELECT \
-            count(*) FILTER (WHERE choice = 'approve'), \
-            count(*) FILTER (WHERE choice = 'reject'), \
-            count(*) FILTER (WHERE choice = 'abstain') \
-         FROM governance_votes WHERE decision_id = $1",
-    )
-    .bind(command.decision_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
-
-    sqlx::query(
-        "UPDATE governance_decisions \
-         SET status = $2, finalized_at = now(), finalized_by = $3, \
-             eligible_count = $4, approve_count = $5, \
-             reject_count = $6, abstain_count = $7, \
-             updated_at = now() \
-         WHERE id = $1",
-    )
-    .bind(command.decision_id)
-    .bind(command.outcome.as_str())
-    .bind(actor)
-    .bind(eligible as i32)
-    .bind(approve as i32)
-    .bind(reject as i32)
-    .bind(abstain as i32)
-    .execute(&mut *tx)
-    .await
-    .map_err(GovernanceRepoError::Database)?;
+    let mut tx = db.begin().await.map_err(GovernanceRepoError::Database)?;
+    // R3C: the evidence snapshot (electorate size + vote tally) is
+    // computed INSIDE the definer under the decision row lock — the
+    // caller can no longer supply a fabricated tally. A replayed
+    // finalize finds status != 'open' and answers InvalidState.
+    sqlx::query("SELECT public.app_governance_decision_finalize_tx($1, $2, $3, $4)")
+        .bind(command.decision_id)
+        .bind(command.outcome.as_str())
+        .bind(actor)
+        .bind(cooperative_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| match crate::db::package_error_token(&error) {
+            Some("not_found") => GovernanceRepoError::NotFound,
+            Some("invalid_state") => GovernanceRepoError::InvalidState,
+            _ => GovernanceRepoError::Database(error),
+        })?;
     tx.commit().await.map_err(GovernanceRepoError::Database)
 }

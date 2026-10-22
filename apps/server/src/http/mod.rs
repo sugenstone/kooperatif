@@ -187,6 +187,7 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .merge(governance_router())
         .merge(crate::reports::routes::reports_router())
         .merge(crate::realtime::routes::realtime_router())
+        .merge(crate::audit::routes::audit_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             crate::tenant::gate::business_membership_gate,
@@ -197,6 +198,13 @@ pub fn router(state: AppState, cors: tower_http::cors::CorsLayer) -> Router {
         .route(READY_PATH, get(ready))
         .merge(auth_router())
         .merge(business)
+        // M1: the platform lane stays outside the membership gate —
+        // global identity lifecycle is platform authority, independent
+        // of any cooperative membership.
+        .merge(crate::auth::rbac::platform_router())
+        // M1-P5 B4: platform audit reads are platform authority — a
+        // cooperative membership is never required (D4).
+        .merge(crate::audit::routes::platform_audit_router())
         .merge(crate::tenant::routes::tenant_router())
         .fallback(fallback)
         .layer(middleware::from_fn(sanitize_rejection_bodies))

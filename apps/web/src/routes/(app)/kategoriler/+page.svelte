@@ -28,6 +28,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		FINANCIAL_CATEGORIES_PATH,
@@ -61,8 +62,20 @@
 	let editingId = $state<string | null>(null);
 	let editName = $state('');
 	let editDescription = $state('');
+	let editOriginalName = '';
+	let editOriginalDescription = '';
 	let editExpectedUpdatedAt = $state('');
 	let acting = $state(false);
+
+	// M1-P7-A (T7.2): an open create input or a modified in-place edit
+	// counts as unsaved work — it must survive an accidental switch.
+	useDirtyForm(
+		() =>
+			newName !== '' ||
+			newDescription !== '' ||
+			(editingId !== null &&
+				(editName !== editOriginalName || editDescription !== editOriginalDescription))
+	);
 
 	async function refresh(): Promise<void> {
 		loadError = null;
@@ -116,6 +129,8 @@
 		editName = category.name;
 		editDescription = category.description ?? '';
 		editExpectedUpdatedAt = category.updatedAt;
+		editOriginalName = category.name;
+		editOriginalDescription = category.description ?? '';
 		actionError = null;
 	}
 

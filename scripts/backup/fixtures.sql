@@ -35,6 +35,25 @@ INSERT INTO users (id, username, display_name, status, password_hash) VALUES
      'Yedek Test Operatörü', 'active',
      '$argon2id$v=19$m=8192,t=1,p=1$eWVkZWtzYWx0$c2lnbg');
 
+
+
+-- Drill cooperative: every tenant row below is scoped to it
+-- (tenancy: cooperative_id NOT NULL on all domain tables).
+INSERT INTO cooperatives (id, name, status, is_bootstrap, business_enabled) VALUES
+    ('cccccccc-0000-4000-8000-0000000000c1', 'Yedek Kooperatif', 'active', true, true);
+
+INSERT INTO cooperative_memberships (cooperative_id, user_id) VALUES
+    ('cccccccc-0000-4000-8000-0000000000c1', '11111111-0000-4000-8000-0000000000aa');
+
+-- Bootstrap lifecycle marker: the tenant is fully provisioned
+-- (installation_state.bootstrap_cooperative_id is authoritative —
+-- without it the auth context reads "tenant residue without
+-- bootstrap marker" and rejects login responses).
+UPDATE installation_state
+   SET bootstrap_cooperative_id = 'cccccccc-0000-4000-8000-0000000000c1',
+       tenant_bootstrapped_at = '2026-01-05T00:00:00Z'
+ WHERE singleton = TRUE;
+
 INSERT INTO user_role_assignments (user_id, role_id) VALUES
     ('11111111-0000-4000-8000-0000000000aa', '00000000-0000-4000-8000-000000000001');
 
@@ -46,159 +65,159 @@ VALUES
      'drill-csrf-token', now() + interval '1 hour', now() + interval '30 minutes',
      'drill/terminal');
 
-INSERT INTO security_events (event_type, user_id, metadata) VALUES
-    ('login_succeeded', '11111111-0000-4000-8000-0000000000aa', '{"origin":"drill"}'),
+INSERT INTO security_events (event_type, user_id, metadata, cooperative_id) VALUES
+    ('login_succeeded', '11111111-0000-4000-8000-0000000000aa', '{"origin":"drill"}', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('share_created', '11111111-0000-4000-8000-0000000000aa',
-     '{"share_number":9001}');
+     '{"share_number":9001}', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Persons: shareholder A, shareholder B, guardian person, third-party payer.
-INSERT INTO persons (id, first_name, last_name, search_name) VALUES
-    ('22222222-0000-4000-8000-000000000001', 'Yedek', 'Hissedarı', 'yedek hissedarı'),
-    ('22222222-0000-4000-8000-000000000002', 'Yedek', 'Devralan', 'yedek devralan'),
-    ('22222222-0000-4000-8000-000000000003', 'Vasi', 'Test', 'vasi test'),
-    ('22222222-0000-4000-8000-000000000004', 'Ödeyen', 'Üçüncü', 'ödeyen üçüncü');
+INSERT INTO persons (id, first_name, last_name, search_name, cooperative_id) VALUES
+    ('22222222-0000-4000-8000-000000000001', 'Yedek', 'Hissedarı', 'yedek hissedarı', 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('22222222-0000-4000-8000-000000000002', 'Yedek', 'Devralan', 'yedek devralan', 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('22222222-0000-4000-8000-000000000003', 'Vasi', 'Test', 'vasi test', 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('22222222-0000-4000-8000-000000000004', 'Ödeyen', 'Üçüncü', 'ödeyen üçüncü', 'cccccccc-0000-4000-8000-0000000000c1');
 
-INSERT INTO families (id, sequence_number) VALUES
-    ('33333333-0000-4000-8000-000000000001', 900001),
-    ('33333333-0000-4000-8000-000000000002', 900002);
+INSERT INTO families (id, sequence_number, cooperative_id) VALUES
+    ('33333333-0000-4000-8000-000000000001', 900001, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('33333333-0000-4000-8000-000000000002', 900002, 'cccccccc-0000-4000-8000-0000000000c1');
 
-INSERT INTO shareholders (id, person_id, guardian_person_id, status) VALUES
+INSERT INTO shareholders (id, person_id, guardian_person_id, status, cooperative_id) VALUES
     ('44444444-0000-4000-8000-000000000001',
      '22222222-0000-4000-8000-000000000001',
-     '22222222-0000-4000-8000-000000000003', 'active'),
+     '22222222-0000-4000-8000-000000000003', 'active', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('44444444-0000-4000-8000-000000000002',
-     '22222222-0000-4000-8000-000000000002', NULL, 'active');
+     '22222222-0000-4000-8000-000000000002', NULL, 'active', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Temporal family membership: A moved from family 900001 to 900002.
 INSERT INTO shareholder_family_memberships
-    (id, shareholder_id, family_id, started_at, ended_at, reason) VALUES
+    (id, shareholder_id, family_id, started_at, ended_at, reason, cooperative_id) VALUES
     ('55555555-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000001',
      '33333333-0000-4000-8000-000000000001',
-     '2025-01-01T00:00:00Z', '2025-06-30T00:00:00Z', 'drill: aile değişikliği'),
+     '2025-01-01T00:00:00Z', '2025-06-30T00:00:00Z', 'drill: aile değişikliği', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('55555555-0000-4000-8000-000000000002',
      '44444444-0000-4000-8000-000000000001',
      '33333333-0000-4000-8000-000000000002',
-     '2025-07-01T00:00:00Z', NULL, NULL),
+     '2025-07-01T00:00:00Z', NULL, NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
     ('55555555-0000-4000-8000-000000000003',
      '44444444-0000-4000-8000-000000000002',
      '33333333-0000-4000-8000-000000000001',
-     '2025-01-01T00:00:00Z', NULL, NULL);
+     '2025-01-01T00:00:00Z', NULL, NULL, 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Shares + events + temporal ownership (share 9001 transfers A→B).
 -- share_number/period_number are GENERATED ALWAYS AS IDENTITY —
 -- OVERRIDING SYSTEM VALUE keeps fixtures deterministic.
-INSERT INTO shares (id, share_number, status, created_by)
+INSERT INTO shares (id, share_number, status, created_by, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('66666666-0000-4000-8000-000000000001', 9001, 'active',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('66666666-0000-4000-8000-000000000002', 9002, 'active',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 INSERT INTO share_events
     (id, share_id, event_type, occurred_at, from_shareholder_id,
-     to_shareholder_id, acquisition_type, amount, actor_user_id) VALUES
+     to_shareholder_id, acquisition_type, amount, actor_user_id, cooperative_id) VALUES
     ('77777777-0000-4000-8000-000000000001',
      '66666666-0000-4000-8000-000000000001', 'initial_acquisition',
      '2025-01-10T00:00:00Z', NULL, '44444444-0000-4000-8000-000000000001',
-     'founder', 100.00, '11111111-0000-4000-8000-0000000000aa'),
+     'founder', 100.00, '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('77777777-0000-4000-8000-000000000002',
      '66666666-0000-4000-8000-000000000001', 'transfer',
      '2025-08-01T00:00:00Z', '44444444-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000002', NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('77777777-0000-4000-8000-000000000003',
      '66666666-0000-4000-8000-000000000002', 'initial_acquisition',
      '2025-02-01T00:00:00Z', NULL, '44444444-0000-4000-8000-000000000002',
-     'founder', NULL, '11111111-0000-4000-8000-0000000000aa');
+     'founder', NULL, '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO share_ownerships
     (id, share_id, shareholder_id, started_at, ended_at,
-     acquisition_type, source_event_id, created_by) VALUES
+     acquisition_type, source_event_id, created_by, cooperative_id) VALUES
     ('88888888-0000-4000-8000-000000000001',
      '66666666-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000001',
      '2025-01-10T00:00:00Z', '2025-08-01T00:00:00Z', 'founder',
      '77777777-0000-4000-8000-000000000001',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('88888888-0000-4000-8000-000000000002',
      '66666666-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000002',
      '2025-08-01T00:00:00Z', NULL, 'transfer',
      '77777777-0000-4000-8000-000000000002',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('88888888-0000-4000-8000-000000000003',
      '66666666-0000-4000-8000-000000000002',
      '44444444-0000-4000-8000-000000000002',
      '2025-02-01T00:00:00Z', NULL, 'founder',
      '77777777-0000-4000-8000-000000000003',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Periods: one per_shareholder, two per_share.
 INSERT INTO periods
-    (id, period_number, name, status, collection_start_date, due_date, created_by)
+    (id, period_number, name, status, collection_start_date, due_date, created_by, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('99999999-0000-4000-8000-000000000001', 9001, 'Yedek Dönem A', 'open',
-     '2026-01-01', '2026-01-31', '11111111-0000-4000-8000-0000000000aa'),
+     '2026-01-01', '2026-01-31', '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('99999999-0000-4000-8000-000000000002', 9002, 'Yedek Dönem B', 'open',
-     '2026-02-01', '2026-02-28', '11111111-0000-4000-8000-0000000000aa'),
+     '2026-02-01', '2026-02-28', '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('99999999-0000-4000-8000-000000000003', 9003, 'Yedek Dönem C', 'closed',
-     '2026-03-01', '2026-03-31', '11111111-0000-4000-8000-0000000000aa');
+     '2026-03-01', '2026-03-31', '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO assessment_rules
-    (id, period_id, rule_type, base_amount, assessment_effective_date) VALUES
+    (id, period_id, rule_type, base_amount, assessment_effective_date, cooperative_id) VALUES
     ('abababab-0000-4000-8000-000000000001',
      '99999999-0000-4000-8000-000000000001', 'per_shareholder',
-     10000.00, '2026-01-15'),
+     10000.00, '2026-01-15', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('abababab-0000-4000-8000-000000000002',
      '99999999-0000-4000-8000-000000000002', 'per_share',
-     0.01, '2026-02-10'),
+     0.01, '2026-02-10', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('abababab-0000-4000-8000-000000000003',
      '99999999-0000-4000-8000-000000000003', 'per_share',
-     1234.56, '2026-03-10');
+     1234.56, '2026-03-10', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO assessments
     (id, period_id, shareholder_id, rule_type, base_amount, amount,
-     currency, assessment_effective_date, generated_by) VALUES
+     currency, assessment_effective_date, generated_by, cooperative_id) VALUES
     -- Dönem A: flat obligation per shareholder (10000.00 each).
     ('acacacac-0000-4000-8000-000000000001',
      '99999999-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000001', 'per_shareholder',
      10000.00, 10000.00, 'TRY', '2026-01-15',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('acacacac-0000-4000-8000-000000000002',
      '99999999-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000002', 'per_shareholder',
      10000.00, 10000.00, 'TRY', '2026-01-15',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Dönem B: 0.01 per share; B owns both shares at the effective date.
     ('acacacac-0000-4000-8000-000000000003',
      '99999999-0000-4000-8000-000000000002',
      '44444444-0000-4000-8000-000000000002', 'per_share',
      0.01, 0.02, 'TRY', '2026-02-10',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Dönem C: 1234.56 per share → 2469.12 with two provenance rows.
     ('acacacac-0000-4000-8000-000000000004',
      '99999999-0000-4000-8000-000000000003',
      '44444444-0000-4000-8000-000000000002', 'per_share',
      1234.56, 2469.12, 'TRY', '2026-03-10',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO assessment_share_sources
-    (assessment_id, share_id, ownership_id, amount_component) VALUES
+    (assessment_id, share_id, ownership_id, amount_component, cooperative_id) VALUES
     ('acacacac-0000-4000-8000-000000000003',
      '66666666-0000-4000-8000-000000000001',
-     '88888888-0000-4000-8000-000000000002', 0.01),
+     '88888888-0000-4000-8000-000000000002', 0.01, 'cccccccc-0000-4000-8000-0000000000c1'),
     ('acacacac-0000-4000-8000-000000000003',
      '66666666-0000-4000-8000-000000000002',
-     '88888888-0000-4000-8000-000000000003', 0.01),
+     '88888888-0000-4000-8000-000000000003', 0.01, 'cccccccc-0000-4000-8000-0000000000c1'),
     ('acacacac-0000-4000-8000-000000000004',
      '66666666-0000-4000-8000-000000000001',
-     '88888888-0000-4000-8000-000000000002', 1234.56),
+     '88888888-0000-4000-8000-000000000002', 1234.56, 'cccccccc-0000-4000-8000-0000000000c1'),
     ('acacacac-0000-4000-8000-000000000004',
      '66666666-0000-4000-8000-000000000002',
-     '88888888-0000-4000-8000-000000000003', 1234.56);
+     '88888888-0000-4000-8000-000000000003', 1234.56, 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- STEP-007 payments: money RECEIVED, distinct from obligation.
 -- Payment 9001: third-party payer covers TWO different debtors'
@@ -207,7 +226,7 @@ INSERT INTO payments
     (id, payment_number, payer_person_id, amount, currency, method,
      received_at, note, status, idempotency_key, idempotency_fingerprint,
      reversed_at, reversed_by, reversal_reason,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('dddddddd-0000-4000-8000-000000000001', 9001,
@@ -216,7 +235,7 @@ VALUES
      'drill-idem-0001', 'drill-fp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-20T10:00:00Z', '2026-01-20T10:00:00Z'),
+     '2026-01-20T10:00:00Z', '2026-01-20T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Payment 9002: fully REVERSED receipt — history survives restore.
     ('dddddddd-0000-4000-8000-000000000002', 9002,
      '22222222-0000-4000-8000-000000000002', 30.00, 'TRY',
@@ -226,43 +245,43 @@ VALUES
      '2026-01-22T12:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı kayıt',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-22T09:00:00Z', '2026-01-22T12:00:00Z');
+     '2026-01-22T09:00:00Z', '2026-01-22T12:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO payment_allocations
     (id, payment_id, assessment_id, amount, status,
-     reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     -- Payment 9001 split across two DIFFERENT debtors' obligations.
     ('eeeeeeee-0000-4000-8000-000000000001',
      'dddddddd-0000-4000-8000-000000000001',
      'acacacac-0000-4000-8000-000000000001', 100.00, 'active',
      NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('eeeeeeee-0000-4000-8000-000000000002',
      'dddddddd-0000-4000-8000-000000000001',
      'acacacac-0000-4000-8000-000000000002', 50.00, 'active',
      NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Payment 9002's allocation is reversed (history preserved).
     ('eeeeeeee-0000-4000-8000-000000000003',
      'dddddddd-0000-4000-8000-000000000002',
      'acacacac-0000-4000-8000-000000000001', 30.00, 'reversed',
      '2026-01-22T12:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı kayıt',
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- STEP-008: financial accounts, account movements, account transfer.
 -- One CASH + one BANK account; balances are NEVER stored — the drill
 -- verifies the restored movement rows derive them exactly.
 INSERT INTO financial_accounts
-    (id, name, account_type, currency, status, bank_name, iban, created_by)
+    (id, name, account_type, currency, status, bank_name, iban, created_by, cooperative_id)
 VALUES
     ('f1f1f1f1-0000-4000-8000-000000000001', 'Yedek Kasa', 'cash', 'TRY',
      'active', NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('f1f1f1f1-0000-4000-8000-000000000002', 'Yedek Banka', 'bank', 'TRY',
      'active', 'Yedek Bankası A.Ş.', 'TR00 0000 0000 0000 0000 0000 00',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Where did each posted payment's money physically go?
 UPDATE payments SET destination_account_id = 'f1f1f1f1-0000-4000-8000-000000000001'
@@ -274,25 +293,25 @@ UPDATE payments SET destination_account_id = 'f1f1f1f1-0000-4000-8000-0000000000
 -- bank (reversal bookkeeping survives the restore).
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     ('f2f2f2f2-0000-4000-8000-000000000001',
      'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 150.00, 'payment',
      'dddddddd-0000-4000-8000-000000000001', '2026-01-20T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-20T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('f2f2f2f2-0000-4000-8000-000000000002',
      'f1f1f1f1-0000-4000-8000-000000000002', 'inflow', 30.00, 'payment',
      'dddddddd-0000-4000-8000-000000000002', '2026-01-22T09:00:00Z',
      'reversed', '2026-01-22T12:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı kayıt',
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-22T09:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- One posted transfer cash → bank 40.00 (two linked legs, one row).
 INSERT INTO account_transfers
     (id, transfer_number, source_account_id, destination_account_id, amount,
      currency, occurred_at, note, status, idempotency_key,
-     idempotency_fingerprint, created_by, created_at, updated_at)
+     idempotency_fingerprint, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('f3f3f3f3-0000-4000-8000-000000000001', 9001,
@@ -301,22 +320,22 @@ VALUES
      40.00, 'TRY', '2026-01-25T10:00:00Z', 'drill: kasa→banka', 'posted',
      'drill-tidem-0001', 'drill-tfp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-25T10:00:00Z', '2026-01-25T10:00:00Z');
+     '2026-01-25T10:00:00Z', '2026-01-25T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     ('f2f2f2f2-0000-4000-8000-000000000003',
      'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 40.00, 'transfer',
      'f3f3f3f3-0000-4000-8000-000000000001', '2026-01-25T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('f2f2f2f2-0000-4000-8000-000000000004',
      'f1f1f1f1-0000-4000-8000-000000000002', 'inflow', 40.00, 'transfer',
      'f3f3f3f3-0000-4000-8000-000000000001', '2026-01-25T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-25T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- STEP-009: Shareholder Credit (Excess Payment) + applications.
 -- Payment 9003 leaves an 80.00 remainder explicitly assigned to
@@ -327,7 +346,7 @@ VALUES
 INSERT INTO payments
     (id, payment_number, payer_person_id, amount, currency, method,
      received_at, note, status, idempotency_key, idempotency_fingerprint,
-     destination_account_id, created_by, created_at, updated_at)
+     destination_account_id, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('dddddddd-0000-4000-8000-000000000003', 9003,
@@ -336,22 +355,22 @@ VALUES
      'drill-idem-0003', 'drill-fp-0003',
      'f1f1f1f1-0000-4000-8000-000000000001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-28T10:00:00Z', '2026-01-28T10:00:00Z');
+     '2026-01-28T10:00:00Z', '2026-01-28T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, created_by, created_at)
+     status, created_by, created_at, cooperative_id)
 VALUES
     ('f2f2f2f2-0000-4000-8000-000000000005',
      'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 80.00, 'payment',
      'dddddddd-0000-4000-8000-000000000003', '2026-01-28T10:00:00Z',
      'active',
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO shareholder_credits
     (id, credit_number, source_payment_id, shareholder_id, amount,
      currency, status, note, idempotency_key, idempotency_fingerprint,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('a9a9a9a9-0000-4000-8000-000000000001', 9001,
@@ -359,19 +378,19 @@ VALUES
      '44444444-0000-4000-8000-000000000001', 80.00, 'TRY', 'active',
      'drill: tahsilat kalanı', 'drill-cidem-0001', 'drill-cfp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-28T10:05:00Z', '2026-01-28T10:05:00Z');
+     '2026-01-28T10:05:00Z', '2026-01-28T10:05:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO credit_applications
     (id, credit_id, assessment_id, amount, currency, mode, status,
      idempotency_key, idempotency_fingerprint,
-     reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     -- Automatic offset during assessment generation (no client key).
     ('b1b1b1b1-0000-4000-8000-000000000001',
      'a9a9a9a9-0000-4000-8000-000000000001',
      'acacacac-0000-4000-8000-000000000001', 30.00, 'TRY', 'automatic',
      'active', NULL, NULL, NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:06:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:06:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- A REVERSED manual application — reversal bookkeeping survives.
     ('b1b1b1b1-0000-4000-8000-000000000002',
      'a9a9a9a9-0000-4000-8000-000000000001',
@@ -379,38 +398,53 @@ VALUES
      'reversed', 'drill-capp-0001', 'drill-capfp-0001',
      '2026-01-29T09:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı mahsup',
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:07:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-28T10:07:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- STEP-010: financial categories + income/expense entries.
 -- Each posted entry owns exactly ONE movement; provenance is relational
 -- (source_type 'income'/'expense' + account_movement_id). The reversed
 -- expense keeps both entry AND movement reversal bookkeeping.
 INSERT INTO financial_categories
-    (id, category_type, name, description, status, created_by) VALUES
+    (id, category_type, name, description, status, created_by, cooperative_id) VALUES
     ('c0c0c0c0-0000-4000-8000-000000000001', 'income', 'Yedek Gelir Türü',
      'drill: gelir kategorisi', 'active',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('c0c0c0c0-0000-4000-8000-000000000002', 'expense', 'Yedek Gider Türü',
      'drill: gider kategorisi', 'active',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
+
+-- The canonical ten system categories the app seeds at cooperative
+-- bootstrap (tenant/repo.rs) — `created_by IS NULL` marks system rows.
+INSERT INTO financial_categories
+    (id, category_type, name, created_by, cooperative_id) VALUES
+    ('c0c0c0c0-0000-4000-8000-0000000000a1', 'income',  'Diğer Gelir',              NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a2', 'income',  'Kira Geliri',              NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a3', 'income',  'Yatırım Geliri',           NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a4', 'expense', 'Genel Gider',              NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a5', 'expense', 'Kira',                     NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a6', 'expense', 'Ulaşım',                   NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a7', 'expense', 'Bakım / Onarım',           NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a8', 'expense', 'Elektrik / Su / İletişim', NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000a9', 'expense', 'Organizasyon',             NULL, 'cccccccc-0000-4000-8000-0000000000c1'),
+    ('c0c0c0c0-0000-4000-8000-0000000000aa', 'expense', 'Diğer Gider',              NULL, 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Movements first: the entry's account_movement_id is a hard FK.
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     -- Income 9001: +500.00 inflow on cash.
     ('f2f2f2f2-0000-4000-8000-000000000006',
      'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 500.00, 'income',
      'e1e1e1e1-0000-4000-8000-000000000001', '2026-01-30T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Expense 9001: -60.00 outflow on cash, still active.
     ('f2f2f2f2-0000-4000-8000-000000000007',
      'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 60.00, 'expense',
      'e2e2e2e2-0000-4000-8000-000000000001', '2026-01-30T11:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T11:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T11:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Expense 9002: -25.00 outflow on cash, REVERSED (excluded from
     -- derived balance; the row survives with reversal bookkeeping).
     ('f2f2f2f2-0000-4000-8000-000000000008',
@@ -418,13 +452,13 @@ VALUES
      'e2e2e2e2-0000-4000-8000-000000000002', '2026-01-30T12:00:00Z',
      'reversed', '2026-01-30T14:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı gider',
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T12:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-30T12:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO income_entries
     (id, income_number, financial_account_id, category_id, amount,
      currency, occurred_at, description, counterparty, reference_no,
      account_movement_id, status, idempotency_key, idempotency_fingerprint,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('e1e1e1e1-0000-4000-8000-000000000001', 9001,
@@ -435,14 +469,14 @@ VALUES
      'f2f2f2f2-0000-4000-8000-000000000006', 'posted',
      'drill-iidem-0001', 'drill-iifp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-30T10:00:00Z', '2026-01-30T10:00:00Z');
+     '2026-01-30T10:00:00Z', '2026-01-30T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO expense_entries
     (id, expense_number, financial_account_id, category_id, amount,
      currency, occurred_at, description, counterparty, reference_no,
      account_movement_id, status, idempotency_key, idempotency_fingerprint,
      reversed_at, reversed_by, reversal_reason,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('e2e2e2e2-0000-4000-8000-000000000001', 9001,
@@ -454,7 +488,7 @@ VALUES
      'drill-eidem-0001', 'drill-eifp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-30T11:00:00Z', '2026-01-30T11:00:00Z'),
+     '2026-01-30T11:00:00Z', '2026-01-30T11:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Reversed expense — entry and movement reversal bookkeeping
     -- must survive the restore.
     ('e2e2e2e2-0000-4000-8000-000000000002', 9002,
@@ -467,7 +501,7 @@ VALUES
      '2026-01-30T14:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı gider',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-30T12:00:00Z', '2026-01-30T14:00:00Z');
+     '2026-01-30T12:00:00Z', '2026-01-30T14:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- STEP-011: Share Return + Entitlement + Settlement.
 -- Share 9003 (owner A) went through the full lifecycle: requested →
@@ -476,47 +510,47 @@ VALUES
 -- (partially settled) and an undetermined profit right (NULL ≠ 0.00).
 -- One posted settlement + one REVERSED settlement — each bound 1:1 to
 -- its own share_return_settlement-sourced movement.
-INSERT INTO shares (id, share_number, status, created_by)
+INSERT INTO shares (id, share_number, status, created_by, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('67676767-0000-4000-8000-000000000001', 9003, 'closed',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO share_events
     (id, share_id, event_type, occurred_at, from_shareholder_id,
-     to_shareholder_id, status_from, status_to, actor_user_id) VALUES
+     to_shareholder_id, status_from, status_to, actor_user_id, cooperative_id) VALUES
     ('77777777-0000-4000-8000-000000000004',
      '67676767-0000-4000-8000-000000000001', 'initial_acquisition',
      '2025-03-01T00:00:00Z', NULL, '44444444-0000-4000-8000-000000000001',
      NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('77777777-0000-4000-8000-000000000005',
      '67676767-0000-4000-8000-000000000001', 'return_requested',
      '2026-02-05T10:00:00Z', '44444444-0000-4000-8000-000000000001', NULL,
      'active', 'return_pending',
-     '11111111-0000-4000-8000-0000000000aa'),
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('77777777-0000-4000-8000-000000000006',
      '67676767-0000-4000-8000-000000000001', 'return_finalized',
      '2026-02-10T10:00:00Z', '44444444-0000-4000-8000-000000000001', NULL,
      'return_pending', 'closed',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO share_ownerships
     (id, share_id, shareholder_id, started_at, ended_at,
-     acquisition_type, source_event_id, created_by) VALUES
+     acquisition_type, source_event_id, created_by, cooperative_id) VALUES
     ('88888888-0000-4000-8000-000000000004',
      '67676767-0000-4000-8000-000000000001',
      '44444444-0000-4000-8000-000000000001',
      '2025-03-01T00:00:00Z', '2026-02-10T00:00:00+03', 'founder',
      '77777777-0000-4000-8000-000000000004',
-     '11111111-0000-4000-8000-0000000000aa');
+     '11111111-0000-4000-8000-0000000000aa', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO share_returns
     (id, return_number, share_id, shareholder_id, owner_display_name,
      share_number, ownership_started_at, requested_at,
      effective_return_date, reason, status, finalized_at, finalized_by,
      idempotency_key, idempotency_fingerprint, created_by,
-     created_at, updated_at)
+     created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('d5d5d5d5-0000-4000-8000-000000000001', 9001,
@@ -528,13 +562,13 @@ VALUES
      '2026-02-10T10:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill-ridem-0001', 'drill-rfp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-05T10:00:00Z', '2026-02-10T10:00:00Z');
+     '2026-02-05T10:00:00Z', '2026-02-10T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO share_return_entitlements
     (id, entitlement_number, share_return_id, entitlement_type,
      beneficiary_shareholder_id, amount, currency, due_date,
      policy_reference, description, recognized_at, determined_at,
-     status, created_by, created_at, updated_at)
+     status, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- Principal: determined 1.000,00; 300 posted + 100 reversed →
@@ -546,7 +580,7 @@ VALUES
      '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z',
      'partially_settled',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-10T10:00:00Z', '2026-02-12T10:00:00Z'),
+     '2026-02-10T10:00:00Z', '2026-02-12T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Profit right: recognized but the formula is policy-driven —
     -- amount NULL means "not yet determined", never zero.
     ('e7e7e7e7-0000-4000-8000-000000000002', 9002,
@@ -556,12 +590,12 @@ VALUES
      '2026-02-10T10:00:00Z', NULL,
      'open',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z');
+     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Movements first: each settlement's account_movement_id is a hard FK.
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     -- Settlement 9001: −300.00 outflow on cash, posted.
     ('f2f2f2f2-0000-4000-8000-000000000009',
@@ -569,7 +603,7 @@ VALUES
      'share_return_settlement',
      'f4f4f4f4-0000-4000-8000-000000000001', '2026-02-11T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-11T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-11T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Settlement 9002: −100.00 outflow on cash, REVERSED.
     ('f2f2f2f2-0000-4000-8000-000000000010',
      'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 100.00,
@@ -577,13 +611,13 @@ VALUES
      'f4f4f4f4-0000-4000-8000-000000000002', '2026-02-12T10:00:00Z',
      'reversed', '2026-02-12T14:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı ödeme',
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-12T10:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-12T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO share_return_settlements
     (id, settlement_number, entitlement_id, financial_account_id, amount,
      currency, settled_at, account_movement_id, status, idempotency_key,
      idempotency_fingerprint, reversed_at, reversed_by, reversal_reason,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('f4f4f4f4-0000-4000-8000-000000000001', 9001,
@@ -594,7 +628,7 @@ VALUES
      'drill-sidem-0001', 'drill-sfp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-11T10:00:00Z', '2026-02-11T10:00:00Z'),
+     '2026-02-11T10:00:00Z', '2026-02-11T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('f4f4f4f4-0000-4000-8000-000000000002', 9002,
      'e7e7e7e7-0000-4000-8000-000000000001',
      'f1f1f1f1-0000-4000-8000-000000000001', 100.00, 'TRY',
@@ -604,7 +638,7 @@ VALUES
      '2026-02-12T14:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı ödeme',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-12T10:00:00Z', '2026-02-12T14:00:00Z');
+     '2026-02-12T10:00:00Z', '2026-02-12T14:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- =====================================================================
 -- STEP-012: Investments — identity, acquisition funding, valuation
@@ -616,7 +650,7 @@ INSERT INTO investments
      location, reference, counterparty_name, acquired_at, status,
      disposed_at, disposed_by, cancelled_at, cancelled_by,
      cancellation_reason, idempotency_key, idempotency_fingerprint,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- 9001: disposed real estate — funded, valued, earned, sold.
@@ -627,19 +661,19 @@ VALUES
      NULL, NULL, NULL,
      'drill-iidem-0001', 'drill-ifp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-10T10:00:00Z', '2026-04-01T10:00:00Z'),
+     '2026-01-10T10:00:00Z', '2026-04-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- 9002: active business holding — identity only, no events.
     ('10101010-0000-4000-8000-000000000002', 9002, 'Drill Ortaklığı',
      'business', NULL, NULL, NULL, 'Drill İşletmesi AŞ', '2026-01-15',
      'active', NULL, NULL, NULL, NULL, NULL,
      'drill-iidem-0002', 'drill-ifp-0002',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-15T10:00:00Z', '2026-01-15T10:00:00Z');
+     '2026-01-15T10:00:00Z', '2026-01-15T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Movements first: every funding/income/proceeds row hard-FKs its leg.
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     -- Funding 9001: −200.00 outflow on cash, posted.
     ('f2f2f2f2-0000-4000-8000-000000000011',
@@ -647,7 +681,7 @@ VALUES
      'investment_funding',
      '12121212-0000-4000-8000-000000000001', '2026-01-10T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-10T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-10T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Funding 9002: −50.00 outflow on cash, REVERSED.
     ('f2f2f2f2-0000-4000-8000-000000000012',
      'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 50.00,
@@ -655,14 +689,14 @@ VALUES
      '12121212-0000-4000-8000-000000000002', '2026-01-11T10:00:00Z',
      'reversed', '2026-01-11T15:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı finansman',
-     '11111111-0000-4000-8000-0000000000aa', '2026-01-11T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-01-11T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Investment income 9001: +25.00 inflow on cash, posted.
     ('f2f2f2f2-0000-4000-8000-000000000013',
      'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 25.00,
      'investment_income',
      '16161616-0000-4000-8000-000000000001', '2026-02-01T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-01T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Investment income 9002: +10.00 inflow on cash, REVERSED.
     ('f2f2f2f2-0000-4000-8000-000000000014',
      'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 10.00,
@@ -670,20 +704,20 @@ VALUES
      '16161616-0000-4000-8000-000000000002', '2026-02-02T10:00:00Z',
      'reversed', '2026-02-02T14:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı gelir',
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-02T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-02T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Disposal proceeds leg: +320.00 inflow on BANK, posted.
     ('f2f2f2f2-0000-4000-8000-000000000015',
      'f1f1f1f1-0000-4000-8000-000000000002', 'inflow', 320.00,
      'investment_disposal',
      '20202020-0000-4000-8000-000000000001', '2026-04-01T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-04-01T10:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-04-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO investment_fundings
     (id, funding_number, investment_id, financial_account_id, amount,
      currency, occurred_at, reference, note, account_movement_id, status,
      idempotency_key, idempotency_fingerprint, reversed_at, reversed_by,
-     reversal_reason, created_by, created_at, updated_at)
+     reversal_reason, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('12121212-0000-4000-8000-000000000001', 9001,
@@ -694,7 +728,7 @@ VALUES
      'drill-fidem-0001', 'drill-ffp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-10T10:00:00Z', '2026-01-10T10:00:00Z'),
+     '2026-01-10T10:00:00Z', '2026-01-10T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('12121212-0000-4000-8000-000000000002', 9002,
      '10101010-0000-4000-8000-000000000001',
      'f1f1f1f1-0000-4000-8000-000000000001', 50.00, 'TRY',
@@ -704,13 +738,13 @@ VALUES
      '2026-01-11T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı finansman',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-11T10:00:00Z', '2026-01-11T15:00:00Z');
+     '2026-01-11T10:00:00Z', '2026-01-11T15:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO investment_valuations
     (id, valuation_number, investment_id, valuation_date, amount,
      currency, method, source, note, status, idempotency_key,
      idempotency_fingerprint, cancelled_at, cancelled_by,
-     cancellation_reason, created_by, created_at, updated_at)
+     cancellation_reason, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('14141414-0000-4000-8000-000000000001', 9001,
@@ -719,7 +753,7 @@ VALUES
      'drill-videm-0001', 'drill-vfp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-15T10:00:00Z', '2026-02-15T10:00:00Z'),
+     '2026-02-15T10:00:00Z', '2026-02-15T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Cancelled valuation keeps the row + reason; never deleted.
     ('14141414-0000-4000-8000-000000000002', 9002,
      '10101010-0000-4000-8000-000000000001', '2026-02-20', 310.00, 'TRY',
@@ -728,14 +762,14 @@ VALUES
      '2026-02-20T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı değerleme',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-20T10:00:00Z', '2026-02-20T15:00:00Z');
+     '2026-02-20T10:00:00Z', '2026-02-20T15:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO investment_incomes
     (id, income_number, investment_id, financial_account_id, amount,
      currency, occurred_at, description, counterparty, reference_no,
      account_movement_id, status, idempotency_key,
      idempotency_fingerprint, reversed_at, reversed_by, reversal_reason,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('16161616-0000-4000-8000-000000000001', 9001,
@@ -746,7 +780,7 @@ VALUES
      'drill-gidem-0001', 'drill-gfp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-01T10:00:00Z', '2026-02-01T10:00:00Z'),
+     '2026-02-01T10:00:00Z', '2026-02-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('16161616-0000-4000-8000-000000000002', 9002,
      '10101010-0000-4000-8000-000000000001',
      'f1f1f1f1-0000-4000-8000-000000000001', 10.00, 'TRY',
@@ -756,13 +790,13 @@ VALUES
      '2026-02-02T14:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı gelir',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-02T10:00:00Z', '2026-02-02T14:00:00Z');
+     '2026-02-02T10:00:00Z', '2026-02-02T14:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO investment_disposals
     (id, disposal_number, investment_id, disposed_at,
      consideration_amount, currency, counterparty_name, reference, note,
      status, idempotency_key, idempotency_fingerprint, created_by,
-     created_at)
+     created_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- Agreed price 350.00 is informational; actual cash received is
@@ -772,17 +806,17 @@ VALUES
      '10101010-0000-4000-8000-000000000001', '2026-04-01',
      350.00, 'TRY', 'Drill Alıcı AŞ', 'SAT-9001', NULL, 'posted',
      'drill-didem-0001', 'drill-dfp-0001',
-     '11111111-0000-4000-8000-0000000000aa', '2026-04-01T10:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-04-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO investment_disposal_proceeds
     (id, disposal_id, financial_account_id, amount, currency,
-     occurred_at, reference, account_movement_id, created_at)
+     occurred_at, reference, account_movement_id, created_at, cooperative_id)
 VALUES
     ('20202020-0000-4000-8000-000000000001',
      '18181818-0000-4000-8000-000000000001',
      'f1f1f1f1-0000-4000-8000-000000000002', 320.00, 'TRY',
      '2026-04-01T10:00:00Z', 'EFT-9001',
-     'f2f2f2f2-0000-4000-8000-000000000015', '2026-04-01T10:00:00Z');
+     'f2f2f2f2-0000-4000-8000-000000000015', '2026-04-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- =====================================================================
 -- STEP-013: Social Aid — restricted fund, donations, aid disbursements.
@@ -797,26 +831,26 @@ VALUES
 INSERT INTO social_aid_funds
     (id, fund_number, name, description, status, cancelled_at,
      cancelled_by, cancellation_reason, idempotency_key,
-     idempotency_fingerprint, created_by, created_at, updated_at)
+     idempotency_fingerprint, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     ('30303030-0000-4000-8000-000000000001', 9001, 'Drill Eğitim Fonu',
      'drill: burs ve eğitim destekleri', 'active', NULL, NULL, NULL,
      'drill-aidem-0001', 'drill-afp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-01T10:00:00Z', '2026-02-01T10:00:00Z'),
+     '2026-02-01T10:00:00Z', '2026-02-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Cancelled fund keeps reason + actor; a fund never disappears.
     ('30303030-0000-4000-8000-000000000002', 9002, 'Drill Gıda Fonu',
      NULL, 'cancelled', '2026-03-01T10:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: program iptal',
      'drill-aidem-0002', 'drill-afp-0002',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-05T10:00:00Z', '2026-03-01T10:00:00Z');
+     '2026-02-05T10:00:00Z', '2026-03-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- Movements first: every donation/disbursement hard-FKs its leg.
 INSERT INTO account_movements
     (id, account_id, direction, amount, source_type, source_id, occurred_at,
-     status, reversed_at, reversed_by, reversal_reason, created_by, created_at)
+     status, reversed_at, reversed_by, reversal_reason, created_by, created_at, cooperative_id)
 VALUES
     -- Donation 9001: +300.00 inflow on cash, posted.
     ('f2f2f2f2-0000-4000-8000-000000000016',
@@ -824,7 +858,7 @@ VALUES
      'social_aid_donation',
      '31313131-0000-4000-8000-000000000001', '2026-02-10T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-10T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-10T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Donation 9002: +40.00 inflow on cash, REVERSED.
     ('f2f2f2f2-0000-4000-8000-000000000017',
      'f1f1f1f1-0000-4000-8000-000000000001', 'inflow', 40.00,
@@ -832,14 +866,14 @@ VALUES
      '31313131-0000-4000-8000-000000000002', '2026-02-11T10:00:00Z',
      'reversed', '2026-02-11T15:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı bağış',
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-11T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-11T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Disbursement 9001: −120.00 outflow on cash, posted.
     ('f2f2f2f2-0000-4000-8000-000000000018',
      'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 120.00,
      'social_aid_disbursement',
      '32323232-0000-4000-8000-000000000001', '2026-02-15T10:00:00Z',
      'active', NULL, NULL, NULL,
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-15T10:00:00Z'),
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-15T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Disbursement 9002: −50.00 outflow on cash, REVERSED.
     ('f2f2f2f2-0000-4000-8000-000000000019',
      'f1f1f1f1-0000-4000-8000-000000000001', 'outflow', 50.00,
@@ -847,14 +881,14 @@ VALUES
      '32323232-0000-4000-8000-000000000002', '2026-02-16T10:00:00Z',
      'reversed', '2026-02-16T15:00:00Z',
      '11111111-0000-4000-8000-0000000000aa', 'drill: hatalı yardım',
-     '11111111-0000-4000-8000-0000000000aa', '2026-02-16T10:00:00Z');
+     '11111111-0000-4000-8000-0000000000aa', '2026-02-16T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO social_aid_donations
     (id, donation_number, fund_id, donor_person_id, donor_display_name,
      financial_account_id, amount, currency, occurred_at, reference, note,
      account_movement_id, status, idempotency_key, idempotency_fingerprint,
      reversed_at, reversed_by, reversal_reason, created_by, created_at,
-     updated_at)
+     updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- Donor = canonical Person (the third-party payer — membership is
@@ -868,7 +902,7 @@ VALUES
      'drill-didem-0001', 'drill-dfp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z'),
+     '2026-02-10T10:00:00Z', '2026-02-10T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Donor = external organization (display name only), REVERSED.
     ('31313131-0000-4000-8000-000000000002', 9002,
      '30303030-0000-4000-8000-000000000001',
@@ -880,14 +914,14 @@ VALUES
      '2026-02-11T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı bağış',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-11T10:00:00Z', '2026-02-11T15:00:00Z');
+     '2026-02-11T10:00:00Z', '2026-02-11T15:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO social_aid_disbursements
     (id, disbursement_number, fund_id, beneficiary_person_id,
      beneficiary_display_name, financial_account_id, amount, currency,
      occurred_at, reason, reference, account_movement_id, status,
      idempotency_key, idempotency_fingerprint, reversed_at, reversed_by,
-     reversal_reason, created_by, created_at, updated_at)
+     reversal_reason, created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- Beneficiary = canonical Person (a shareholder may also be an aid
@@ -901,7 +935,7 @@ VALUES
      'drill-yidem-0001', 'drill-yfp-0001',
      NULL, NULL, NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-15T10:00:00Z', '2026-02-15T10:00:00Z'),
+     '2026-02-15T10:00:00Z', '2026-02-15T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Beneficiary = external family (display name only), REVERSED.
     ('32323232-0000-4000-8000-000000000002', 9002,
      '30303030-0000-4000-8000-000000000001',
@@ -913,7 +947,7 @@ VALUES
      '2026-02-16T15:00:00Z', '11111111-0000-4000-8000-0000000000aa',
      'drill: hatalı yardım',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-16T10:00:00Z', '2026-02-16T15:00:00Z');
+     '2026-02-16T10:00:00Z', '2026-02-16T15:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 -- ---------------------------------------------------------------------
 -- STEP-014: Governance — bodies, temporal memberships, decisions, votes.
@@ -923,7 +957,7 @@ VALUES
 INSERT INTO governance_bodies
     (id, body_number, name, body_type, description, status,
      closed_at, closed_by, idempotency_key, idempotency_fingerprint,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- Active organ.
@@ -932,7 +966,7 @@ VALUES
      'active', NULL, NULL,
      'drill-gbidem-0001', 'drill-gbfp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-05T10:00:00Z', '2026-01-05T10:00:00Z'),
+     '2026-01-05T10:00:00Z', '2026-01-05T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Closed organ keeps close evidence + ALL history.
     ('40404040-0000-4000-8000-000000000002', 9002,
      'Drill Denetim Kurulu', 'Denetim Kurulu', NULL,
@@ -940,12 +974,12 @@ VALUES
      '11111111-0000-4000-8000-0000000000aa',
      'drill-gbidem-0002', 'drill-gbfp-0002',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-05T11:00:00Z', '2026-03-01T10:00:00Z');
+     '2026-01-05T11:00:00Z', '2026-03-01T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO governance_memberships
     (id, body_id, person_id, title, started_at, ended_at, ended_by,
      end_reason, idempotency_key, idempotency_fingerprint,
-     created_by, created_at, updated_at)
+     created_by, created_at, updated_at, cooperative_id)
 VALUES
     -- Active seat on the open board.
     ('41414141-0000-4000-8000-000000000001',
@@ -954,7 +988,7 @@ VALUES
      '2026-01-06T10:00:00Z', NULL, NULL, NULL,
      'drill-gmidem-0001', 'drill-gmfp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-06T10:00:00Z', '2026-01-06T10:00:00Z'),
+     '2026-01-06T10:00:00Z', '2026-01-06T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Seat that was ACTIVE when its vote was cast (2026-02-06) and
     -- ended later — ending a term never rewrites who voted.
     ('41414141-0000-4000-8000-000000000002',
@@ -964,7 +998,7 @@ VALUES
      '11111111-0000-4000-8000-0000000000aa', 'drill: görev süresi doldu',
      'drill-gmidem-0002', 'drill-gmfp-0002',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-06T11:00:00Z', '2026-02-28T10:00:00Z'),
+     '2026-01-06T11:00:00Z', '2026-02-28T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- Historical seat on the closed board.
     ('41414141-0000-4000-8000-000000000003',
      '40404040-0000-4000-8000-000000000002',
@@ -974,7 +1008,7 @@ VALUES
      'drill: kurul kapanışı öncesi',
      'drill-gmidem-0003', 'drill-gmfp-0003',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-06T12:00:00Z', '2026-02-20T10:00:00Z');
+     '2026-01-06T12:00:00Z', '2026-02-20T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO governance_decisions
     (id, decision_number, body_id, title, decision_text, decision_on,
@@ -982,7 +1016,7 @@ INSERT INTO governance_decisions
      finalized_by, eligible_count, approve_count, reject_count,
      abstain_count, cancelled_at, cancelled_by, cancellation_reason,
      idempotency_key, idempotency_fingerprint, created_by, created_at,
-     updated_at)
+     updated_at, cooperative_id)
 OVERRIDING SYSTEM VALUE
 VALUES
     -- APPROVED with the frozen finalization snapshot: electorate 2,
@@ -997,7 +1031,7 @@ VALUES
      NULL, NULL, NULL,
      'drill-gdidem-0001', 'drill-gdfp-0001',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-04T10:00:00Z', '2026-02-05T12:00:00Z'),
+     '2026-02-04T10:00:00Z', '2026-02-05T12:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- CANCELLED draft — cancellation keeps actor + reason, no delete.
     ('42424242-0000-4000-8000-000000000002', 9002,
      '40404040-0000-4000-8000-000000000001',
@@ -1008,7 +1042,7 @@ VALUES
      'drill: gündemden düştü',
      'drill-gdidem-0002', 'drill-gdfp-0002',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-02-08T10:00:00Z', '2026-02-09T10:00:00Z'),
+     '2026-02-08T10:00:00Z', '2026-02-09T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- REJECTED decision on the closed body — history survives close.
     ('42424242-0000-4000-8000-000000000003', 9003,
      '40404040-0000-4000-8000-000000000002',
@@ -1020,11 +1054,11 @@ VALUES
      NULL, NULL, NULL,
      'drill-gdidem-0003', 'drill-gdfp-0003',
      '11111111-0000-4000-8000-0000000000aa',
-     '2026-01-19T10:00:00Z', '2026-01-20T11:00:00Z');
+     '2026-01-19T10:00:00Z', '2026-01-20T11:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 INSERT INTO governance_votes
     (id, decision_id, membership_id, person_id, choice, cast_at, note,
-     recorded_by, idempotency_key, idempotency_fingerprint, created_at)
+     recorded_by, idempotency_key, idempotency_fingerprint, created_at, cooperative_id)
 VALUES
     ('43434343-0000-4000-8000-000000000001',
      '42424242-0000-4000-8000-000000000001',
@@ -1032,7 +1066,7 @@ VALUES
      '22222222-0000-4000-8000-000000000001', 'approve',
      '2026-02-05T10:30:00Z', 'drill: lehte',
      '11111111-0000-4000-8000-0000000000aa',
-     'drill-gvidem-0001', 'drill-gvfp-0001', '2026-02-05T10:30:00Z'),
+     'drill-gvidem-0001', 'drill-gvfp-0001', '2026-02-05T10:30:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     -- membership_id snapshots eligibility: this seat ended AFTER the
     -- vote — restoring must keep the voter historically eligible.
     ('43434343-0000-4000-8000-000000000002',
@@ -1041,13 +1075,13 @@ VALUES
      '22222222-0000-4000-8000-000000000002', 'abstain',
      '2026-02-06T10:00:00Z', NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     'drill-gvidem-0002', 'drill-gvfp-0002', '2026-02-06T10:00:00Z'),
+     'drill-gvidem-0002', 'drill-gvfp-0002', '2026-02-06T10:00:00Z', 'cccccccc-0000-4000-8000-0000000000c1'),
     ('43434343-0000-4000-8000-000000000003',
      '42424242-0000-4000-8000-000000000003',
      '41414141-0000-4000-8000-000000000003',
      '22222222-0000-4000-8000-000000000003', 'reject',
      '2026-01-20T10:30:00Z', NULL,
      '11111111-0000-4000-8000-0000000000aa',
-     'drill-gvidem-0003', 'drill-gvfp-0003', '2026-01-20T10:30:00Z');
+     'drill-gvidem-0003', 'drill-gvfp-0003', '2026-01-20T10:30:00Z', 'cccccccc-0000-4000-8000-0000000000c1');
 
 COMMIT;

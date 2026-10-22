@@ -14,6 +14,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		GOVERNANCE_BODIES_PATH,
@@ -25,6 +26,8 @@
 	let bodyType = $state('');
 	let description = $state('');
 	let busy = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(() => name !== '' || bodyType !== '' || description !== '');
 	let error = $state<MessageKey | null>(null);
 
 	async function submit(): Promise<void> {
@@ -42,6 +45,7 @@
 				csrfToken: auth.csrfToken,
 				body: payload
 			});
+			formGuard.clear();
 			await goto(resolve(`/yonetim/kurullar/${detail.id}`));
 		} catch (e) {
 			error = apiErrorKey(e);

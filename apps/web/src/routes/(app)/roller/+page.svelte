@@ -26,6 +26,7 @@
 	import { ApiError, apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
+	import { live } from '$lib/realtime/realtime.svelte';
 	import { ROLES_PATH, type CreateRoleRequest, type Role } from '@kooperatif/contracts';
 
 	let roles = $state<Role[] | null>(null);
@@ -73,6 +74,11 @@
 
 	$effect(() => {
 		void refresh();
+		// M1-P5 B3: role/permission changes emit `authz` — keep the
+		// list fresh without polling.
+		return live.onInvalidate((domains) => {
+			if (domains === '*' || domains.has('authz')) void refresh();
+		});
 	});
 </script>
 

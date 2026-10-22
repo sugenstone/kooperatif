@@ -32,6 +32,8 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const COMPOSE_FILE = path.join(ROOT, 'docker', 'compose.yaml');
 
 export const ARTIFACT_RE = /^kooperatif_(\d{8})T(\d{6})Z_([0-9a-f]{8})\.dump$/;
+// Unquoted PostgreSQL identifier shape (also rejects empty names).
+export const EXPECTED_DATABASE_RE = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
 export const MANIFEST_VERSION = 1;
 export const DEFAULT_IMAGE = 'postgres:17-alpine';
 export const SUPPORTED_PG_MAJOR = 17;
@@ -58,6 +60,17 @@ export function loadConfig(overrides = {}) {
 	if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
 		throw new BackupError('backup database URL must be a postgres:// URL', 'config');
 	}
+	// M1-P2 B1 opt-in source-identity guard: unset preserves previous
+	// behavior; a present-but-malformed name is rejected outright.
+	const expectedDatabase = overrides.expectedDatabase ?? env.KOOPERATIF_EXPECTED_DATABASE;
+	if (expectedDatabase !== undefined && expectedDatabase !== null) {
+		if (!EXPECTED_DATABASE_RE.test(expectedDatabase)) {
+			throw new BackupError(
+				'KOOPERATIF_EXPECTED_DATABASE must be a valid PostgreSQL identifier',
+				'config'
+			);
+		}
+	}
 	return {
 		backupDir: path.resolve(
 			overrides.backupDir || env.KOOPERATIF_BACKUP_DIR || path.join(ROOT, 'backups')
@@ -71,6 +84,7 @@ export function loadConfig(overrides = {}) {
 		// ADR-013 leaves yearly/archive retention to approved policy;
 		// 0 = keep yearly anchors indefinitely (conservative default).
 		keepYearlyYears: Number(env.KOOPERATIF_BACKUP_KEEP_YEARLY_YEARS || 0),
+		expectedDatabase: expectedDatabase ?? null,
 		conn: {
 			host: url.hostname,
 			port: url.port || '5432',
@@ -91,11 +105,17 @@ export function safeConnLabel(conn) {
 // ------------------------------------------------------------------
 
 export function run(cmd, args, { input, capture = false, env = {} } = {}) {
+	// stdio 'inherit' would silently discard `input`; pipe stdin whenever
+	// content is streamed in (stdout still goes live unless captured).
+	const stdio =
+		capture || input !== undefined
+			? ['pipe', capture ? 'pipe' : 'inherit', capture ? 'pipe' : 'inherit']
+			: 'inherit';
 	const result = spawnSync(cmd, args, {
 		input,
 		env: { ...process.env, ...env },
 		encoding: capture ? 'utf8' : undefined,
-		stdio: capture ? ['pipe', 'pipe', 'pipe'] : 'inherit',
+		stdio,
 		shell: false
 	});
 	if (result.error) throw new BackupError(`${cmd}: ${result.error.message}`, 'spawn');
@@ -155,6 +175,25 @@ export function pgTool(cfg, tool, conn, args, { capture = false } = {}) {
 		...args
 	]);
 	return run('docker', dockerArgs, { capture, env });
+}
+
+/// Fail-closed source-identity check for pg_dump (M1-P2 B1).
+///
+/// `SELECT current_database()` runs through the SAME connection config
+/// the dump itself will use — never a second, separately configured
+/// connection — so a URL that silently points at another database is
+/// refused here instead of producing a backup of the wrong source.
+/// Opt-in: `expectedDatabase` unset is a no-op and never queries.
+export function verifyExpectedDatabase(cfg, query = psqlQuery) {
+	const expected = cfg.expectedDatabase;
+	if (!expected) return;
+	const actual = query(cfg, cfg.conn, cfg.conn.database, 'SELECT current_database()');
+	if (actual !== expected) {
+		throw new BackupError(
+			`database identity mismatch: connected to '${actual}', expected '${expected}'`,
+			'source_database'
+		);
+	}
 }
 
 /// psql query against a database; returns trimmed stdout.

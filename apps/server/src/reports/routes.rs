@@ -32,6 +32,10 @@
 //! write to any domain table. Money fields are decimal STRINGS
 //! (ADR-004); NULL stays NULL end-to-end (an undetermined entitlement is
 //! never rendered as 0.00).
+//!
+//! M1-P1-c3b: authorization resolves in the verified bootstrap scope
+//! (`BusinessAuth` + `require_business`) — a role owned by another
+//! cooperative can never grant report access.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -44,12 +48,12 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::auth::authz;
-use crate::auth::extractor::CurrentAuth;
 use crate::financial_accounts::model::MovementSource;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::payments::model::canonical_amount as canonical;
+use crate::tenant::extractor::BusinessAuth;
 
 use super::repo as report_repo;
 
@@ -159,52 +163,68 @@ struct OverviewDto {
     votes_total: i64,
 }
 
-async fn overview(State(state): State<AppState>, auth: CurrentAuth) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+async fn overview(State(state): State<AppState>, ctx: BusinessAuth) -> Result<Response, ApiError> {
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let row = report_repo::overview(pool)
-        .await
-        .map_err(db_err("overview failed"))?;
-    let operational_net = row.operational_income_total - row.operational_expense_total;
-    Ok((
-        StatusCode::OK,
-        Json(OverviewDto {
-            currency: "TRY".to_string(),
-            financial_accounts_balance: canonical(row.financial_accounts_balance),
-            financial_accounts_count: row.financial_accounts_count,
-            outstanding_assessment_debt: canonical(row.outstanding_assessment_debt),
-            assessments_total: canonical(row.assessments_total),
-            available_shareholder_credit: canonical(row.available_shareholder_credit),
-            operational_income_total: canonical(row.operational_income_total),
-            operational_expense_total: canonical(row.operational_expense_total),
-            operational_net: canonical(operational_net),
-            posted_payments_total: canonical(row.posted_payments_total),
-            posted_payments_count: row.posted_payments_count,
-            outstanding_return_entitlement_determined: canonical(
-                row.outstanding_return_entitlement_determined,
-            ),
-            undetermined_entitlement_count: row.undetermined_entitlement_count,
-            return_settled_total: canonical(row.return_settled_total),
-            investment_total_funded: canonical(row.investment_total_funded),
-            investment_latest_valuation_total: canonical_opt(row.investment_latest_valuation_total),
-            investment_income_total: canonical(row.investment_income_total),
-            investment_active_count: row.investment_active_count,
-            social_aid_restricted_available: canonical(row.social_aid_restricted_available),
-            social_aid_donations_total: canonical(row.social_aid_donations_total),
-            social_aid_disbursements_total: canonical(row.social_aid_disbursements_total),
-            active_shareholder_count: row.active_shareholder_count,
-            active_share_count: row.active_share_count,
-            active_body_count: row.active_body_count,
-            active_membership_count: row.active_membership_count,
-            decisions_draft: row.decisions_draft,
-            decisions_open: row.decisions_open,
-            decisions_approved: row.decisions_approved,
-            decisions_rejected: row.decisions_rejected,
-            decisions_cancelled: row.decisions_cancelled,
-            votes_total: row.votes_total,
-        }),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx_repeatable(pool).await?;
+    let __result = async {
+        let row = report_repo::overview(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(db_err("overview failed"))?;
+        let operational_net = row.operational_income_total - row.operational_expense_total;
+        Ok((
+            StatusCode::OK,
+            Json(OverviewDto {
+                currency: "TRY".to_string(),
+                financial_accounts_balance: canonical(row.financial_accounts_balance),
+                financial_accounts_count: row.financial_accounts_count,
+                outstanding_assessment_debt: canonical(row.outstanding_assessment_debt),
+                assessments_total: canonical(row.assessments_total),
+                available_shareholder_credit: canonical(row.available_shareholder_credit),
+                operational_income_total: canonical(row.operational_income_total),
+                operational_expense_total: canonical(row.operational_expense_total),
+                operational_net: canonical(operational_net),
+                posted_payments_total: canonical(row.posted_payments_total),
+                posted_payments_count: row.posted_payments_count,
+                outstanding_return_entitlement_determined: canonical(
+                    row.outstanding_return_entitlement_determined,
+                ),
+                undetermined_entitlement_count: row.undetermined_entitlement_count,
+                return_settled_total: canonical(row.return_settled_total),
+                investment_total_funded: canonical(row.investment_total_funded),
+                investment_latest_valuation_total: canonical_opt(
+                    row.investment_latest_valuation_total,
+                ),
+                investment_income_total: canonical(row.investment_income_total),
+                investment_active_count: row.investment_active_count,
+                social_aid_restricted_available: canonical(row.social_aid_restricted_available),
+                social_aid_donations_total: canonical(row.social_aid_donations_total),
+                social_aid_disbursements_total: canonical(row.social_aid_disbursements_total),
+                active_shareholder_count: row.active_shareholder_count,
+                active_share_count: row.active_share_count,
+                active_body_count: row.active_body_count,
+                active_membership_count: row.active_membership_count,
+                decisions_draft: row.decisions_draft,
+                decisions_open: row.decisions_open,
+                decisions_approved: row.decisions_approved,
+                decisions_rejected: row.decisions_rejected,
+                decisions_cancelled: row.decisions_cancelled,
+                votes_total: row.votes_total,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -235,46 +255,66 @@ struct AccountReportDto {
 
 async fn accounts(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AccountsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let status = query
-        .status
-        .as_deref()
-        .filter(|s| matches!(*s, "active" | "inactive"))
-        .map(str::to_string);
-    if query.status.is_some() && status.is_none() {
-        return Err(ApiError::ValidationFailed);
-    }
-    let (page, page_size) = page_of(&query.list)?;
-    let rows = report_repo::accounts_report(pool, status.as_deref(), page, page_size)
-        .await
-        .map_err(db_err("accounts report failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows
-        .into_iter()
-        .map(|r| AccountReportDto {
-            id: r.id,
-            name: r.name,
-            account_type: r.account_type,
-            status: r.status,
-            currency: r.currency,
-            balance: canonical(r.balance),
-            restricted_available: canonical(r.restricted_available),
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let status = query
+            .status
+            .as_deref()
+            .filter(|s| matches!(*s, "active" | "inactive"))
+            .map(str::to_string);
+        if query.status.is_some() && status.is_none() {
+            return Err(ApiError::ValidationFailed);
+        }
+        let (page, page_size) = page_of(&query.list)?;
+        let rows = report_repo::accounts_report(
+            &mut tx,
+            ctx.cooperative_id(),
+            status.as_deref(),
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(db_err("accounts report failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows
+            .into_iter()
+            .map(|r| AccountReportDto {
+                id: r.id,
+                name: r.name,
+                account_type: r.account_type,
+                status: r.status,
+                currency: r.currency,
+                balance: canonical(r.balance),
+                restricted_available: canonical(r.restricted_available),
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items,
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -337,107 +377,117 @@ struct MovementSummaryDto {
 
 async fn movements(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<MovementsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let source_type = query
-        .source_type
-        .as_deref()
-        .map(|s| {
-            MovementSource::parse(s)
-                .map(|v| v.as_str().to_string())
-                .ok_or(ApiError::ValidationFailed)
-        })
-        .transpose()?;
-    let direction = query
-        .direction
-        .as_deref()
-        .filter(|d| matches!(*d, "inflow" | "outflow"));
-    if query.direction.is_some() && direction.is_none() {
-        return Err(ApiError::ValidationFailed);
-    }
-    let status = query
-        .status
-        .as_deref()
-        .filter(|s| matches!(*s, "active" | "reversed"));
-    if query.status.is_some() && status.is_none() {
-        return Err(ApiError::ValidationFailed);
-    }
-    let filter = report_repo::MovementFilter {
-        account_id: query.account_id,
-        source_type,
-        direction: direction.map(str::to_string),
-        status: status.map(str::to_string),
-        date_from: parse_date(query.date_from.as_deref())?,
-        date_to: parse_date(query.date_to.as_deref())?,
-    };
-    // Totals describe CURRENT economic flow: with no explicit status
-    // filter the summary covers ACTIVE movements only (reversed rows
-    // remain traceable in the list but never inflate the totals,
-    // docs/15). An explicit `status=reversed` filter instead reports
-    // the reversed subset it lists.
-    let summary_filter = report_repo::MovementFilter {
-        account_id: filter.account_id,
-        source_type: filter.source_type.clone(),
-        direction: filter.direction.clone(),
-        status: Some(
-            filter
-                .status
-                .clone()
-                .unwrap_or_else(|| "active".to_string()),
-        ),
-        date_from: filter.date_from,
-        date_to: filter.date_to,
-    };
-    let (page, page_size) = page_of(&query.list)?;
-    let (rows, summary) = tokio::try_join!(
-        async {
-            report_repo::movements_report(pool, &filter, page, page_size)
-                .await
-                .map_err(db_err("movements report failed"))
-        },
-        async {
-            report_repo::movements_summary(pool, &summary_filter)
-                .await
-                .map_err(db_err("movements summary failed"))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let source_type = query
+            .source_type
+            .as_deref()
+            .map(|s| {
+                MovementSource::parse(s)
+                    .map(|v| v.as_str().to_string())
+                    .ok_or(ApiError::ValidationFailed)
+            })
+            .transpose()?;
+        let direction = query
+            .direction
+            .as_deref()
+            .filter(|d| matches!(*d, "inflow" | "outflow"));
+        if query.direction.is_some() && direction.is_none() {
+            return Err(ApiError::ValidationFailed);
         }
-    )?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows
-        .into_iter()
-        .map(|r| MovementDto {
-            id: r.id,
-            account_id: r.account_id,
-            account_name: r.account_name,
-            direction: r.direction,
-            amount: canonical(r.amount),
-            source_type: r.source_type,
-            source_id: r.source_id,
-            source_number: r.source_number,
-            occurred_at: r.occurred_at,
-            status: r.status,
-            reversed_at: r.reversed_at,
-            reversal_reason: r.reversal_reason,
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(MovementsResponse {
-            items,
-            page,
-            page_size,
-            total_count,
-            summary: MovementSummaryDto {
-                external_inflow: canonical(summary.external_inflow),
-                external_outflow: canonical(summary.external_outflow),
-                internal_transfer_volume: canonical(summary.internal_transfer_volume),
-                movement_count: summary.movement_count,
-            },
-        }),
-    )
-        .into_response())
+        let status = query
+            .status
+            .as_deref()
+            .filter(|s| matches!(*s, "active" | "reversed"));
+        if query.status.is_some() && status.is_none() {
+            return Err(ApiError::ValidationFailed);
+        }
+        let filter = report_repo::MovementFilter {
+            account_id: query.account_id,
+            source_type,
+            direction: direction.map(str::to_string),
+            status: status.map(str::to_string),
+            date_from: parse_date(query.date_from.as_deref())?,
+            date_to: parse_date(query.date_to.as_deref())?,
+        };
+        // Totals describe CURRENT economic flow: with no explicit status
+        // filter the summary covers ACTIVE movements only (reversed rows
+        // remain traceable in the list but never inflate the totals,
+        // docs/15). An explicit `status=reversed` filter instead reports
+        // the reversed subset it lists.
+        let summary_filter = report_repo::MovementFilter {
+            account_id: filter.account_id,
+            source_type: filter.source_type.clone(),
+            direction: filter.direction.clone(),
+            status: Some(
+                filter
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "active".to_string()),
+            ),
+            date_from: filter.date_from,
+            date_to: filter.date_to,
+        };
+        let (page, page_size) = page_of(&query.list)?;
+        let rows =
+            report_repo::movements_report(&mut tx, ctx.cooperative_id(), &filter, page, page_size)
+                .await
+                .map_err(db_err("movements report failed"))?;
+        let summary =
+            report_repo::movements_summary(&mut tx, ctx.cooperative_id(), &summary_filter)
+                .await
+                .map_err(db_err("movements summary failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows
+            .into_iter()
+            .map(|r| MovementDto {
+                id: r.id,
+                account_id: r.account_id,
+                account_name: r.account_name,
+                direction: r.direction,
+                amount: canonical(r.amount),
+                source_type: r.source_type,
+                source_id: r.source_id,
+                source_number: r.source_number,
+                occurred_at: r.occurred_at,
+                status: r.status,
+                reversed_at: r.reversed_at,
+                reversal_reason: r.reversal_reason,
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(MovementsResponse {
+                items,
+                page,
+                page_size,
+                total_count,
+                summary: MovementSummaryDto {
+                    external_inflow: canonical(summary.external_inflow),
+                    external_outflow: canonical(summary.external_outflow),
+                    internal_transfer_volume: canonical(summary.internal_transfer_volume),
+                    movement_count: summary.movement_count,
+                },
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -527,55 +577,89 @@ fn assessment_dto(r: report_repo::AssessmentReportRow) -> AssessmentDto {
 
 async fn assessments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AssessmentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let filter = assessment_filter(&query)?;
-    let (page, page_size) = page_of(&query.list)?;
-    let rows = report_repo::assessments_report(pool, &filter, page, page_size)
-        .await
-        .map_err(db_err("assessments report failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows.into_iter().map(assessment_dto).collect();
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let filter = assessment_filter(&query)?;
+        let (page, page_size) = page_of(&query.list)?;
+        let rows = report_repo::assessments_report(
+            &mut tx,
+            ctx.cooperative_id(),
+            &filter,
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(db_err("assessments report failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows.into_iter().map(assessment_dto).collect();
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items,
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 async fn assessments_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<AssessmentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let filter = assessment_filter(&query)?;
-    let s = report_repo::assessments_summary(pool, &filter)
-        .await
-        .map_err(db_err("assessments summary failed"))?;
-    Ok((
-        StatusCode::OK,
-        Json(AssessmentSummaryDto {
-            assessment_count: s.assessment_count,
-            total_assessed: canonical(s.total_assessed),
-            total_payment_allocated: canonical(s.total_payment_allocated),
-            total_credit_applied: canonical(s.total_credit_applied),
-            total_outstanding: canonical(s.total_outstanding),
-            fully_paid_count: s.fully_paid_count,
-            partially_paid_count: s.partially_paid_count,
-            unpaid_count: s.unpaid_count,
-        }),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let filter = assessment_filter(&query)?;
+        let s = report_repo::assessments_summary(&mut tx, ctx.cooperative_id(), &filter)
+            .await
+            .map_err(db_err("assessments summary failed"))?;
+        Ok((
+            StatusCode::OK,
+            Json(AssessmentSummaryDto {
+                assessment_count: s.assessment_count,
+                total_assessed: canonical(s.total_assessed),
+                total_payment_allocated: canonical(s.total_payment_allocated),
+                total_credit_applied: canonical(s.total_credit_applied),
+                total_outstanding: canonical(s.total_outstanding),
+                fully_paid_count: s.fully_paid_count,
+                partially_paid_count: s.partially_paid_count,
+                unpaid_count: s.unpaid_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -605,45 +689,59 @@ struct PeriodReportDto {
 
 async fn periods(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = report_repo::periods_report(pool, page, page_size)
-        .await
-        .map_err(db_err("periods report failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows
-        .into_iter()
-        .map(|r| PeriodReportDto {
-            id: r.id,
-            period_number: r.period_number,
-            name: r.name,
-            status: r.status,
-            due_date: date_to_string(r.due_date),
-            assessment_count: r.assessment_count,
-            total_assessed: canonical(r.total_assessed),
-            payment_allocated: canonical(r.payment_allocated),
-            credit_applied: canonical(r.credit_applied),
-            total_satisfied: canonical(r.total_satisfied),
-            outstanding: canonical(r.outstanding),
-            fully_paid_count: r.fully_paid_count,
-            partially_paid_count: r.partially_paid_count,
-            unpaid_count: r.unpaid_count,
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items,
-            page,
-            page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = report_repo::periods_report(&mut tx, ctx.cooperative_id(), page, page_size)
+            .await
+            .map_err(db_err("periods report failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows
+            .into_iter()
+            .map(|r| PeriodReportDto {
+                id: r.id,
+                period_number: r.period_number,
+                name: r.name,
+                status: r.status,
+                due_date: date_to_string(r.due_date),
+                assessment_count: r.assessment_count,
+                total_assessed: canonical(r.total_assessed),
+                payment_allocated: canonical(r.payment_allocated),
+                credit_applied: canonical(r.credit_applied),
+                total_satisfied: canonical(r.total_satisfied),
+                outstanding: canonical(r.outstanding),
+                fully_paid_count: r.fully_paid_count,
+                partially_paid_count: r.partially_paid_count,
+                unpaid_count: r.unpaid_count,
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items,
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -671,43 +769,63 @@ struct ShareholderReportDto {
 
 async fn shareholders(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = report_repo::shareholders_report(pool, query.search.as_deref(), page, page_size)
-        .await
-        .map_err(db_err("shareholders report failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows
-        .into_iter()
-        .map(|r| ShareholderReportDto {
-            shareholder_id: r.shareholder_id,
-            shareholder_name: r.shareholder_name,
-            shareholder_status: r.shareholder_status,
-            family_sequence: r.family_sequence,
-            active_share_count: r.active_share_count,
-            total_assessed: canonical(r.total_assessed),
-            payment_allocated: canonical(r.payment_allocated),
-            credit_applied: canonical(r.credit_applied),
-            remaining_debt: canonical(r.remaining_debt),
-            credit_available: canonical(r.credit_available),
-            return_entitlement_determined: canonical(r.return_entitlement_determined),
-            undetermined_entitlement_count: r.undetermined_entitlement_count,
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = report_repo::shareholders_report(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(db_err("shareholders report failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows
+            .into_iter()
+            .map(|r| ShareholderReportDto {
+                shareholder_id: r.shareholder_id,
+                shareholder_name: r.shareholder_name,
+                shareholder_status: r.shareholder_status,
+                family_sequence: r.family_sequence,
+                active_share_count: r.active_share_count,
+                total_assessed: canonical(r.total_assessed),
+                payment_allocated: canonical(r.payment_allocated),
+                credit_applied: canonical(r.credit_applied),
+                remaining_debt: canonical(r.remaining_debt),
+                credit_available: canonical(r.credit_available),
+                return_entitlement_determined: canonical(r.return_entitlement_determined),
+                undetermined_entitlement_count: r.undetermined_entitlement_count,
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items,
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -727,37 +845,57 @@ struct FamilyReportDto {
 
 async fn families(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = report_repo::families_report(pool, query.search.as_deref(), page, page_size)
-        .await
-        .map_err(db_err("families report failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows
-        .into_iter()
-        .map(|r| FamilyReportDto {
-            family_id: r.family_id,
-            family_sequence: r.family_sequence,
-            member_count: r.member_count,
-            member_total_assessed: canonical(r.member_total_assessed),
-            member_remaining_debt: canonical(r.member_remaining_debt),
-            member_credit_available: canonical(r.member_credit_available),
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = report_repo::families_report(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
             page,
             page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        )
+        .await
+        .map_err(db_err("families report failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows
+            .into_iter()
+            .map(|r| FamilyReportDto {
+                family_id: r.family_id,
+                family_sequence: r.family_sequence,
+                member_count: r.member_count,
+                member_total_assessed: canonical(r.member_total_assessed),
+                member_remaining_debt: canonical(r.member_remaining_debt),
+                member_credit_available: canonical(r.member_credit_available),
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items,
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -835,84 +973,107 @@ fn payment_filter(query: &PaymentsQuery) -> Result<report_repo::PaymentFilter, A
 
 async fn payments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PaymentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let filter = payment_filter(&query)?;
-    let (page, page_size) = page_of(&query.list)?;
-    let (rows, summary) = tokio::try_join!(
-        async {
-            report_repo::payments_report(pool, &filter, page, page_size)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let filter = payment_filter(&query)?;
+        let (page, page_size) = page_of(&query.list)?;
+        let rows =
+            report_repo::payments_report(&mut tx, ctx.cooperative_id(), &filter, page, page_size)
                 .await
-                .map_err(db_err("payments report failed"))
-        },
-        async {
-            report_repo::payments_summary(pool, &filter)
-                .await
-                .map_err(db_err("payments summary failed"))
+                .map_err(db_err("payments report failed"))?;
+        let summary = report_repo::payments_summary(&mut tx, ctx.cooperative_id(), &filter)
+            .await
+            .map_err(db_err("payments summary failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items: Vec<_> = rows
+            .into_iter()
+            .map(|r| PaymentReportDto {
+                id: r.id,
+                payment_number: r.payment_number,
+                payer_name: r.payer_name,
+                method: r.method,
+                amount: canonical(r.amount),
+                allocated_amount: canonical(r.allocated_amount),
+                credited_amount: canonical(r.credited_amount),
+                unassigned_amount: canonical(r.unassigned_amount),
+                debtor_shareholder_names: r.debtor_shareholder_names,
+                received_at: r.received_at,
+                status: r.status,
+                reversed_at: r.reversed_at,
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "items": items,
+                "page": page,
+                "pageSize": page_size,
+                "totalCount": total_count,
+                "summary": PaymentSummaryDto {
+                    payment_count: summary.payment_count,
+                    posted_amount: canonical(summary.posted_amount),
+                    allocated_amount: canonical(summary.allocated_amount),
+                    credited_amount: canonical(summary.credited_amount),
+                    unassigned_amount: canonical(summary.unassigned_amount),
+                }
+            })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
         }
-    )?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items: Vec<_> = rows
-        .into_iter()
-        .map(|r| PaymentReportDto {
-            id: r.id,
-            payment_number: r.payment_number,
-            payer_name: r.payer_name,
-            method: r.method,
-            amount: canonical(r.amount),
-            allocated_amount: canonical(r.allocated_amount),
-            credited_amount: canonical(r.credited_amount),
-            unassigned_amount: canonical(r.unassigned_amount),
-            debtor_shareholder_names: r.debtor_shareholder_names,
-            received_at: r.received_at,
-            status: r.status,
-            reversed_at: r.reversed_at,
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "items": items,
-            "page": page,
-            "pageSize": page_size,
-            "totalCount": total_count,
-            "summary": PaymentSummaryDto {
-                payment_count: summary.payment_count,
-                posted_amount: canonical(summary.posted_amount),
-                allocated_amount: canonical(summary.allocated_amount),
-                credited_amount: canonical(summary.credited_amount),
-                unassigned_amount: canonical(summary.unassigned_amount),
-            }
-        })),
-    )
-        .into_response())
+        Err(e) => Err(e),
+    }
 }
 
 async fn payments_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PaymentsQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let filter = payment_filter(&query)?;
-    let s = report_repo::payments_summary(pool, &filter)
-        .await
-        .map_err(db_err("payments summary failed"))?;
-    Ok((
-        StatusCode::OK,
-        Json(PaymentSummaryDto {
-            payment_count: s.payment_count,
-            posted_amount: canonical(s.posted_amount),
-            allocated_amount: canonical(s.allocated_amount),
-            credited_amount: canonical(s.credited_amount),
-            unassigned_amount: canonical(s.unassigned_amount),
-        }),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let filter = payment_filter(&query)?;
+        let s = report_repo::payments_summary(&mut tx, ctx.cooperative_id(), &filter)
+            .await
+            .map_err(db_err("payments summary failed"))?;
+        Ok((
+            StatusCode::OK,
+            Json(PaymentSummaryDto {
+                payment_count: s.payment_count,
+                posted_amount: canonical(s.posted_amount),
+                allocated_amount: canonical(s.allocated_amount),
+                credited_amount: canonical(s.credited_amount),
+                unassigned_amount: canonical(s.unassigned_amount),
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -946,56 +1107,64 @@ struct CreditSummaryDto {
 
 async fn credits(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let (rows, summary) = tokio::try_join!(
-        async {
-            report_repo::credits_report(pool, page, page_size)
-                .await
-                .map_err(db_err("credits report failed"))
-        },
-        async {
-            report_repo::credits_summary(pool)
-                .await
-                .map_err(db_err("credits summary failed"))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = report_repo::credits_report(&mut tx, ctx.cooperative_id(), page, page_size)
+            .await
+            .map_err(db_err("credits report failed"))?;
+        let summary = report_repo::credits_summary(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(db_err("credits summary failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items: Vec<_> = rows
+            .into_iter()
+            .map(|r| CreditReportDto {
+                id: r.id,
+                credit_number: r.credit_number,
+                shareholder_id: r.shareholder_id,
+                shareholder_name: r.shareholder_name,
+                source_payment_number: r.source_payment_number,
+                amount: canonical(r.amount),
+                applied_amount: canonical(r.applied_amount),
+                available_amount: canonical(r.available_amount),
+                status: r.status,
+                created_at: r.created_at,
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "items": items,
+                "page": page,
+                "pageSize": page_size,
+                "totalCount": total_count,
+                "summary": CreditSummaryDto {
+                    credit_count: summary.credit_count,
+                    total_originated: canonical(summary.total_originated),
+                    total_applied: canonical(summary.total_applied),
+                    total_available: canonical(summary.total_available),
+                }
+            })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
         }
-    )?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items: Vec<_> = rows
-        .into_iter()
-        .map(|r| CreditReportDto {
-            id: r.id,
-            credit_number: r.credit_number,
-            shareholder_id: r.shareholder_id,
-            shareholder_name: r.shareholder_name,
-            source_payment_number: r.source_payment_number,
-            amount: canonical(r.amount),
-            applied_amount: canonical(r.applied_amount),
-            available_amount: canonical(r.available_amount),
-            status: r.status,
-            created_at: r.created_at,
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "items": items,
-            "page": page,
-            "pageSize": page_size,
-            "totalCount": total_count,
-            "summary": CreditSummaryDto {
-                credit_count: summary.credit_count,
-                total_originated: canonical(summary.total_originated),
-                total_applied: canonical(summary.total_applied),
-                total_available: canonical(summary.total_available),
-            }
-        })),
-    )
-        .into_response())
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1033,59 +1202,67 @@ struct EntitlementSummaryDto {
 
 async fn share_returns(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let (rows, summary) = tokio::try_join!(
-        async {
-            report_repo::entitlements_report(pool, page, page_size)
-                .await
-                .map_err(db_err("entitlements report failed"))
-        },
-        async {
-            report_repo::entitlements_summary(pool)
-                .await
-                .map_err(db_err("entitlements summary failed"))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = report_repo::entitlements_report(&mut tx, ctx.cooperative_id(), page, page_size)
+            .await
+            .map_err(db_err("entitlements report failed"))?;
+        let summary = report_repo::entitlements_summary(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(db_err("entitlements summary failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items: Vec<_> = rows
+            .into_iter()
+            .map(|r| EntitlementDto {
+                id: r.id,
+                entitlement_number: r.entitlement_number,
+                return_id: r.return_id,
+                return_number: r.return_number,
+                share_number: r.share_number,
+                beneficiary_name: r.beneficiary_name,
+                entitlement_type: r.entitlement_type,
+                amount: canonical_opt(r.amount),
+                settled_amount: canonical(r.settled_amount),
+                remaining_amount: canonical_opt(r.remaining_amount),
+                due_date: date_opt_to_string(r.due_date),
+                due_state: r.due_state,
+                status: r.status,
+                recognized_at: r.recognized_at,
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "items": items,
+                "page": page,
+                "pageSize": page_size,
+                "totalCount": total_count,
+                "summary": EntitlementSummaryDto {
+                    determined_outstanding: canonical(summary.determined_outstanding),
+                    undetermined_count: summary.undetermined_count,
+                    settled_total: canonical(summary.settled_total),
+                }
+            })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
         }
-    )?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items: Vec<_> = rows
-        .into_iter()
-        .map(|r| EntitlementDto {
-            id: r.id,
-            entitlement_number: r.entitlement_number,
-            return_id: r.return_id,
-            return_number: r.return_number,
-            share_number: r.share_number,
-            beneficiary_name: r.beneficiary_name,
-            entitlement_type: r.entitlement_type,
-            amount: canonical_opt(r.amount),
-            settled_amount: canonical(r.settled_amount),
-            remaining_amount: canonical_opt(r.remaining_amount),
-            due_date: date_opt_to_string(r.due_date),
-            due_state: r.due_state,
-            status: r.status,
-            recognized_at: r.recognized_at,
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "items": items,
-            "page": page,
-            "pageSize": page_size,
-            "totalCount": total_count,
-            "summary": EntitlementSummaryDto {
-                determined_outstanding: canonical(summary.determined_outstanding),
-                undetermined_count: summary.undetermined_count,
-                settled_total: canonical(summary.settled_total),
-            }
-        })),
-    )
-        .into_response())
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1115,42 +1292,56 @@ struct InvestmentReportDto {
 
 async fn investments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = report_repo::investments_report(pool, page, page_size)
-        .await
-        .map_err(db_err("investments report failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    let items = rows
-        .into_iter()
-        .map(|r| InvestmentReportDto {
-            id: r.id,
-            investment_number: r.investment_number,
-            name: r.name,
-            investment_type: r.investment_type,
-            status: r.status,
-            total_funded: canonical(r.total_funded),
-            latest_valuation: canonical_opt(r.latest_valuation),
-            latest_valuation_date: date_opt_to_string(r.latest_valuation_date),
-            income_total: canonical(r.income_total),
-            disposal_consideration: canonical_opt(r.disposal_consideration),
-            disposal_proceeds_received: canonical_opt(r.disposal_proceeds_received),
-        })
-        .collect();
-    Ok((
-        StatusCode::OK,
-        Json(PaginatedDto {
-            items,
-            page,
-            page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = report_repo::investments_report(&mut tx, ctx.cooperative_id(), page, page_size)
+            .await
+            .map_err(db_err("investments report failed"))?;
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        let items = rows
+            .into_iter()
+            .map(|r| InvestmentReportDto {
+                id: r.id,
+                investment_number: r.investment_number,
+                name: r.name,
+                investment_type: r.investment_type,
+                status: r.status,
+                total_funded: canonical(r.total_funded),
+                latest_valuation: canonical_opt(r.latest_valuation),
+                latest_valuation_date: date_opt_to_string(r.latest_valuation_date),
+                income_total: canonical(r.income_total),
+                disposal_consideration: canonical_opt(r.disposal_consideration),
+                disposal_proceeds_received: canonical_opt(r.disposal_proceeds_received),
+            })
+            .collect();
+        Ok((
+            StatusCode::OK,
+            Json(PaginatedDto {
+                items,
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1198,60 +1389,68 @@ struct SocialAidResponse {
 
 async fn social_aid(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let (pairs, funds) = tokio::try_join!(
-        async {
-            report_repo::social_aid_report(pool, page, page_size)
-                .await
-                .map_err(db_err("social aid report failed"))
-        },
-        async {
-            report_repo::social_aid_fund_summary(pool)
-                .await
-                .map_err(db_err("social aid summary failed"))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let pairs = report_repo::social_aid_report(&mut tx, ctx.cooperative_id(), page, page_size)
+            .await
+            .map_err(db_err("social aid report failed"))?;
+        let funds = report_repo::social_aid_fund_summary(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(db_err("social aid summary failed"))?;
+        let total_count = pairs.first().map(|r| r.total_count).unwrap_or(0);
+        Ok((
+            StatusCode::OK,
+            Json(SocialAidResponse {
+                funds: funds
+                    .into_iter()
+                    .map(|r| SocialAidFundSummaryDto {
+                        fund_id: r.fund_id,
+                        fund_number: r.fund_number,
+                        fund_name: r.fund_name,
+                        fund_status: r.fund_status,
+                        donations_posted: canonical(r.donations_posted),
+                        disbursements_posted: canonical(r.disbursements_posted),
+                        restricted_available: canonical(r.restricted_available),
+                    })
+                    .collect(),
+                pairs: pairs
+                    .into_iter()
+                    .map(|r| SocialAidPairDto {
+                        fund_id: r.fund_id,
+                        fund_number: r.fund_number,
+                        fund_name: r.fund_name,
+                        fund_status: r.fund_status,
+                        account_id: r.account_id,
+                        account_name: r.account_name,
+                        donations_posted: canonical(r.donations_posted),
+                        disbursements_posted: canonical(r.disbursements_posted),
+                        restricted_available: canonical(r.restricted_available),
+                    })
+                    .collect(),
+                page,
+                page_size,
+                total_count,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
         }
-    )?;
-    let total_count = pairs.first().map(|r| r.total_count).unwrap_or(0);
-    Ok((
-        StatusCode::OK,
-        Json(SocialAidResponse {
-            funds: funds
-                .into_iter()
-                .map(|r| SocialAidFundSummaryDto {
-                    fund_id: r.fund_id,
-                    fund_number: r.fund_number,
-                    fund_name: r.fund_name,
-                    fund_status: r.fund_status,
-                    donations_posted: canonical(r.donations_posted),
-                    disbursements_posted: canonical(r.disbursements_posted),
-                    restricted_available: canonical(r.restricted_available),
-                })
-                .collect(),
-            pairs: pairs
-                .into_iter()
-                .map(|r| SocialAidPairDto {
-                    fund_id: r.fund_id,
-                    fund_number: r.fund_number,
-                    fund_name: r.fund_name,
-                    fund_status: r.fund_status,
-                    account_id: r.account_id,
-                    account_name: r.account_name,
-                    donations_posted: canonical(r.donations_posted),
-                    disbursements_posted: canonical(r.disbursements_posted),
-                    restricted_available: canonical(r.restricted_available),
-                })
-                .collect(),
-            page,
-            page_size,
-            total_count,
-        }),
-    )
-        .into_response())
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1280,46 +1479,60 @@ struct GovernanceDecisionDto {
 
 async fn governance(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let overview = report_repo::overview(pool)
-        .await
-        .map_err(db_err("governance report failed"))?;
-    let recent = report_repo::governance_recent_decisions(pool)
-        .await
-        .map_err(db_err("governance decisions failed"))?;
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "activeBodyCount": overview.active_body_count,
-            "activeMembershipCount": overview.active_membership_count,
-            "decisionsByStatus": {
-                "draft": overview.decisions_draft,
-                "open": overview.decisions_open,
-                "approved": overview.decisions_approved,
-                "rejected": overview.decisions_rejected,
-                "cancelled": overview.decisions_cancelled
-            },
-            "votesTotal": overview.votes_total,
-            "recentFinalized": recent.into_iter().map(|r| GovernanceDecisionDto {
-                id: r.id,
-                decision_number: r.decision_number,
-                body_name: r.body_name,
-                title: r.title,
-                status: r.status,
-                decision_on: date_to_string(r.decision_on),
-                effective_on: date_opt_to_string(r.effective_on),
-                eligible_count: r.eligible_count,
-                approve_count: r.approve_count,
-                reject_count: r.reject_count,
-                abstain_count: r.abstain_count,
-                finalized_at: r.finalized_at,
-            }).collect::<Vec<_>>()
-        })),
-    )
-        .into_response())
+    let mut tx = ctx.open_tx_repeatable(pool).await?;
+    let __result = async {
+        let overview = report_repo::overview(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(db_err("governance report failed"))?;
+        let recent = report_repo::governance_recent_decisions(&mut tx, ctx.cooperative_id())
+            .await
+            .map_err(db_err("governance decisions failed"))?;
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "activeBodyCount": overview.active_body_count,
+                "activeMembershipCount": overview.active_membership_count,
+                "decisionsByStatus": {
+                    "draft": overview.decisions_draft,
+                    "open": overview.decisions_open,
+                    "approved": overview.decisions_approved,
+                    "rejected": overview.decisions_rejected,
+                    "cancelled": overview.decisions_cancelled
+                },
+                "votesTotal": overview.votes_total,
+                "recentFinalized": recent.into_iter().map(|r| GovernanceDecisionDto {
+                    id: r.id,
+                    decision_number: r.decision_number,
+                    body_name: r.body_name,
+                    title: r.title,
+                    status: r.status,
+                    decision_on: date_to_string(r.decision_on),
+                    effective_on: date_opt_to_string(r.effective_on),
+                    eligible_count: r.eligible_count,
+                    approve_count: r.approve_count,
+                    reject_count: r.reject_count,
+                    abstain_count: r.abstain_count,
+                    finalized_at: r.finalized_at,
+                }).collect::<Vec<_>>()
+            })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1344,25 +1557,39 @@ struct MonthlyFlowDto {
 
 async fn income_expense_trend(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<TrendQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::REPORTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::REPORTS_READ).await?;
     let pool = pool_of(&state)?;
-    let months = query.months.unwrap_or(6);
-    if !(1..=24).contains(&months) {
-        return Err(ApiError::ValidationFailed);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let months = query.months.unwrap_or(6);
+        if !(1..=24).contains(&months) {
+            return Err(ApiError::ValidationFailed);
+        }
+        let rows = report_repo::monthly_income_expense(&mut tx, ctx.cooperative_id(), months)
+            .await
+            .map_err(db_err("income-expense trend failed"))?;
+        let items: Vec<MonthlyFlowDto> = rows
+            .into_iter()
+            .map(|r| MonthlyFlowDto {
+                month: date_to_string(r.month),
+                income_total: canonical(r.income_total),
+                expense_total: canonical(r.expense_total),
+            })
+            .collect();
+        Ok((StatusCode::OK, Json(items)).into_response())
     }
-    let rows = report_repo::monthly_income_expense(pool, months)
-        .await
-        .map_err(db_err("income-expense trend failed"))?;
-    let items: Vec<MonthlyFlowDto> = rows
-        .into_iter()
-        .map(|r| MonthlyFlowDto {
-            month: date_to_string(r.month),
-            income_total: canonical(r.income_total),
-            expense_total: canonical(r.expense_total),
-        })
-        .collect();
-    Ok((StatusCode::OK, Json(items)).into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

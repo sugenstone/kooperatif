@@ -36,10 +36,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
@@ -49,6 +47,7 @@ use crate::payments::model as payment_model;
 use crate::social_aid::model as aid_model;
 use crate::social_aid::repo as aid_repo;
 use crate::social_aid::repo::SocialAidError;
+use crate::tenant::extractor::BusinessAuth;
 
 pub fn social_aid_router() -> Router<AppState> {
     Router::new()
@@ -86,12 +85,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Social Aid mutations share the full CSRF + permission prologue.
 macro_rules! social_aid_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::SOCIAL_AID_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::SOCIAL_AID_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -372,8 +371,12 @@ fn detail_dto(detail: aid_repo::FundDetail) -> FundDetailDto {
     }
 }
 
-async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<FundDetailDto>, ApiError> {
-    aid_repo::get_fund_detail(pool, id)
+async fn load_detail(
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<FundDetailDto>, ApiError> {
+    aid_repo::get_fund_detail(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("social aid fund detail query failed"))
         .map(|opt| opt.map(detail_dto))
@@ -394,80 +397,109 @@ pub struct FundListQuery {
 
 pub async fn list_funds(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<FundListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
-    let list = ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    };
-    let (page, page_size) = page_of(&list)?;
-    let status = query
-        .status
-        .as_deref()
-        .map(|s| {
-            aid_model::FundStatus::parse(s)
-                .map(|v| v.as_str().to_string())
-                .ok_or(ApiError::ValidationFailed)
-        })
-        .transpose()?;
-    let search = list
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let list = ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        };
+        let (page, page_size) = page_of(&list)?;
+        let status = query
+            .status
+            .as_deref()
+            .map(|s| {
+                aid_model::FundStatus::parse(s)
+                    .map(|v| v.as_str().to_string())
+                    .ok_or(ApiError::ValidationFailed)
+            })
+            .transpose()?;
+        let search = list
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
-    let rows = aid_repo::list_funds(
-        pool,
-        &aid_repo::FundFilter {
-            status,
-            search,
+        let rows = aid_repo::list_funds(
+            &mut tx,
+            ctx.cooperative_id(),
+            &aid_repo::FundFilter {
+                status,
+                search,
+                page,
+                page_size,
+            },
+        )
+        .await
+        .map_err(db_err("social aid fund list query failed"))?;
+
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows
+                .iter()
+                .map(|r| FundListItemDto {
+                    id: r.id,
+                    fund_number: r.fund_number,
+                    name: r.name.clone(),
+                    status: r.status.clone(),
+                    total_donated: canonical(r.total_donated),
+                    total_disbursed: canonical(r.total_disbursed),
+                    available: canonical(r.available),
+                    created_at: r.created_at,
+                })
+                .collect(),
             page,
             page_size,
-        },
-    )
-    .await
-    .map_err(db_err("social aid fund list query failed"))?;
-
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows
-            .iter()
-            .map(|r| FundListItemDto {
-                id: r.id,
-                fund_number: r.fund_number,
-                name: r.name.clone(),
-                status: r.status.clone(),
-                total_donated: canonical(r.total_donated),
-                total_disbursed: canonical(r.total_disbursed),
-                available: canonical(r.available),
-                created_at: r.created_at,
-            })
-            .collect(),
-        page,
-        page_size,
-        total_count,
-    })
-    .into_response())
+            total_count,
+        })
+        .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_fund(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
-    load_detail(pool, id)
-        .await?
-        .map(Json)
-        .map(IntoResponse::into_response)
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .map(Json)
+            .map(IntoResponse::into_response)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -497,30 +529,44 @@ pub struct PersonLookupDto {
 
 pub async fn person_lookup(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PersonLookupQuery>,
 ) -> Result<Json<Vec<PersonLookupDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_MANAGE).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_MANAGE).await?;
     let pool = pool_of(&state)?;
-    let search = query.search.as_deref().unwrap_or_default();
-    if search.trim().is_empty() {
-        return Ok(Json(Vec::new()));
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let search = query.search.as_deref().unwrap_or_default();
+        if search.trim().is_empty() {
+            return Ok(Json(Vec::new()));
+        }
+        let limit = query.limit.unwrap_or(10).clamp(1, 25);
+        let rows = party_repo::search_persons(&mut tx, ctx.cooperative_id(), search.trim(), limit)
+            .await
+            .map_err(db_err("social aid person lookup failed"))?;
+        Ok(Json(
+            rows.iter()
+                .map(|r| PersonLookupDto {
+                    id: r.id,
+                    first_name: r.first_name.clone(),
+                    last_name: r.last_name.clone(),
+                    shareholder_id: r.shareholder_id,
+                    shareholder_status: r.shareholder_status.clone(),
+                })
+                .collect(),
+        ))
     }
-    let limit = query.limit.unwrap_or(10).clamp(1, 25);
-    let rows = party_repo::search_persons(pool, search.trim(), limit)
-        .await
-        .map_err(db_err("social aid person lookup failed"))?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| PersonLookupDto {
-                id: r.id,
-                first_name: r.first_name.clone(),
-                last_name: r.last_name.clone(),
-                shareholder_id: r.shareholder_id,
-                shareholder_status: r.shareholder_status.clone(),
-            })
-            .collect(),
-    ))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -537,94 +583,152 @@ pub struct EventListQuery {
 
 pub async fn list_donations(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EventListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&ListQuery {
-        search: None,
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let (rows, total) = aid_repo::list_donations(
-        pool,
-        &aid_repo::DonationFilter {
-            fund_id: query.fund_id,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&ListQuery {
+            search: None,
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        })?;
+        let (rows, total) = aid_repo::list_donations(
+            &mut tx,
+            ctx.cooperative_id(),
+            &aid_repo::DonationFilter {
+                fund_id: query.fund_id,
+                page,
+                page_size,
+            },
+        )
+        .await
+        .map_err(db_err("social aid donation list query failed"))?;
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(donation_dto).collect::<Vec<_>>(),
             page,
             page_size,
-        },
-    )
-    .await
-    .map_err(db_err("social aid donation list query failed"))?;
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(donation_dto).collect::<Vec<_>>(),
-        page,
-        page_size,
-        total_count: total,
-    })
-    .into_response())
+            total_count: total,
+        })
+        .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_donation(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
-    aid_repo::get_donation(pool, id)
-        .await
-        .map_err(db_err("social aid donation query failed"))?
-        .map(|r| Json(donation_dto(&r)).into_response())
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        aid_repo::get_donation(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("social aid donation query failed"))?
+            .map(|r| Json(donation_dto(&r)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn list_disbursements(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<EventListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&ListQuery {
-        search: None,
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let (rows, total) = aid_repo::list_disbursements(
-        pool,
-        &aid_repo::DisbursementFilter {
-            fund_id: query.fund_id,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&ListQuery {
+            search: None,
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        })?;
+        let (rows, total) = aid_repo::list_disbursements(
+            &mut tx,
+            ctx.cooperative_id(),
+            &aid_repo::DisbursementFilter {
+                fund_id: query.fund_id,
+                page,
+                page_size,
+            },
+        )
+        .await
+        .map_err(db_err("social aid disbursement list query failed"))?;
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(disbursement_dto).collect::<Vec<_>>(),
             page,
             page_size,
-        },
-    )
-    .await
-    .map_err(db_err("social aid disbursement list query failed"))?;
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(disbursement_dto).collect::<Vec<_>>(),
-        page,
-        page_size,
-        total_count: total,
-    })
-    .into_response())
+            total_count: total,
+        })
+        .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_disbursement(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SOCIAL_AID_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SOCIAL_AID_READ).await?;
     let pool = pool_of(&state)?;
-    aid_repo::get_disbursement(pool, id)
-        .await
-        .map_err(db_err("social aid disbursement query failed"))?
-        .map(|r| Json(disbursement_dto(&r)).into_response())
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        aid_repo::get_disbursement(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("social aid disbursement query failed"))?
+            .map(|r| Json(disbursement_dto(&r)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -646,72 +750,77 @@ pub struct CreateFundRequest {
 pub async fn create_fund(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateFundRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let name = aid_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let description = aid_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let starts_on = body
+            .starts_on
+            .as_deref()
+            .map(parse_business_date)
+            .transpose()?;
+        let ends_on = body
+            .ends_on
+            .as_deref()
+            .map(parse_business_date)
+            .transpose()?;
+        let (starts_on, ends_on) = aid_model::validate_window(starts_on, ends_on)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = aid_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint =
+            aid_model::create_fund_fingerprint(&name, &description, starts_on, ends_on);
 
-    let name = aid_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let description = aid_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let starts_on = body
-        .starts_on
-        .as_deref()
-        .map(parse_business_date)
-        .transpose()?;
-    let ends_on = body
-        .ends_on
-        .as_deref()
-        .map(parse_business_date)
-        .transpose()?;
-    let (starts_on, ends_on) =
-        aid_model::validate_window(starts_on, ends_on).map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = aid_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = aid_model::create_fund_fingerprint(&name, &description, starts_on, ends_on);
-
-    let outcome = aid_repo::create_fund(
-        pool,
-        auth.user_id,
-        aid_repo::CreateFund {
-            name,
-            description,
-            starts_on,
-            ends_on,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::SocialAidFundCreated,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "fundId": outcome.fund_id,
-                "fundNumber": outcome.fund_number,
-            }),
+        let outcome = aid_repo::create_fund(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            aid_repo::CreateFund {
+                name,
+                description,
+                starts_on,
+                ends_on,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-        tracing::info!(
-            outcome = "social_aid_fund_created", id = %outcome.fund_id,
-            number = outcome.fund_number, actor = %auth.user_id
-        );
-    }
+        .await
+        .map_err(command_error)?;
 
-    let detail = load_detail(pool, outcome.fund_id)
-        .await?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "social_aid_fund_created", id = %outcome.fund_id,
+                number = outcome.fund_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), outcome.fund_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Close is terminal (STEP-013: no reopen). Only allowed while every
@@ -719,27 +828,37 @@ pub async fn create_fund(
 pub async fn close_fund(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
 
-    let number = aid_repo::close_fund(pool, auth.user_id, id, now)
-        .await
-        .map_err(command_error)?;
+        let _number =
+            aid_repo::close_fund(&mut tx, ctx.cooperative_id(), ctx.auth.user_id, id, now)
+                .await
+                .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::SocialAidFundClosed,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "fundId": id, "fundNumber": number }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
     .await;
-
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -752,30 +871,46 @@ pub struct CancelFundRequest {
 pub async fn cancel_fund(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelFundRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason =
-        aid_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason =
+            aid_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
 
-    let number = aid_repo::cancel_fund(pool, auth.user_id, id, reason, now)
+        let _number = aid_repo::cancel_fund(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::SocialAidFundCancelled,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "fundId": id, "fundNumber": number }),
-    )
-    .await;
+        // R4: audit row minted by the DB transition trigger.
 
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -805,88 +940,94 @@ pub struct PostDonationRequest {
 pub async fn post_donation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostDonationRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
 
-    let amount = aid_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let occurred_at = aid_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let donor_display_name = aid_model::validate_identity_name(body.donor_display_name.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    // Anonymous donations are an open decision (docs/11) — at least
-    // one identity form is mandatory.
-    if body.donor_person_id.is_none() && donor_display_name.is_none() {
-        return Err(ApiError::ValidationFailed);
-    }
-    let reference = aid_model::validate_reference(body.reference.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let note =
-        aid_model::validate_note(body.note.as_deref()).map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = aid_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = aid_model::donation_fingerprint(&aid_model::DonationFingerprint {
-        fund_id: body.fund_id,
-        donor_person_id: body.donor_person_id,
-        donor_display_name: donor_display_name.clone(),
-        financial_account_id: body.financial_account_id,
-        amount,
-        occurred_at,
-        reference: reference.clone(),
-        note: note.clone(),
-    });
-
-    let outcome = aid_repo::post_donation(
-        pool,
-        auth.user_id,
-        aid_repo::PostDonation {
+        let amount = aid_model::validate_positive_amount(&body.amount)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let occurred_at =
+            aid_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let donor_display_name =
+            aid_model::validate_identity_name(body.donor_display_name.as_deref())
+                .map_err(|_| ApiError::ValidationFailed)?;
+        // Anonymous donations are an open decision (docs/11) — at least
+        // one identity form is mandatory.
+        if body.donor_person_id.is_none() && donor_display_name.is_none() {
+            return Err(ApiError::ValidationFailed);
+        }
+        let reference = aid_model::validate_reference(body.reference.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let note = aid_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = aid_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = aid_model::donation_fingerprint(&aid_model::DonationFingerprint {
             fund_id: body.fund_id,
             donor_person_id: body.donor_person_id,
-            donor_display_name,
+            donor_display_name: donor_display_name.clone(),
             financial_account_id: body.financial_account_id,
             amount,
             occurred_at,
-            reference,
-            note,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+            reference: reference.clone(),
+            note: note.clone(),
+        });
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::SocialAidDonationPosted,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "donationId": outcome.event_id,
-                "donationNumber": outcome.event_number,
-                "fundId": body.fund_id,
-            }),
+        let outcome = aid_repo::post_donation(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            aid_repo::PostDonation {
+                fund_id: body.fund_id,
+                donor_person_id: body.donor_person_id,
+                donor_display_name,
+                financial_account_id: body.financial_account_id,
+                amount,
+                occurred_at,
+                reference,
+                note,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-        tracing::info!(
-            outcome = "social_aid_donation_posted", id = %outcome.event_id,
-            number = outcome.event_number, fund = %body.fund_id, actor = %auth.user_id
-        );
-    }
-
-    let detail = aid_repo::get_donation(pool, outcome.event_id)
         .await
-        .map_err(db_err("social aid donation query failed"))?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(donation_dto(&detail))).into_response())
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "social_aid_donation_posted", id = %outcome.event_id,
+                number = outcome.event_number, fund = %body.fund_id, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = aid_repo::get_donation(&mut tx, ctx.cooperative_id(), outcome.event_id)
+            .await
+            .map_err(db_err("social aid donation query failed"))?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(donation_dto(&detail))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -899,35 +1040,49 @@ pub struct ReverseRequest {
 pub async fn reverse_donation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = aid_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = aid_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let (already, number) = aid_repo::reverse_donation(pool, auth.user_id, id, reason, now)
+        let (already, _number) = aid_repo::reverse_donation(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    if !already {
-        audit::record(
-            pool,
-            SecurityEventType::SocialAidDonationReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({ "donationId": id, "donationNumber": number }),
-        )
-        .await;
-    }
+        if !already {
+            // R4: audit row minted by the DB transition trigger.
+        }
 
-    let detail = aid_repo::get_donation(pool, id)
-        .await
-        .map_err(db_err("social aid donation query failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(donation_dto(&detail))).into_response())
+        let detail = aid_repo::get_donation(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("social aid donation query failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(donation_dto(&detail))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -955,121 +1110,141 @@ pub struct PostDisbursementRequest {
 pub async fn post_disbursement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<PostDisbursementRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
 
-    let amount = aid_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let occurred_at = aid_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let beneficiary_display_name =
-        aid_model::validate_identity_name(body.beneficiary_display_name.as_deref())
+        let amount = aid_model::validate_positive_amount(&body.amount)
             .map_err(|_| ApiError::ValidationFailed)?;
-    // A beneficiary identity is always required (docs/11 §privacy:
-    // beneficiary data is sensitive and identity is preserved).
-    if body.beneficiary_person_id.is_none() && beneficiary_display_name.is_none() {
-        return Err(ApiError::ValidationFailed);
-    }
-    let reason =
-        aid_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
-    let reference = aid_model::validate_reference(body.reference.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = aid_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = aid_model::disbursement_fingerprint(&aid_model::DisbursementFingerprint {
-        fund_id: body.fund_id,
-        beneficiary_person_id: body.beneficiary_person_id,
-        beneficiary_display_name: beneficiary_display_name.clone(),
-        financial_account_id: body.financial_account_id,
-        amount,
-        occurred_at,
-        reason: reason.clone(),
-        reference: reference.clone(),
-    });
+        let occurred_at =
+            aid_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let beneficiary_display_name =
+            aid_model::validate_identity_name(body.beneficiary_display_name.as_deref())
+                .map_err(|_| ApiError::ValidationFailed)?;
+        // A beneficiary identity is always required (docs/11 §privacy:
+        // beneficiary data is sensitive and identity is preserved).
+        if body.beneficiary_person_id.is_none() && beneficiary_display_name.is_none() {
+            return Err(ApiError::ValidationFailed);
+        }
+        let reason =
+            aid_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
+        let reference = aid_model::validate_reference(body.reference.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = aid_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint =
+            aid_model::disbursement_fingerprint(&aid_model::DisbursementFingerprint {
+                fund_id: body.fund_id,
+                beneficiary_person_id: body.beneficiary_person_id,
+                beneficiary_display_name: beneficiary_display_name.clone(),
+                financial_account_id: body.financial_account_id,
+                amount,
+                occurred_at,
+                reason: reason.clone(),
+                reference: reference.clone(),
+            });
 
-    let outcome = aid_repo::post_disbursement(
-        pool,
-        auth.user_id,
-        aid_repo::PostDisbursement {
-            fund_id: body.fund_id,
-            beneficiary_person_id: body.beneficiary_person_id,
-            beneficiary_display_name,
-            financial_account_id: body.financial_account_id,
-            amount,
-            occurred_at,
-            reason,
-            reference,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::SocialAidDisbursementPosted,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "disbursementId": outcome.event_id,
-                "disbursementNumber": outcome.event_number,
-                "fundId": body.fund_id,
-            }),
+        let outcome = aid_repo::post_disbursement(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            aid_repo::PostDisbursement {
+                fund_id: body.fund_id,
+                beneficiary_person_id: body.beneficiary_person_id,
+                beneficiary_display_name,
+                financial_account_id: body.financial_account_id,
+                amount,
+                occurred_at,
+                reason,
+                reference,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-        tracing::info!(
-            outcome = "social_aid_disbursement_posted", id = %outcome.event_id,
-            number = outcome.event_number, fund = %body.fund_id, actor = %auth.user_id
-        );
-    }
-
-    let detail = aid_repo::get_disbursement(pool, outcome.event_id)
         .await
-        .map_err(db_err("social aid disbursement query failed"))?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(disbursement_dto(&detail))).into_response())
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "social_aid_disbursement_posted", id = %outcome.event_id,
+                number = outcome.event_number, fund = %body.fund_id, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = aid_repo::get_disbursement(&mut tx, ctx.cooperative_id(), outcome.event_id)
+            .await
+            .map_err(db_err("social aid disbursement query failed"))?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(disbursement_dto(&detail))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn reverse_disbursement(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = social_aid_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = aid_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = social_aid_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = aid_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let (already, number) = aid_repo::reverse_disbursement(pool, auth.user_id, id, reason, now)
+        let (already, _number) = aid_repo::reverse_disbursement(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    if !already {
-        audit::record(
-            pool,
-            SecurityEventType::SocialAidDisbursementReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({ "disbursementId": id, "disbursementNumber": number }),
-        )
-        .await;
-    }
+        if !already {
+            // R4: audit row minted by the DB transition trigger.
+        }
 
-    let detail = aid_repo::get_disbursement(pool, id)
-        .await
-        .map_err(db_err("social aid disbursement query failed"))?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(disbursement_dto(&detail))).into_response())
+        let detail = aid_repo::get_disbursement(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("social aid disbursement query failed"))?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(disbursement_dto(&detail))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

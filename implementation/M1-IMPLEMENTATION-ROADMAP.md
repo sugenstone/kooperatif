@@ -116,8 +116,10 @@ registry update, STOP). Relative complexity on S/M/L/XL.
 
 ## M1-P7 — Frontend
 
-- **Scope**: coop store (`activeCooperative` in sessionStorage +
-  `cooperatives[]` from `me`); selector in shell (shadcn Select);
+- **Scope**: coop store (session-authoritative `resolvedCooperativeId` +
+  `cooperatives[]` from `me`; `sessionStorage` is a per-tab assertion
+  mirror only — one session, one active cooperative, tabs converge);
+  selector in shell (shadcn Select);
   `apiFetch` injects `X-Cooperative-Id`; `auth/me` consumption;
   WS reconnect on switch; query-cache keyed by coop (or `invalidateAll`
   on switch); dirty-form guard on switch; active-coop banner.

@@ -16,6 +16,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { compareDecimals, formatTry, parseTryInput } from '$lib/money';
 	import {
@@ -37,6 +38,15 @@
 	let submitError = $state<MessageKey | null>(null);
 	// One idempotency key per form session — retries replay safely.
 	let idempotencyKey = $state(crypto.randomUUID());
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() =>
+			sourceAccountId !== '' ||
+			destinationAccountId !== '' ||
+			amount !== '' ||
+			occurredAt !== '' ||
+			note !== ''
+	);
 
 	const parsedAmount = $derived(parseTryInput(amount));
 	const source = $derived(accounts.find((a) => a.id === sourceAccountId) ?? null);
@@ -81,6 +91,7 @@
 				body: request
 			});
 			idempotencyKey = crypto.randomUUID();
+			formGuard.clear();
 			await goto(resolve(`/transferler/${created.id}`));
 		} catch (error) {
 			submitError =

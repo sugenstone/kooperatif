@@ -32,10 +32,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
@@ -44,6 +42,7 @@ use crate::investments::repo as inv_repo;
 use crate::investments::repo::InvestmentCommandError;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::payments::model as payment_model;
+use crate::tenant::extractor::BusinessAuth;
 
 pub fn investments_router() -> Router<AppState> {
     Router::new()
@@ -77,12 +76,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Investment mutations share the full CSRF + permission prologue.
 macro_rules! investments_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::INVESTMENTS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::INVESTMENTS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -449,10 +448,11 @@ fn detail_dto(detail: inv_repo::InvestmentDetail) -> InvestmentDetailDto {
 }
 
 async fn load_detail(
-    pool: &sqlx::PgPool,
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<InvestmentDetailDto>, ApiError> {
-    inv_repo::get_investment_detail(pool, id)
+    inv_repo::get_investment_detail(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("investment detail query failed"))
         .map(|opt| opt.map(detail_dto))
@@ -477,92 +477,121 @@ pub struct InvestmentListQuery {
 
 pub async fn list_investments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<InvestmentListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INVESTMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INVESTMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let list = ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    };
-    let (page, page_size) = page_of(&list)?;
-    let status = query
-        .status
-        .as_deref()
-        .map(|s| {
-            inv_model::InvestmentStatus::parse(s)
-                .map(|v| v.as_str().to_string())
-                .ok_or(ApiError::ValidationFailed)
-        })
-        .transpose()?;
-    let investment_type = query
-        .investment_type
-        .as_deref()
-        .map(|t| {
-            inv_model::InvestmentType::parse(t)
-                .map(|v| v.as_str().to_string())
-                .ok_or(ApiError::ValidationFailed)
-        })
-        .transpose()?;
-    let search = list
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let list = ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        };
+        let (page, page_size) = page_of(&list)?;
+        let status = query
+            .status
+            .as_deref()
+            .map(|s| {
+                inv_model::InvestmentStatus::parse(s)
+                    .map(|v| v.as_str().to_string())
+                    .ok_or(ApiError::ValidationFailed)
+            })
+            .transpose()?;
+        let investment_type = query
+            .investment_type
+            .as_deref()
+            .map(|t| {
+                inv_model::InvestmentType::parse(t)
+                    .map(|v| v.as_str().to_string())
+                    .ok_or(ApiError::ValidationFailed)
+            })
+            .transpose()?;
+        let search = list
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
-    let rows = inv_repo::list_investments(
-        pool,
-        &inv_repo::InvestmentFilter {
-            status,
-            investment_type,
-            search,
+        let rows = inv_repo::list_investments(
+            &mut tx,
+            ctx.cooperative_id(),
+            &inv_repo::InvestmentFilter {
+                status,
+                investment_type,
+                search,
+                page,
+                page_size,
+            },
+        )
+        .await
+        .map_err(db_err("investment list query failed"))?;
+
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows
+                .iter()
+                .map(|r| InvestmentListItemDto {
+                    id: r.id,
+                    investment_number: r.investment_number,
+                    name: r.name.clone(),
+                    investment_type: r.investment_type.clone(),
+                    status: r.status.clone(),
+                    acquired_at: r.acquired_at,
+                    total_funded: canonical(r.total_funded),
+                    latest_valuation: canonical_opt(r.latest_valuation),
+                    total_income: canonical(r.total_income),
+                    created_at: r.created_at,
+                })
+                .collect(),
             page,
             page_size,
-        },
-    )
-    .await
-    .map_err(db_err("investment list query failed"))?;
-
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows
-            .iter()
-            .map(|r| InvestmentListItemDto {
-                id: r.id,
-                investment_number: r.investment_number,
-                name: r.name.clone(),
-                investment_type: r.investment_type.clone(),
-                status: r.status.clone(),
-                acquired_at: r.acquired_at,
-                total_funded: canonical(r.total_funded),
-                latest_valuation: canonical_opt(r.latest_valuation),
-                total_income: canonical(r.total_income),
-                created_at: r.created_at,
-            })
-            .collect(),
-        page,
-        page_size,
-        total_count,
-    })
-    .into_response())
+            total_count,
+        })
+        .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_investment(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::INVESTMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::INVESTMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    load_detail(pool, id)
-        .await?
-        .map(Json)
-        .map(IntoResponse::into_response)
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .map(Json)
+            .map(IntoResponse::into_response)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -588,90 +617,96 @@ pub struct CreateInvestmentRequest {
 pub async fn create_investment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateInvestmentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let today = istanbul_today(now);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let today = istanbul_today(now);
 
-    let name = inv_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let investment_type = inv_model::InvestmentType::parse(&body.investment_type)
-        .ok_or(ApiError::ValidationFailed)?;
-    let description = inv_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let location = inv_model::validate_location(body.location.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let reference = inv_model::validate_reference(body.reference.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let counterparty_name = inv_model::validate_counterparty(body.counterparty_name.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let acquired_at = body
-        .acquired_at
-        .as_deref()
-        .map(|raw| {
-            parse_business_date(raw).and_then(|d| {
-                inv_model::validate_business_date(d, today).map_err(|_| ApiError::ValidationFailed)
+        let name = inv_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let investment_type = inv_model::InvestmentType::parse(&body.investment_type)
+            .ok_or(ApiError::ValidationFailed)?;
+        let description = inv_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let location = inv_model::validate_location(body.location.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let reference = inv_model::validate_reference(body.reference.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let counterparty_name = inv_model::validate_counterparty(body.counterparty_name.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let acquired_at = body
+            .acquired_at
+            .as_deref()
+            .map(|raw| {
+                parse_business_date(raw).and_then(|d| {
+                    inv_model::validate_business_date(d, today)
+                        .map_err(|_| ApiError::ValidationFailed)
+                })
             })
-        })
-        .transpose()?;
-    let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = inv_model::create_fingerprint(&inv_model::CreateInvestmentFingerprint {
-        name: name.clone(),
-        investment_type,
-        description: description.clone(),
-        location: location.clone(),
-        reference: reference.clone(),
-        counterparty_name: counterparty_name.clone(),
-        acquired_at,
-    });
-
-    let outcome = inv_repo::create_investment(
-        pool,
-        auth.user_id,
-        inv_repo::CreateInvestment {
-            name,
+            .transpose()?;
+        let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = inv_model::create_fingerprint(&inv_model::CreateInvestmentFingerprint {
+            name: name.clone(),
             investment_type,
-            description,
-            location,
-            reference,
-            counterparty_name,
+            description: description.clone(),
+            location: location.clone(),
+            reference: reference.clone(),
+            counterparty_name: counterparty_name.clone(),
             acquired_at,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+        });
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentCreated,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "investmentId": outcome.investment_id,
-                "investmentNumber": outcome.investment_number,
-            }),
+        let outcome = inv_repo::create_investment(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            inv_repo::CreateInvestment {
+                name,
+                investment_type,
+                description,
+                location,
+                reference,
+                counterparty_name,
+                acquired_at,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-        tracing::info!(
-            outcome = "investment_created", id = %outcome.investment_id,
-            number = outcome.investment_number, actor = %auth.user_id
-        );
-    }
+        .await
+        .map_err(command_error)?;
 
-    let detail = load_detail(pool, outcome.investment_id)
-        .await?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "investment_created", id = %outcome.investment_id,
+                number = outcome.investment_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), outcome.investment_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,30 +719,46 @@ pub struct CancelInvestmentRequest {
 pub async fn cancel_investment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelInvestmentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = inv_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = inv_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let number = inv_repo::cancel_investment(pool, auth.user_id, id, reason, now)
+        let _number = inv_repo::cancel_investment(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::InvestmentCancelled,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "investmentId": id, "investmentNumber": number }),
-    )
-    .await;
+        // R4: audit row minted by the DB transition trigger.
 
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -731,76 +782,82 @@ pub struct PostFundingRequest {
 pub async fn post_funding(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<PostFundingRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
 
-    let amount = inv_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let occurred_at = inv_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let reference = inv_model::validate_reference(body.reference.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let note =
-        inv_model::validate_note(body.note.as_deref()).map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = inv_model::funding_fingerprint(
-        id,
-        body.financial_account_id,
-        amount,
-        occurred_at,
-        &reference,
-        &note,
-    );
-
-    let outcome = inv_repo::post_funding(
-        pool,
-        auth.user_id,
-        inv_repo::PostFunding {
-            investment_id: id,
-            financial_account_id: body.financial_account_id,
+        let amount = inv_model::validate_positive_amount(&body.amount)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let occurred_at =
+            inv_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let reference = inv_model::validate_reference(body.reference.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let note = inv_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = inv_model::funding_fingerprint(
+            id,
+            body.financial_account_id,
             amount,
             occurred_at,
-            reference,
-            note,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentFundingPosted,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "fundingId": outcome.event_id,
-                "fundingNumber": outcome.event_number,
-                "investmentId": id,
-                "amount": canonical(amount),
-            }),
-        )
-        .await;
-        tracing::info!(
-            outcome = "investment_funding_posted", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            &reference,
+            &note,
         );
-    }
 
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        let outcome = inv_repo::post_funding(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            inv_repo::PostFunding {
+                investment_id: id,
+                financial_account_id: body.financial_account_id,
+                amount,
+                occurred_at,
+                reference,
+                note,
+                idempotency_key,
+                fingerprint,
+            },
+        )
+        .await
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "investment_funding_posted", id = %outcome.event_id,
+                investment = %id, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -813,49 +870,60 @@ pub struct ReverseRequest {
 pub async fn reverse_funding(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = inv_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = inv_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let funding: Option<(Uuid, i64)> = sqlx::query_as(
-        "SELECT investment_id, funding_number FROM investment_fundings WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err("funding lookup failed"))?;
-    let Some((investment_id, _number)) = funding else {
-        return Err(ApiError::NotFound);
-    };
+        let funding: Option<(Uuid, i64)> = sqlx::query_as(
+            "SELECT investment_id, funding_number FROM investment_fundings WHERE id = $1 AND cooperative_id = $2",
+        )
+        .bind(id)
+            .bind(ctx.cooperative_id())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err("funding lookup failed"))?;
+        let Some((investment_id, _number)) = funding else {
+            return Err(ApiError::NotFound);
+        };
 
-    let (replayed, number) = inv_repo::reverse_funding(pool, auth.user_id, id, reason, now)
+        let (replayed, _number) = inv_repo::reverse_funding(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    if !replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentFundingReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "fundingId": id,
-                "fundingNumber": number,
-                "investmentId": investment_id,
-            }),
-        )
-        .await;
-    }
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
 
-    let detail = load_detail(pool, investment_id)
-        .await?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), investment_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -879,74 +947,79 @@ pub struct RecordValuationRequest {
 pub async fn record_valuation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<RecordValuationRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let today = istanbul_today(now);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let today = istanbul_today(now);
 
-    let valuation_date =
-        inv_model::validate_business_date(parse_business_date(&body.valuation_date)?, today)
+        let valuation_date =
+            inv_model::validate_business_date(parse_business_date(&body.valuation_date)?, today)
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let amount = inv_model::validate_positive_amount(&body.amount)
             .map_err(|_| ApiError::ValidationFailed)?;
-    let amount = inv_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let method = inv_model::validate_method(body.method.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let source = inv_model::validate_source(body.source.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let note =
-        inv_model::validate_note(body.note.as_deref()).map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint =
-        inv_model::valuation_fingerprint(id, valuation_date, amount, &method, &source, &note);
+        let method = inv_model::validate_method(body.method.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let source = inv_model::validate_source(body.source.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let note = inv_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint =
+            inv_model::valuation_fingerprint(id, valuation_date, amount, &method, &source, &note);
 
-    let outcome = inv_repo::record_valuation(
-        pool,
-        auth.user_id,
-        inv_repo::RecordValuation {
-            investment_id: id,
-            valuation_date,
-            amount,
-            method,
-            source,
-            note,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentValuationRecorded,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "valuationId": outcome.event_id,
-                "valuationNumber": outcome.event_number,
-                "investmentId": id,
-                "amount": canonical(amount),
-            }),
+        let outcome = inv_repo::record_valuation(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            inv_repo::RecordValuation {
+                investment_id: id,
+                valuation_date,
+                amount,
+                method,
+                source,
+                note,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-        tracing::info!(
-            outcome = "investment_valuation_recorded", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
-        );
-    }
+        .await
+        .map_err(command_error)?;
 
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "investment_valuation_recorded", id = %outcome.event_id,
+                investment = %id, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -959,49 +1032,60 @@ pub struct CancelValuationRequest {
 pub async fn cancel_valuation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelValuationRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = inv_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = inv_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let row: Option<(Uuid, i64)> = sqlx::query_as(
-        "SELECT investment_id, valuation_number FROM investment_valuations WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err("valuation lookup failed"))?;
-    let Some((investment_id, _number)) = row else {
-        return Err(ApiError::NotFound);
-    };
+        let row: Option<(Uuid, i64)> = sqlx::query_as(
+            "SELECT investment_id, valuation_number FROM investment_valuations WHERE id = $1 AND cooperative_id = $2",
+        )
+        .bind(id)
+            .bind(ctx.cooperative_id())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err("valuation lookup failed"))?;
+        let Some((investment_id, _number)) = row else {
+            return Err(ApiError::NotFound);
+        };
 
-    let (replayed, number) = inv_repo::cancel_valuation(pool, auth.user_id, id, reason, now)
+        let (replayed, _number) = inv_repo::cancel_valuation(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    if !replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentValuationCancelled,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "valuationId": id,
-                "valuationNumber": number,
-                "investmentId": investment_id,
-            }),
-        )
-        .await;
-    }
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
 
-    let detail = load_detail(pool, investment_id)
-        .await?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), investment_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1025,127 +1109,145 @@ pub struct PostIncomeRequest {
 pub async fn post_income(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<PostIncomeRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
 
-    let amount = inv_model::validate_positive_amount(&body.amount)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let occurred_at = inv_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let description = inv_model::validate_income_description(&body.description)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let counterparty = inv_model::validate_counterparty(body.counterparty.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let reference_no = inv_model::validate_reference(body.reference_no.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = inv_model::income_fingerprint(
-        id,
-        body.financial_account_id,
-        amount,
-        occurred_at,
-        &description,
-        &counterparty,
-        &reference_no,
-    );
-
-    let outcome = inv_repo::post_income(
-        pool,
-        auth.user_id,
-        inv_repo::PostIncome {
-            investment_id: id,
-            financial_account_id: body.financial_account_id,
+        let amount = inv_model::validate_positive_amount(&body.amount)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let occurred_at =
+            inv_model::validate_occurred_at(parse_occurred_at(&body.occurred_at)?, now)
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let description = inv_model::validate_income_description(&body.description)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let counterparty = inv_model::validate_counterparty(body.counterparty.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let reference_no = inv_model::validate_reference(body.reference_no.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = inv_model::income_fingerprint(
+            id,
+            body.financial_account_id,
             amount,
             occurred_at,
-            description,
-            counterparty,
-            reference_no,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentIncomePosted,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "incomeId": outcome.event_id,
-                "incomeNumber": outcome.event_number,
-                "investmentId": id,
-                "amount": canonical(amount),
-            }),
-        )
-        .await;
-        tracing::info!(
-            outcome = "investment_income_posted", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            &description,
+            &counterparty,
+            &reference_no,
         );
-    }
 
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        let outcome = inv_repo::post_income(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            inv_repo::PostIncome {
+                investment_id: id,
+                financial_account_id: body.financial_account_id,
+                amount,
+                occurred_at,
+                description,
+                counterparty,
+                reference_no,
+                idempotency_key,
+                fingerprint,
+            },
+        )
+        .await
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "investment_income_posted", id = %outcome.event_id,
+                investment = %id, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn reverse_income(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = inv_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = inv_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let row: Option<(Uuid, i64)> =
-        sqlx::query_as("SELECT investment_id, income_number FROM investment_incomes WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err("income lookup failed"))?;
-    let Some((investment_id, _number)) = row else {
-        return Err(ApiError::NotFound);
-    };
+        let row: Option<(Uuid, i64)> = sqlx::query_as(
+            "SELECT investment_id, income_number FROM investment_incomes WHERE id = $1 AND cooperative_id = $2",
+        )
+        .bind(id)
+            .bind(ctx.cooperative_id())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err("income lookup failed"))?;
+        let Some((investment_id, _number)) = row else {
+            return Err(ApiError::NotFound);
+        };
 
-    let (replayed, number) = inv_repo::reverse_income(pool, auth.user_id, id, reason, now)
+        let (replayed, _number) = inv_repo::reverse_income(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    if !replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentIncomeReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "incomeId": id,
-                "incomeNumber": number,
-                "investmentId": investment_id,
-            }),
-        )
-        .await;
-    }
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
 
-    let detail = load_detail(pool, investment_id)
-        .await?
-        .ok_or(ApiError::Internal)?;
-    Ok((StatusCode::OK, Json(detail)).into_response())
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), investment_id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        Ok((StatusCode::OK, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1183,108 +1285,114 @@ pub struct DisposeInvestmentRequest {
 pub async fn dispose_investment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<DisposeInvestmentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = investments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let today = istanbul_today(now);
+    let pool = investments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let today = istanbul_today(now);
 
-    if body.proceeds.is_empty() {
-        return Err(ApiError::ValidationFailed);
-    }
-    let disposed_at =
-        inv_model::validate_business_date(parse_business_date(&body.disposed_at)?, today)
-            .map_err(|_| ApiError::ValidationFailed)?;
-    let consideration_amount =
-        inv_model::validate_consideration(body.consideration_amount.as_deref())
-            .map_err(|_| ApiError::ValidationFailed)?;
-    let counterparty_name = inv_model::validate_counterparty(body.counterparty_name.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let reference = inv_model::validate_reference(body.reference.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let note =
-        inv_model::validate_note(body.note.as_deref()).map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-
-    let mut legs = Vec::with_capacity(body.proceeds.len());
-    let mut fingerprint_legs = Vec::with_capacity(body.proceeds.len());
-    for leg in &body.proceeds {
-        let amount = inv_model::validate_positive_amount(&leg.amount)
-            .map_err(|_| ApiError::ValidationFailed)?;
-        let occurred_at =
-            inv_model::validate_occurred_at(parse_occurred_at(&leg.occurred_at)?, now)
+        if body.proceeds.is_empty() {
+            return Err(ApiError::ValidationFailed);
+        }
+        let disposed_at =
+            inv_model::validate_business_date(parse_business_date(&body.disposed_at)?, today)
                 .map_err(|_| ApiError::ValidationFailed)?;
-        let leg_reference = inv_model::validate_reference(leg.reference.as_deref())
+        let consideration_amount =
+            inv_model::validate_consideration(body.consideration_amount.as_deref())
+                .map_err(|_| ApiError::ValidationFailed)?;
+        let counterparty_name = inv_model::validate_counterparty(body.counterparty_name.as_deref())
             .map_err(|_| ApiError::ValidationFailed)?;
-        fingerprint_legs.push((
-            leg.financial_account_id,
-            amount,
-            occurred_at,
-            leg_reference.clone(),
-        ));
-        legs.push(inv_repo::ProceedsLeg {
-            financial_account_id: leg.financial_account_id,
-            amount,
-            occurred_at,
-            reference: leg_reference,
-        });
-    }
-    let fingerprint = inv_model::disposal_fingerprint(
-        id,
-        disposed_at,
-        &consideration_amount,
-        &counterparty_name,
-        &reference,
-        &note,
-        &fingerprint_legs,
-    );
+        let reference = inv_model::validate_reference(body.reference.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let note = inv_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = inv_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let outcome = inv_repo::dispose_investment(
-        pool,
-        auth.user_id,
-        inv_repo::DisposeInvestment {
-            investment_id: id,
+        let mut legs = Vec::with_capacity(body.proceeds.len());
+        let mut fingerprint_legs = Vec::with_capacity(body.proceeds.len());
+        for leg in &body.proceeds {
+            let amount = inv_model::validate_positive_amount(&leg.amount)
+                .map_err(|_| ApiError::ValidationFailed)?;
+            let occurred_at =
+                inv_model::validate_occurred_at(parse_occurred_at(&leg.occurred_at)?, now)
+                    .map_err(|_| ApiError::ValidationFailed)?;
+            let leg_reference = inv_model::validate_reference(leg.reference.as_deref())
+                .map_err(|_| ApiError::ValidationFailed)?;
+            fingerprint_legs.push((
+                leg.financial_account_id,
+                amount,
+                occurred_at,
+                leg_reference.clone(),
+            ));
+            legs.push(inv_repo::ProceedsLeg {
+                financial_account_id: leg.financial_account_id,
+                amount,
+                occurred_at,
+                reference: leg_reference,
+            });
+        }
+        let fingerprint = inv_model::disposal_fingerprint(
+            id,
             disposed_at,
-            consideration_amount,
-            counterparty_name,
-            reference,
-            note,
-            proceeds: legs,
-            idempotency_key,
-            fingerprint,
-        },
-        now,
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::InvestmentDisposed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "disposalId": outcome.event_id,
-                "disposalNumber": outcome.event_number,
-                "investmentId": id,
-            }),
-        )
-        .await;
-        tracing::info!(
-            outcome = "investment_disposed", id = %outcome.event_id,
-            investment = %id, actor = %auth.user_id
+            &consideration_amount,
+            &counterparty_name,
+            &reference,
+            &note,
+            &fingerprint_legs,
         );
-    }
 
-    let detail = load_detail(pool, id).await?.ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(detail)).into_response())
+        let outcome = inv_repo::dispose_investment(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            inv_repo::DisposeInvestment {
+                investment_id: id,
+                disposed_at,
+                consideration_amount,
+                counterparty_name,
+                reference,
+                note,
+                proceeds: legs,
+                idempotency_key,
+                fingerprint,
+            },
+            now,
+        )
+        .await
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "investment_disposed", id = %outcome.event_id,
+                investment = %id, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

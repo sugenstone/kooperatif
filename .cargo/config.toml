@@ -1,0 +1,19 @@
+# M1-INFRA-001: bound rustc codegen/link parallelism — the default
+# (num_cpus) oversubscribed this machine's pagefile during parallel
+# test-binary builds and corrupted compiler metadata
+# (STATUS_STACK_BUFFER_OVERRUN followed by E0282 cascades).
+[build]
+jobs = 4
+
+[env]
+# M1-P4-B2: bound per-binary test parallelism. The default
+# (num_cpus = 28) runs ~28 concurrent disposable-database
+# provisioning chains; each chain holds an admin pool (5) + claim
+# connection + test pool (5) + optional app pool (5), and every setup
+# also drives a shared-catalog GC/heartbeat pass — worst-case demand
+# (~28 × 16 ≈ 450) far exceeds PostgreSQL max_connections=100, so
+# pool acquisitions starve past the 3s acquire_timeout
+# (PoolTimedOut flakes, e.g. credits suite). 6-way parallelism keeps
+# worst-case demand (~6 × 16 ≈ 96) under the server limit while
+# remaining fast; test assertions are unchanged.
+RUST_TEST_THREADS = "6"

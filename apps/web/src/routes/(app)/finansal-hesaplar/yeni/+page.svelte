@@ -16,6 +16,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		FINANCIAL_ACCOUNTS_PATH,
@@ -30,6 +31,11 @@
 	let bankName = $state('');
 	let iban = $state('');
 	let submitting = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() =>
+			name !== '' || accountType !== 'cash' || description !== '' || bankName !== '' || iban !== ''
+	);
 	let submitError = $state<MessageKey | null>(null);
 
 	const isBank = $derived(accountType === 'bank');
@@ -53,6 +59,7 @@
 				csrfToken: auth.csrfToken,
 				body: request
 			});
+			formGuard.clear();
 			await goto(resolve(`/finansal-hesaplar/${created.id}`));
 		} catch (error) {
 			submitError =

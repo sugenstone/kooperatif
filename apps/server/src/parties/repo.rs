@@ -3,7 +3,6 @@
 //! registry per ADR-010; collection screens later move hot lists to
 //! cursors), and transactional aggregate operations.
 
-use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -57,13 +56,20 @@ const SHAREHOLDER_LIST_ORDER: &str =
 /// Search term semantics: folded substring match against the
 /// shareholder's person name, the guardian person name, or an exact
 /// family sequence number when the term is a positive integer.
+///
+/// `cooperative_id` is the verified business context (M1-P2-C3):
+/// `Some` scopes to that cooperative; `None` is reachable only in the
+/// proven never-bootstrapped lane and matches only legacy NULL rows
+/// (`IS NOT DISTINCT FROM`) — never a global listing.
 pub async fn list_shareholders(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     default_account_id: Option<Uuid>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<ShareholderListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let mut conditions: Vec<String> = Vec::new();
     let mut folded: Option<String> = None;
     let mut sequence: Option<i64> = None;
@@ -83,6 +89,8 @@ pub async fn list_shareholders(
     // collection account — $5 is always bound; NULL makes the OR-true
     // inert, matching the fixed-parameter design below.
     conditions.push("($5::uuid IS NULL OR s.default_collection_account_id = $5)".to_string());
+    // C3 scope: always-on cooperative predicate (NULL-safe equality).
+    conditions.push("s.cooperative_id IS NOT DISTINCT FROM $6".to_string());
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -104,34 +112,48 @@ pub async fn list_shareholders(
         .bind((page - 1) * page_size)
         .bind(page_size)
         .bind(default_account_id)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await?;
     Ok(rows)
 }
 
 /// Current members of a family with full identity context (one query).
+/// Cooperative-scoped: a family id from another cooperative yields an
+/// empty result without revealing its existence (C3).
 pub async fn list_shareholders_by_family(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     family_id: Uuid,
 ) -> Result<Vec<ShareholderListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let sql = format!(
-        "{SHAREHOLDER_LIST_SELECT}          WHERE m.family_id = $1 AND m.ended_at IS NULL{SHAREHOLDER_LIST_ORDER}"
+        "{SHAREHOLDER_LIST_SELECT}          WHERE m.family_id = $1 AND m.ended_at IS NULL \
+         AND s.cooperative_id IS NOT DISTINCT FROM $2{SHAREHOLDER_LIST_ORDER}"
     );
     sqlx::query_as::<_, ShareholderListRow>(&sql)
         .bind(family_id)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
+/// Cooperative-scoped detail: a shareholder id owned by another
+/// cooperative returns `None` — indistinguishable from a missing id.
 pub async fn find_shareholder(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<ShareholderListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     // Same joins as the list select for a consistent row shape.
-    let sql = format!("{SHAREHOLDER_LIST_SELECT} WHERE s.id = $1");
+    let sql = format!(
+        "{SHAREHOLDER_LIST_SELECT} WHERE s.id = $1 AND s.cooperative_id IS NOT DISTINCT FROM $2"
+    );
     let mut rows = sqlx::query_as::<_, ShareholderListRow>(&sql)
         .bind(id)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await?;
     Ok(rows.pop())
 }
@@ -146,18 +168,22 @@ pub struct MembershipHistoryRow {
 }
 
 pub async fn membership_history(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<MembershipHistoryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, MembershipHistoryRow>(
         "SELECT m.family_id, f.sequence_number, m.started_at, m.ended_at, m.reason \
          FROM shareholder_family_memberships m \
          JOIN families f ON f.id = m.family_id \
          WHERE m.shareholder_id = $1 \
+           AND m.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY m.started_at, m.id",
     )
     .bind(shareholder_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -181,10 +207,12 @@ pub struct PersonSearchRow {
 /// returned together with shareholder context so the operator can
 /// distinguish them. No generic person CRUD module is exposed.
 pub async fn search_persons(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: &str,
     limit: i64,
 ) -> Result<Vec<PersonSearchRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let folded = format!("%{}%", model::fold_search(search.trim()));
     sqlx::query_as::<_, PersonSearchRow>(
         "SELECT p.id, p.first_name, p.last_name, s.id AS shareholder_id, s.status AS shareholder_status, \
@@ -195,12 +223,14 @@ pub async fn search_persons(
          LEFT JOIN shareholders s ON s.person_id = p.id \
          LEFT JOIN financial_accounts da ON da.id = s.default_collection_account_id \
          WHERE p.search_name LIKE $1 \
+           AND p.cooperative_id IS NOT DISTINCT FROM $3 \
          ORDER BY p.search_name, p.last_name, p.first_name, p.id \
          LIMIT $2",
     )
     .bind(folded)
     .bind(limit)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -215,11 +245,13 @@ pub struct FamilyListRow {
 /// Family search: sequence-number prefix or member/guardian name
 /// substring (folded).
 pub async fn list_families(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<FamilyListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let raw = search.map(str::trim).filter(|s| !s.is_empty());
     let folded: Option<String> = raw.map(|term| format!("%{}%", model::fold_search(term)));
     let sequence_prefix: Option<String> = raw
@@ -233,7 +265,7 @@ pub async fn list_families(
          FROM families f \
          LEFT JOIN shareholder_family_memberships m ON m.family_id = f.id \
          LEFT JOIN shareholders s ON s.id = m.shareholder_id \
-         WHERE ( \
+         WHERE f.cooperative_id IS NOT DISTINCT FROM $5 AND ( \
             $1::text IS NULL OR f.sequence_number::text LIKE $1 \
             OR EXISTS ( \
                 SELECT 1 FROM shareholder_family_memberships m2 \
@@ -252,12 +284,19 @@ pub async fn list_families(
     .bind(folded)
     .bind((page - 1) * page_size)
     .bind(page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows)
 }
 
-pub async fn find_family(pool: &PgPool, id: Uuid) -> Result<Option<FamilyListRow>, sqlx::Error> {
+/// Cooperative-scoped detail (C3): foreign family ids return `None`.
+pub async fn find_family(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<FamilyListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let mut rows = sqlx::query_as::<_, FamilyListRow>(
         "SELECT f.id, f.sequence_number, \
             count(m.id) FILTER (WHERE m.ended_at IS NULL AND s.status <> 'voided') AS member_count, \
@@ -265,11 +304,12 @@ pub async fn find_family(pool: &PgPool, id: Uuid) -> Result<Option<FamilyListRow
          FROM families f \
          LEFT JOIN shareholder_family_memberships m ON m.family_id = f.id \
          LEFT JOIN shareholders s ON s.id = m.shareholder_id \
-         WHERE f.id = $1 \
+         WHERE f.id = $1 AND f.cooperative_id IS NOT DISTINCT FROM $2 \
          GROUP BY f.id, f.sequence_number",
     )
     .bind(id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(rows.pop())
 }
@@ -321,24 +361,28 @@ pub enum CreateShareholderError {
 /// (existing or new) + shareholder + initial membership. Any failure
 /// (e.g. duplicate family sequence) rolls back everything.
 pub async fn create_shareholder(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateShareholder,
     now: OffsetDateTime,
 ) -> Result<CreatedShareholder, CreateShareholderError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(CreateShareholderError::Database)?;
+    let mut tx = db.begin().await.map_err(CreateShareholderError::Database)?;
 
-    // 1. Shareholder person: existing or new.
+    // 1. Shareholder person: existing or new. Existing references are
+    //    cooperative-scoped — a person id owned by another cooperative
+    //    resolves to PersonNotFound without disclosure (C3).
     let (person_id, created_person) = match command.existing_person_id {
         Some(id) => {
-            let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM persons WHERE id = $1")
-                .bind(id)
-                .fetch_optional(tx.as_mut())
-                .await
-                .map_err(CreateShareholderError::Database)?;
+            let exists: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM persons WHERE id = $1 \
+                 AND cooperative_id IS NOT DISTINCT FROM $2",
+            )
+            .bind(id)
+            .bind(cooperative_id)
+            .fetch_optional(tx.as_mut())
+            .await
+            .map_err(CreateShareholderError::Database)?;
             (exists.ok_or(CreateShareholderError::PersonNotFound)?, false)
         }
         None => {
@@ -350,12 +394,13 @@ pub async fn create_shareholder(
                 .ok_or(CreateShareholderError::PersonNotFound)?;
             let search = model::fold_search(&format!("{first} {last}"));
             let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO persons (first_name, last_name, search_name) \
-                 VALUES ($1, $2, $3) RETURNING id",
+                "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+                 VALUES ($1, $2, $3, $4) RETURNING id",
             )
             .bind(&first)
             .bind(&last)
             .bind(&search)
+            .bind(cooperative_id)
             .fetch_one(tx.as_mut())
             .await
             .map_err(CreateShareholderError::Database)?;
@@ -364,12 +409,15 @@ pub async fn create_shareholder(
     };
 
     // One Person → at most one Shareholder (§46).
-    let already: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM shareholders WHERE person_id = $1")
-            .bind(person_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(CreateShareholderError::Database)?;
+    let already: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM shareholders WHERE person_id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(person_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(CreateShareholderError::Database)?;
     if already.is_some() {
         return Err(CreateShareholderError::PersonAlreadyShareholder);
     }
@@ -377,23 +425,28 @@ pub async fn create_shareholder(
     // 2. Guardian person: existing reference or new person (never a
     //    shareholder by itself).
     let guardian_person_id = if let Some(id) = command.guardian_person_id {
-        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM persons WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(CreateShareholderError::Database)?;
+        let exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM persons WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(cooperative_id)
+        .fetch_optional(tx.as_mut())
+        .await
+        .map_err(CreateShareholderError::Database)?;
         Some(exists.ok_or(CreateShareholderError::GuardianNotFound)?)
     } else if let (Some(first), Some(last)) =
         (&command.guardian_first_name, &command.guardian_last_name)
     {
         let search = model::fold_search(&format!("{first} {last}"));
         let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO persons (first_name, last_name, search_name) \
-             VALUES ($1, $2, $3) RETURNING id",
+            "INSERT INTO persons (first_name, last_name, search_name, cooperative_id) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
         )
         .bind(first)
         .bind(last)
         .bind(&search)
+        .bind(cooperative_id)
         .fetch_one(tx.as_mut())
         .await
         .map_err(CreateShareholderError::Database)?;
@@ -407,18 +460,23 @@ pub async fn create_shareholder(
     // 3. Family: existing or new (duplicate sequence → transactional 409).
     let (family_id, created_family) = match command.family {
         FamilyRef::Existing(id) => {
-            let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM families WHERE id = $1")
-                .bind(id)
-                .fetch_optional(tx.as_mut())
-                .await
-                .map_err(CreateShareholderError::Database)?;
+            let exists: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM families WHERE id = $1 \
+                 AND cooperative_id IS NOT DISTINCT FROM $2",
+            )
+            .bind(id)
+            .bind(cooperative_id)
+            .fetch_optional(tx.as_mut())
+            .await
+            .map_err(CreateShareholderError::Database)?;
             (exists.ok_or(CreateShareholderError::FamilyNotFound)?, false)
         }
         FamilyRef::New(sequence) => {
             let id: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
-                "INSERT INTO families (sequence_number) VALUES ($1) RETURNING id",
+                "INSERT INTO families (sequence_number, cooperative_id) VALUES ($1, $2) RETURNING id",
             )
             .bind(sequence)
+            .bind(cooperative_id)
             .fetch_one(tx.as_mut())
             .await;
             match id {
@@ -433,40 +491,48 @@ pub async fn create_shareholder(
 
     // 4. Optional default collection account (FUNC-FIX-002): must be
     //    an existing 'active' account — locked so a concurrent
-    //    status-change cannot race the assignment.
+    //    status-change cannot race the assignment. Cooperative-scoped:
+    //    a foreign account resolves to DefaultAccountInvalid (C3).
     if let Some(account_id) = command.default_collection_account_id {
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM financial_accounts WHERE id = $1 FOR UPDATE")
-                .bind(account_id)
-                .fetch_optional(tx.as_mut())
-                .await
-                .map_err(CreateShareholderError::Database)?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM financial_accounts WHERE id = $1 \
+             AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+        )
+        .bind(account_id)
+        .bind(cooperative_id)
+        .fetch_optional(tx.as_mut())
+        .await
+        .map_err(CreateShareholderError::Database)?;
         if status.as_deref() != Some("active") {
             return Err(CreateShareholderError::DefaultAccountInvalid);
         }
     }
 
-    // 5. Shareholder + initial membership.
+    // 5. Shareholder + initial membership — both rows carry the
+    //    verified cooperative scope explicitly (C3).
     let shareholder_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO shareholders (person_id, guardian_person_id, default_collection_account_id) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO shareholders \
+             (person_id, guardian_person_id, default_collection_account_id, cooperative_id) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(person_id)
     .bind(guardian_person_id)
     .bind(command.default_collection_account_id)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(CreateShareholderError::Database)?;
 
     sqlx::query(
         "INSERT INTO shareholder_family_memberships \
-             (shareholder_id, family_id, started_at, created_by) \
-         VALUES ($1, $2, $3, $4)",
+             (shareholder_id, family_id, started_at, created_by, cooperative_id) \
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(shareholder_id)
     .bind(family_id)
     .bind(now)
     .bind(actor)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await
     .map_err(CreateShareholderError::Database)?;
@@ -508,8 +574,10 @@ pub enum FamilyChangeError {
 /// commit. The exclusion constraint guarantees no shareholder ever has
 /// two active or overlapping memberships, under any concurrency
 /// (concurrent transfers serialize on the insert and one aborts).
+#[allow(clippy::too_many_arguments)]
 pub async fn change_family(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     shareholder_id: Uuid,
     target: FamilyChangeTarget,
@@ -517,16 +585,19 @@ pub async fn change_family(
     expected_updated_at: OffsetDateTime,
     now: OffsetDateTime,
 ) -> Result<(Uuid, Option<i64>, i64), FamilyChangeError> {
+    let mut tx = db.begin().await.map_err(FamilyChangeError::Database)?;
     // (returns: new_family_id, old_family_sequence, new_family_sequence)
-    let mut tx = pool.begin().await.map_err(FamilyChangeError::Database)?;
 
     // Lock the shareholder row against concurrent edits (lost-update
-    // guard combined with the updated_at precondition).
+    // guard combined with the updated_at precondition). Cooperative-
+    // scoped: a foreign shareholder id is ShareholderNotFound (C3).
     let current: Option<(Uuid, Option<Uuid>, OffsetDateTime)> = sqlx::query_as(
         "SELECT s.id, s.guardian_person_id, s.updated_at \
-         FROM shareholders s WHERE s.id = $1 FOR UPDATE",
+         FROM shareholders s WHERE s.id = $1 \
+         AND s.cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
     )
     .bind(shareholder_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(FamilyChangeError::Database)?;
@@ -537,22 +608,26 @@ pub async fn change_family(
         return Err(FamilyChangeError::StaleState);
     }
 
-    // Resolve destination family.
+    // Resolve destination family (cooperative-scoped).
     let (new_family_id, new_sequence) = match target {
         FamilyChangeTarget::Existing(id) => {
-            let row: Option<(Uuid, i64)> =
-                sqlx::query_as("SELECT id, sequence_number FROM families WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(tx.as_mut())
-                    .await
-                    .map_err(FamilyChangeError::Database)?;
+            let row: Option<(Uuid, i64)> = sqlx::query_as(
+                "SELECT id, sequence_number FROM families WHERE id = $1 \
+                 AND cooperative_id IS NOT DISTINCT FROM $2",
+            )
+            .bind(id)
+            .bind(cooperative_id)
+            .fetch_optional(tx.as_mut())
+            .await
+            .map_err(FamilyChangeError::Database)?;
             row.ok_or(FamilyChangeError::FamilyNotFound)?
         }
         FamilyChangeTarget::New(sequence) => {
             let id: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
-                "INSERT INTO families (sequence_number) VALUES ($1) RETURNING id",
+                "INSERT INTO families (sequence_number, cooperative_id) VALUES ($1, $2) RETURNING id",
             )
             .bind(sequence)
+            .bind(cooperative_id)
             .fetch_one(tx.as_mut())
             .await;
             match id {
@@ -568,13 +643,11 @@ pub async fn change_family(
     // Current membership (may be None: shareholder without a family,
     // e.g. after historical migration).
     let current_membership: Option<(Uuid, i64)> = sqlx::query_as(
-        "SELECT m.family_id, f.sequence_number \
-         FROM shareholder_family_memberships m \
-         JOIN families f ON f.id = m.family_id \
-         WHERE m.shareholder_id = $1 AND m.ended_at IS NULL \
-         FOR UPDATE OF m",
+        "SELECT family_id, sequence_number \
+         FROM public.app_lock_family_membership($1, $2)",
     )
     .bind(shareholder_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(FamilyChangeError::Database)?;
@@ -583,30 +656,28 @@ pub async fn change_family(
 
     // Close current + open new within the same transaction.
     if let Some((old_family_id, _)) = current_membership {
-        sqlx::query(
-            "UPDATE shareholder_family_memberships \
-             SET ended_at = $3, reason = COALESCE($4, reason) \
-             WHERE shareholder_id = $1 AND family_id = $2 AND ended_at IS NULL",
-        )
-        .bind(shareholder_id)
-        .bind(old_family_id)
-        .bind(now)
-        .bind(reason)
-        .execute(tx.as_mut())
-        .await
-        .map_err(FamilyChangeError::Database)?;
+        sqlx::query("SELECT public.app_family_membership_end($1, $2, $3, $4, $5)")
+            .bind(shareholder_id)
+            .bind(old_family_id)
+            .bind(now)
+            .bind(reason)
+            .bind(cooperative_id)
+            .execute(tx.as_mut())
+            .await
+            .map_err(FamilyChangeError::Database)?;
     }
 
     let insert = sqlx::query(
         "INSERT INTO shareholder_family_memberships \
-             (shareholder_id, family_id, started_at, reason, created_by) \
-         VALUES ($1, $2, $3, $4, $5)",
+             (shareholder_id, family_id, started_at, reason, created_by, cooperative_id) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(shareholder_id)
     .bind(new_family_id)
     .bind(now)
     .bind(reason)
     .bind(actor)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await;
 
@@ -624,12 +695,16 @@ pub async fn change_family(
         Err(other) => return Err(FamilyChangeError::Database(other)),
     }
 
-    sqlx::query("UPDATE shareholders SET updated_at = $2 WHERE id = $1")
-        .bind(shareholder_id)
-        .bind(now)
-        .execute(tx.as_mut())
-        .await
-        .map_err(FamilyChangeError::Database)?;
+    sqlx::query(
+        "UPDATE shareholders SET updated_at = $2 WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $3",
+    )
+    .bind(shareholder_id)
+    .bind(now)
+    .bind(cooperative_id)
+    .execute(tx.as_mut())
+    .await
+    .map_err(FamilyChangeError::Database)?;
 
     tx.commit().await.map_err(FamilyChangeError::Database)?;
 
@@ -639,19 +714,23 @@ pub async fn change_family(
 /// Duplicate-candidates for the create flow: same-name shareholders
 /// with identity context (§29). Never blocks; the operator confirms.
 pub async fn duplicate_candidates(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     first_name: &str,
     last_name: &str,
 ) -> Result<Vec<ShareholderListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let folded = format!(
         "%{}%",
         model::fold_search(&format!("{} {}", first_name.trim(), last_name.trim()))
     );
     let sql = format!(
-        "{SHAREHOLDER_LIST_SELECT}          WHERE p.search_name LIKE $1          {SHAREHOLDER_LIST_ORDER} LIMIT 20"
+        "{SHAREHOLDER_LIST_SELECT}          WHERE p.search_name LIKE $1 \
+         AND s.cooperative_id IS NOT DISTINCT FROM $2          {SHAREHOLDER_LIST_ORDER} LIMIT 20"
     );
     sqlx::query_as::<_, ShareholderListRow>(&sql)
         .bind(folded)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }

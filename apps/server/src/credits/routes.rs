@@ -24,14 +24,13 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::payments::model as payment_model;
+use crate::tenant::extractor::BusinessAuth;
 
 use super::model as credit_model;
 use super::repo as credit_repo;
@@ -64,12 +63,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Credit mutations share this prologue (CSRF layers + permission).
 macro_rules! credits_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::CREDITS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::CREDITS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -284,38 +283,56 @@ pub struct ReverseRequest {
 /// balance is never derived here.
 pub async fn shareholder_credits(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(shareholder_id): Path<Uuid>,
 ) -> Result<Json<ShareholderCreditsDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::CREDITS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::CREDITS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
-            .bind(shareholder_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err("shareholder check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
-    load_shareholder_ledger(pool, shareholder_id)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1 AND cooperative_id = $2)",
+        )
+        .bind(shareholder_id)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
         .await
-        .map(Json)
+        .map_err(db_err("shareholder check failed"))?;
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        load_shareholder_ledger(&mut tx, ctx.cooperative_id(), shareholder_id)
+            .await
+            .map(Json)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 async fn load_shareholder_ledger(
-    pool: &sqlx::PgPool,
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<ShareholderCreditsDto, ApiError> {
-    let summary = credit_repo::shareholder_credit_summary(pool, shareholder_id)
+    let summary = credit_repo::shareholder_credit_summary(&mut *db, cooperative_id, shareholder_id)
         .await
         .map_err(db_err("credit summary failed"))?;
-    let credits = credit_repo::list_shareholder_credits(pool, shareholder_id)
+    let credits = credit_repo::list_shareholder_credits(&mut *db, cooperative_id, shareholder_id)
         .await
         .map_err(db_err("credit list failed"))?;
-    let applications = credit_repo::list_shareholder_applications(pool, shareholder_id)
-        .await
-        .map_err(db_err("credit applications failed"))?;
+    let applications =
+        credit_repo::list_shareholder_applications(&mut *db, cooperative_id, shareholder_id)
+            .await
+            .map_err(db_err("credit applications failed"))?;
     Ok(ShareholderCreditsDto {
         summary: CreditSummaryDto {
             credit_count: summary.credit_count,
@@ -332,23 +349,40 @@ async fn load_shareholder_ledger(
 /// Credit origins sourced from one Payment (disposition surface).
 pub async fn payment_credits(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(payment_id): Path<Uuid>,
 ) -> Result<Json<Vec<CreditDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::CREDITS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::CREDITS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM payments WHERE id = $1)")
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM payments WHERE id = $1 AND cooperative_id = $2)",
+        )
         .bind(payment_id)
-        .fetch_one(pool)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err("payment check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let rows = credit_repo::list_payment_credits(&mut tx, ctx.cooperative_id(), payment_id)
+            .await
+            .map_err(db_err("payment credits failed"))?;
+        Ok(Json(rows.iter().map(credit_dto).collect()))
     }
-    let rows = credit_repo::list_payment_credits(pool, payment_id)
-        .await
-        .map_err(db_err("payment credits failed"))?;
-    Ok(Json(rows.iter().map(credit_dto).collect()))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Application history against one Assessment — kept strictly
@@ -356,23 +390,41 @@ pub async fn payment_credits(
 /// of settlement, never blended into one line list).
 pub async fn assessment_applications(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(assessment_id): Path<Uuid>,
 ) -> Result<Json<Vec<ApplicationDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::CREDITS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::CREDITS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assessments WHERE id = $1)")
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assessments WHERE id = $1 AND cooperative_id = $2)",
+        )
         .bind(assessment_id)
-        .fetch_one(pool)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err("assessment check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let rows =
+            credit_repo::list_assessment_applications(&mut tx, ctx.cooperative_id(), assessment_id)
+                .await
+                .map_err(db_err("assessment applications failed"))?;
+        Ok(Json(rows.iter().map(application_dto).collect()))
     }
-    let rows = credit_repo::list_assessment_applications(pool, assessment_id)
-        .await
-        .map_err(db_err("assessment applications failed"))?;
-    Ok(Json(rows.iter().map(application_dto).collect()))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Explicit remainder attribution (docs/06 §"New excess"): assigns
@@ -383,167 +435,155 @@ pub async fn assessment_applications(
 pub async fn assign_credit(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(payment_id): Path<Uuid>,
     Json(body): Json<AssignCreditRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = credits_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
+    let pool = credits_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
 
-    let amount =
-        credit_model::validate_amount(&body.amount).map_err(|_| ApiError::ValidationFailed)?;
-    let note = credit_model::validate_note(body.note.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let key = credit_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = credit_model::assignment_fingerprint(
-        payment_id,
-        body.shareholder_id,
-        amount,
-        note.as_deref(),
-    );
-
-    let outcome = credit_repo::assign_credit(
-        pool,
-        auth.user_id,
-        credit_repo::AssignCredit {
+        let amount =
+            credit_model::validate_amount(&body.amount).map_err(|_| ApiError::ValidationFailed)?;
+        let note = credit_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let key = credit_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = credit_model::assignment_fingerprint(
             payment_id,
-            shareholder_id: body.shareholder_id,
+            body.shareholder_id,
             amount,
-            note,
-            idempotency_key: key,
-            fingerprint,
-        },
-        now,
-    )
-    .await
-    .map_err(command_error)?;
+            note.as_deref(),
+        );
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::ShareholderCreditAssigned,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "credit_id": outcome.credit_id,
-                "credit_number": outcome.credit_number,
-                "source_payment_id": payment_id,
-                "shareholder_id": body.shareholder_id,
-                "amount": payment_model::canonical_amount(amount),
-                "applied_amount": payment_model::canonical_amount(outcome.applied_amount),
-                "application_count": outcome.application_count,
+        let outcome = credit_repo::assign_credit(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            credit_repo::AssignCredit {
+                payment_id,
+                shareholder_id: body.shareholder_id,
+                amount,
+                note,
+                idempotency_key: key,
+                fingerprint,
+            },
+            now,
+        )
+        .await
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            if outcome.application_count > 0 {
+                // R4: audit row minted by the DB transition trigger.
+            }
+            tracing::info!(
+                outcome = "shareholder_credit_assigned", id = %outcome.credit_id,
+                number = outcome.credit_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let ledger =
+            load_shareholder_ledger(&mut tx, ctx.cooperative_id(), body.shareholder_id).await?;
+        Ok((
+            if outcome.replayed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
+            Json(AssignCreditResponse {
+                replayed: outcome.replayed,
+                credit_id: outcome.credit_id,
+                credit_number: outcome.credit_number,
+                applied_amount: payment_model::canonical_amount(outcome.applied_amount),
+                application_count: outcome.application_count,
+                ledger,
             }),
         )
-        .await;
-        if outcome.application_count > 0 {
-            audit::record(
-                pool,
-                SecurityEventType::CreditApplied,
-                Some(auth.user_id),
-                None,
-                serde_json::json!({
-                    "mode": "automatic",
-                    "trigger": "credit_assignment",
-                    "credit_id": outcome.credit_id,
-                    "shareholder_id": body.shareholder_id,
-                    "applied_amount":
-                        payment_model::canonical_amount(outcome.applied_amount),
-                    "application_count": outcome.application_count,
-                }),
-            )
-            .await;
-        }
-        tracing::info!(
-            outcome = "shareholder_credit_assigned", id = %outcome.credit_id,
-            number = outcome.credit_number, actor = %auth.user_id
-        );
+            .into_response())
     }
-
-    let ledger = load_shareholder_ledger(pool, body.shareholder_id).await?;
-    Ok((
-        if outcome.replayed {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        },
-        Json(AssignCreditResponse {
-            replayed: outcome.replayed,
-            credit_id: outcome.credit_id,
-            credit_number: outcome.credit_number,
-            applied_amount: payment_model::canonical_amount(outcome.applied_amount),
-            application_count: outcome.application_count,
-            ledger,
-        }),
-    )
-        .into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
-/// Manual apply-credit command (docs/05): settles part of an ACTIVE
-/// Assessment from ITS OWN Shareholder's available credit. Same engine
+/// Manual apply-credit command (docs/05): settles the EXACTLY
+/// requested amount of an ACTIVE Assessment from ITS OWN Shareholder's
+/// available credit — never more, never less on success. Same engine
 /// as the automatic path — never a second arithmetic.
 pub async fn apply_credit(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(assessment_id): Path<Uuid>,
     Json(body): Json<ApplyCreditRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = credits_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = credits_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let amount =
+            credit_model::validate_amount(&body.amount).map_err(|_| ApiError::ValidationFailed)?;
+        let key = credit_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = credit_model::application_fingerprint(assessment_id, amount);
 
-    let amount =
-        credit_model::validate_amount(&body.amount).map_err(|_| ApiError::ValidationFailed)?;
-    let key = credit_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = credit_model::application_fingerprint(assessment_id, amount);
+        let outcome = credit_repo::apply_credit(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            credit_repo::ApplyCredit {
+                assessment_id,
+                amount,
+                idempotency_key: key,
+                fingerprint,
+            },
+        )
+        .await
+        .map_err(command_error)?;
 
-    let outcome = credit_repo::apply_credit(
-        pool,
-        auth.user_id,
-        credit_repo::ApplyCredit {
-            assessment_id,
-            amount,
-            idempotency_key: key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "credit_applied", assessment = %assessment_id,
+                actor = %ctx.auth.user_id
+            );
+        }
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::CreditApplied,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "mode": "manual",
-                "assessment_id": assessment_id,
-                "applied_amount": payment_model::canonical_amount(outcome.applied_amount),
-                "assessment_remaining":
-                    payment_model::canonical_amount(outcome.assessment_remaining),
+        Ok((
+            if outcome.replayed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
+            Json(ApplyCreditResponse {
+                replayed: outcome.replayed,
+                applied_amount: payment_model::canonical_amount(outcome.applied_amount),
+                assessment_remaining: payment_model::canonical_amount(outcome.assessment_remaining),
             }),
         )
-        .await;
-        tracing::info!(
-            outcome = "credit_applied", assessment = %assessment_id,
-            actor = %auth.user_id
-        );
+            .into_response())
     }
-
-    Ok((
-        if outcome.replayed {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        },
-        Json(ApplyCreditResponse {
-            replayed: outcome.replayed,
-            applied_amount: payment_model::canonical_amount(outcome.applied_amount),
-            assessment_remaining: payment_model::canonical_amount(outcome.assessment_remaining),
-        }),
-    )
-        .into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Credit-origin reversal (docs/19): the original row stays, marked
@@ -552,38 +592,49 @@ pub async fn apply_credit(
 pub async fn reverse_credit(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(credit_id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = credits_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = credit_model::validate_reversal_reason(&body.reversal_reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = credits_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = credit_model::validate_reversal_reason(&body.reversal_reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let replayed = credit_repo::reverse_credit(pool, auth.user_id, credit_id, &reason, now)
+        let replayed = credit_repo::reverse_credit(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            credit_id,
+            &reason,
+            now,
+        )
         .await
         .map_err(command_error)?;
 
-    if !replayed {
-        audit::record(
-            pool,
-            SecurityEventType::ShareholderCreditReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "credit_id": credit_id,
-                "reversal_reason": reason,
-            }),
-        )
-        .await;
-        tracing::info!(
-            outcome = "shareholder_credit_reversed", id = %credit_id,
-            actor = %auth.user_id
-        );
-    }
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "shareholder_credit_reversed", id = %credit_id,
+                actor = %ctx.auth.user_id
+            );
+        }
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+        Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Application reversal (docs/19): the original application survives
@@ -592,37 +643,47 @@ pub async fn reverse_credit(
 pub async fn reverse_application(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(application_id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = credits_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let reason = credit_model::validate_reversal_reason(&body.reversal_reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
+    let pool = credits_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let reason = credit_model::validate_reversal_reason(&body.reversal_reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
 
-    let replayed =
-        credit_repo::reverse_application(pool, auth.user_id, application_id, &reason, now)
-            .await
-            .map_err(command_error)?;
-
-    if !replayed {
-        audit::record(
-            pool,
-            SecurityEventType::CreditApplicationReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "application_id": application_id,
-                "reversal_reason": reason,
-            }),
+        let replayed = credit_repo::reverse_application(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            application_id,
+            &reason,
+            now,
         )
-        .await;
-        tracing::info!(
-            outcome = "credit_application_reversed", id = %application_id,
-            actor = %auth.user_id
-        );
-    }
+        .await
+        .map_err(command_error)?;
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+        if !replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "credit_application_reversed", id = %application_id,
+                actor = %ctx.auth.user_id
+            );
+        }
+
+        Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

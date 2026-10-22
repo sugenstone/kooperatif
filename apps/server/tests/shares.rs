@@ -43,6 +43,7 @@ fn test_database_url() -> Option<String> {
 }
 
 struct TestApp {
+    _claim: app_db::TestDbClaim,
     app: axum::Router,
     pool: PgPool,
     _peer: SocketAddr,
@@ -73,15 +74,21 @@ async fn setup() -> Option<TestApp> {
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
     // F11: bound per-test database accumulation (24 h cutoff, no connections).
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test db");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("db");
-    app_db::run_migrations(&pool).await.expect("migrations");
+    app_db::run_test_migrations(&pool)
+        .await
+        .expect("migrations");
+    // C5-3: cooperative_id is NOT NULL on every business table — the
+    // NULL legacy lane is closed. Bootstrap up front so fixtures and
+    // API writes land in the bootstrap cooperative; user helpers add
+    // memberships explicitly.
+    let _ = kooperatif_server::tenant::repo::bootstrap_initial_cooperative(&pool, "Ana Kooperatif")
+        .await
+        .expect("bootstrap cooperative");
 
     let config = AuthConfig {
         allowed_origins: vec![ORIGIN.to_string()],
@@ -113,6 +120,7 @@ async fn setup() -> Option<TestApp> {
     );
     let octets = Uuid::new_v4().as_bytes().to_vec();
     Some(TestApp {
+        _claim: claim,
         app,
         pool,
         _database_name: database_name,
@@ -135,12 +143,21 @@ async fn create_admin(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    let user = users::create_user(pool, username, "Test", &hash)
+    let user = users::create_user(pool, username, "Test", &hash, TEST_PASSWORD)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO user_role_assignments (user_id, role_id) \
                  SELECT $1, id FROM roles WHERE name = 'Sistem Yöneticisi'",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Post-C5-3: suites run inside the bootstrap cooperative —
+    // membership is required for the business lane.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status)          SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
     )
     .bind(user.id)
     .execute(pool)
@@ -156,10 +173,20 @@ async fn create_plain_user(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    users::create_user(pool, username, "Plain", &hash)
+    let user = users::create_user(pool, username, "Plain", &hash, TEST_PASSWORD)
         .await
-        .unwrap()
-        .id
+        .unwrap();
+    // Active member with no roles — cooperative lane resolves, the
+    // business permission check still denies.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
+         SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    user.id
 }
 
 async fn login(app: &axum::Router, peer: SocketAddr, username: &str) -> (String, String) {
@@ -891,7 +918,12 @@ async fn shares_authorization_and_permission_upgrade() {
     .unwrap();
     assert!(perms.contains(&"shares.read".to_string()), "{perms:?}");
     assert!(perms.contains(&"shares.manage".to_string()), "{perms:?}");
-    assert_eq!(perms.len(), 31);
+    assert_eq!(
+        // B5 (0072): the seeded admin role carries the whole catalog
+        // minus `cooperatives.manage`, which stays platform-only.
+        perms.len(),
+        kooperatif_server::auth::authz::catalog::ALL.len() - 1
+    );
 
     let plain_name = format!("plain.{}", Uuid::new_v4().simple());
     let plain_id = create_plain_user(&test.pool, &plain_name).await;

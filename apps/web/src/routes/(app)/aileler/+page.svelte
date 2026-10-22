@@ -27,6 +27,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { ApiError, apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { FAMILIES_PATH, type FamilyListItem, type Paginated } from '@kooperatif/contracts';
@@ -40,6 +41,8 @@
 
 	let createOpen = $state(false);
 	let newSequence = $state<number | ''>('');
+	// M1-P7-A (T7.2): an entered sequence number is unsaved input.
+	useDirtyForm(() => newSequence !== '');
 	let createError = $state<MessageKey | null>(null);
 	let creating = $state(false);
 

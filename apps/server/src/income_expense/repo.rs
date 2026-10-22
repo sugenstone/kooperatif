@@ -16,7 +16,6 @@
 //! survive (docs/19).
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -43,15 +42,20 @@ pub struct CategoryRow {
 }
 
 /// Bounded category list — filter by type/status, substring search on
-/// name; stable order (ADR-010).
+/// name; stable order (ADR-010). C3: scoped to the verified
+/// cooperative — the NULL-only NeverBootstrapped seed lane is the
+/// `None` context; categories claimed by a bootstrap cooperative are
+/// ordinary coop-owned rows.
 pub async fn list_categories(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     category_type: Option<CategoryType>,
     status: Option<CategoryStatus>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<CategoryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let pattern = search.map(|s| format!("%{}%", s.trim().to_lowercase()));
     sqlx::query_as(
         "SELECT c.id, c.category_type, c.name, c.description, c.status, \
@@ -60,7 +64,8 @@ pub async fn list_categories(
             c.created_at, c.updated_at, \
             count(*) OVER() AS total_count \
         FROM financial_categories c \
-        WHERE ($1::text IS NULL OR c.category_type = $1) \
+        WHERE c.cooperative_id IS NOT DISTINCT FROM $6 \
+          AND ($1::text IS NULL OR c.category_type = $1) \
           AND ($2::text IS NULL OR c.status = $2) \
           AND ($3::text IS NULL OR lower(c.name) LIKE $3) \
         ORDER BY c.category_type, c.name, c.id LIMIT $4 OFFSET $5",
@@ -70,37 +75,49 @@ pub async fn list_categories(
     .bind(pattern)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
 /// Active categories of one type for entry-form pickers.
 pub async fn list_category_options(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     category_type: CategoryType,
 ) -> Result<Vec<CategoryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT c.id, c.category_type, c.name, c.description, c.status, \
             0::bigint AS entry_count, c.created_at, c.updated_at, 0::bigint AS total_count \
         FROM financial_categories c \
         WHERE c.category_type = $1 AND c.status = 'active' \
+          AND c.cooperative_id IS NOT DISTINCT FROM $2 \
         ORDER BY c.name, c.id",
     )
     .bind(category_type.as_str())
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
-pub async fn get_category(pool: &PgPool, id: Uuid) -> Result<Option<CategoryRow>, sqlx::Error> {
+pub async fn get_category(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<CategoryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as(
         "SELECT c.id, c.category_type, c.name, c.description, c.status, \
             (SELECT count(*) FROM income_entries i WHERE i.category_id = c.id) + \
             (SELECT count(*) FROM expense_entries e WHERE e.category_id = c.id) AS entry_count, \
             c.created_at, c.updated_at, 0::bigint AS total_count \
-        FROM financial_categories c WHERE c.id = $1",
+        FROM financial_categories c WHERE c.id = $1 \
+          AND c.cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
@@ -171,12 +188,14 @@ pub struct EntryFilter {
 /// business dates on `occurred_at`; search covers description,
 /// counterparty, reference and the entry number.
 pub async fn list_entries(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     kind: EntryKind,
     filter: &EntryFilter,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<EntryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let pattern = filter
         .search
         .as_deref()
@@ -187,7 +206,8 @@ pub async fn list_entries(
         JOIN financial_accounts a ON a.id = t.financial_account_id \
         JOIN financial_categories c ON c.id = t.category_id \
         JOIN account_movements m ON m.id = t.account_movement_id \
-        WHERE ($1::date IS NULL OR t.occurred_at >= $1::date) \
+        WHERE t.cooperative_id IS NOT DISTINCT FROM $9 \
+          AND ($1::date IS NULL OR t.occurred_at >= $1::date) \
           AND ($2::date IS NULL OR t.occurred_at < ($2::date + 1)) \
           AND ($3::uuid IS NULL OR t.financial_account_id = $3) \
           AND ($4::uuid IS NULL OR t.category_id = $4) \
@@ -209,27 +229,31 @@ pub async fn list_entries(
     .bind(pattern)
     .bind(page_size)
     .bind((page - 1) * page_size)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
 pub async fn get_entry(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     kind: EntryKind,
     id: Uuid,
 ) -> Result<Option<EntryRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, EntryRow>(&format!(
         "{select}, 0::bigint AS total_count \
         FROM {table} t \
         JOIN financial_accounts a ON a.id = t.financial_account_id \
         JOIN financial_categories c ON c.id = t.category_id \
         JOIN account_movements m ON m.id = t.account_movement_id \
-        WHERE t.id = $1",
+        WHERE t.id = $1 AND t.cooperative_id IS NOT DISTINCT FROM $2",
         select = entry_select(kind),
         table = table_of(kind),
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *conn)
     .await
 }
 
@@ -245,9 +269,11 @@ pub struct OperationalSummary {
 }
 
 pub async fn operational_summary(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &EntryFilter,
 ) -> Result<OperationalSummary, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let mut summary = OperationalSummary {
         income_total: Decimal::ZERO,
         income_count: 0,
@@ -258,6 +284,7 @@ pub async fn operational_summary(
         let (total, count): (Option<Decimal>, i64) = sqlx::query_as(&format!(
             "SELECT sum(t.amount), count(*) FROM {table} t \
              WHERE t.status = 'posted' \
+               AND t.cooperative_id IS NOT DISTINCT FROM $5 \
                AND ($1::date IS NULL OR t.occurred_at >= $1::date) \
                AND ($2::date IS NULL OR t.occurred_at < ($2::date + 1)) \
                AND ($3::uuid IS NULL OR t.financial_account_id = $3) \
@@ -268,7 +295,8 @@ pub async fn operational_summary(
         .bind(filter.date_to)
         .bind(filter.financial_account_id)
         .bind(filter.category_id)
-        .fetch_one(pool)
+        .bind(cooperative_id)
+        .fetch_one(&mut *conn)
         .await?;
         let amount = total.unwrap_or_default();
         if slot == 0 {
@@ -320,19 +348,26 @@ pub struct CreateCategory {
 }
 
 pub async fn create_category(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateCategory,
 ) -> Result<Uuid, IncomeExpenseCommandError> {
+    let mut conn = db
+        .conn()
+        .await
+        .map_err(IncomeExpenseCommandError::Database)?;
     let result = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO financial_categories (category_type, name, description, created_by) \
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO financial_categories \
+            (category_type, name, description, created_by, cooperative_id) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(command.category_type.as_str())
     .bind(&command.name)
     .bind(&command.description)
     .bind(actor)
-    .fetch_one(pool)
+    .bind(cooperative_id)
+    .fetch_one(&mut *conn)
     .await;
     match result {
         Ok(id) => Ok(id),
@@ -347,31 +382,41 @@ pub async fn create_category(
 /// historical reference (docs/19), so a rename keeps old entries
 /// coherent; deactivation gates NEW use.
 pub async fn update_category(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
     name: String,
     description: Option<String>,
     expected_updated_at: OffsetDateTime,
 ) -> Result<(), IncomeExpenseCommandError> {
+    let mut conn = db
+        .conn()
+        .await
+        .map_err(IncomeExpenseCommandError::Database)?;
     let result = sqlx::query(
         "UPDATE financial_categories SET name = $2, description = $3, updated_at = now() \
-         WHERE id = $1 AND updated_at = $4",
+         WHERE id = $1 AND updated_at = $4 \
+           AND cooperative_id IS NOT DISTINCT FROM $5",
     )
     .bind(id)
     .bind(&name)
     .bind(&description)
     .bind(expected_updated_at)
-    .execute(pool)
+    .bind(cooperative_id)
+    .execute(&mut *conn)
     .await;
     match result {
         Ok(done) if done.rows_affected() == 1 => Ok(()),
         Ok(_) => {
-            let exists: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM financial_categories WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(IncomeExpenseCommandError::Database)?;
+            let exists: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM financial_categories WHERE id = $1 \
+                 AND cooperative_id IS NOT DISTINCT FROM $2",
+            )
+            .bind(id)
+            .bind(cooperative_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(IncomeExpenseCommandError::Database)?;
             match exists {
                 Some(_) => Err(IncomeExpenseCommandError::StaleState),
                 None => Err(IncomeExpenseCommandError::NotFound),
@@ -387,22 +432,26 @@ pub async fn update_category(
 /// `active <-> inactive` lifecycle — never deletes: a referenced
 /// category must stay interpretable forever (docs/19).
 pub async fn change_category_status(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
     target: CategoryStatus,
 ) -> Result<CategoryStatus, IncomeExpenseCommandError> {
-    let previous: Option<String> = sqlx::query_scalar(
-        "UPDATE financial_categories SET status = $2, updated_at = now() \
-         WHERE id = $1 RETURNING status",
-    )
-    .bind(id)
-    .bind(target.as_str())
-    .fetch_optional(pool)
-    .await
-    .map_err(IncomeExpenseCommandError::Database)?;
-    match previous {
-        Some(_) => Ok(target),
-        None => Err(IncomeExpenseCommandError::NotFound),
+    let mut conn = db
+        .conn()
+        .await
+        .map_err(IncomeExpenseCommandError::Database)?;
+    let updated: bool =
+        sqlx::query_scalar("SELECT public.app_financial_category_set_status($1, $2, $3)")
+            .bind(id)
+            .bind(target.as_str())
+            .bind(cooperative_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(IncomeExpenseCommandError::Database)?;
+    match updated {
+        true => Ok(target),
+        false => Err(IncomeExpenseCommandError::NotFound),
     }
 }
 
@@ -432,24 +481,27 @@ pub struct EntryOutcome {
 /// For Expense the account must fund the outflow under its row lock;
 /// for Income the inflow is always safe.
 pub async fn post_entry(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     kind: EntryKind,
     command: PostEntry,
 ) -> Result<EntryOutcome, IncomeExpenseCommandError> {
-    let table = table_of(kind);
-    let number_col = number_column_of(kind);
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(IncomeExpenseCommandError::Database)?;
+    let table = table_of(kind);
+    let number_col = number_column_of(kind);
 
-    // 1. Idempotent replay short-circuit.
+    // 1. Idempotent replay short-circuit (scoped: a foreign-cooperative
+    //    row under the global key is indistinguishable — C3/C5).
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(&format!(
         "SELECT id, {number_col}, idempotency_fingerprint FROM {table} \
-         WHERE idempotency_key = $1"
+         WHERE idempotency_key = $1 AND cooperative_id IS NOT DISTINCT FROM $2"
     ))
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(IncomeExpenseCommandError::Database)?;
@@ -471,20 +523,27 @@ pub async fn post_entry(
     let locked = account_repo::lock_accounts(&mut tx, &[command.financial_account_id])
         .await
         .map_err(account_to_entry_error)?;
-    let Some((status, _currency)) = locked.get(&command.financial_account_id) else {
+    let Some((status, _currency, account_coop)) = locked.get(&command.financial_account_id) else {
         return Err(IncomeExpenseCommandError::NotFound);
     };
     if *status != AccountStatus::Active.as_str() {
         return Err(IncomeExpenseCommandError::InactiveAccount);
     }
+    // C3: the account must belong to the verified cooperative — a
+    // foreign id is indistinguishable from absence.
+    if *account_coop != cooperative_id {
+        return Err(IncomeExpenseCommandError::NotFound);
+    }
 
-    // 3. Lock the category: must exist, match the entry kind and be
-    //    active. The composite FK then makes a wrong-typed write
-    //    impossible even under a later race.
+    // 3. Lock the category: must exist IN SCOPE, match the entry kind
+    //    and be active. The composite FK then makes a wrong-typed or
+    //    wrong-cooperative write impossible even under a later race.
     let category: Option<(String, String)> = sqlx::query_as(
-        "SELECT category_type, status FROM financial_categories WHERE id = $1 FOR UPDATE",
+        "SELECT category_type, status FROM financial_categories \
+         WHERE id = $1 AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
     )
     .bind(command.category_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(IncomeExpenseCommandError::Database)?;
@@ -503,16 +562,20 @@ pub async fn post_entry(
     //    of the physical balance is spendable — cash reserved for
     //    Social Aid funds can never fund an operational expense.
     if kind == EntryKind::Expense {
-        let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
-            .await
-            .map_err(account_to_entry_error)?;
+        let balance =
+            account_repo::locked_balance(&mut tx, *account_coop, command.financial_account_id)
+                .await
+                .map_err(account_to_entry_error)?;
         if command.amount > balance {
             return Err(IncomeExpenseCommandError::InsufficientFunds);
         }
-        let reserved =
-            account_repo::locked_reserved_social_aid(&mut tx, command.financial_account_id)
-                .await
-                .map_err(account_to_entry_error)?;
+        let reserved = account_repo::locked_reserved_social_aid(
+            &mut tx,
+            cooperative_id,
+            command.financial_account_id,
+        )
+        .await
+        .map_err(account_to_entry_error)?;
         if command.amount > balance - reserved {
             return Err(IncomeExpenseCommandError::InsufficientUnrestrictedFunds);
         }
@@ -531,6 +594,7 @@ pub async fn post_entry(
             source_id: entry_id,
             occurred_at: command.occurred_at,
             actor,
+            cooperative_id: *account_coop,
         },
     )
     .await
@@ -541,9 +605,11 @@ pub async fn post_entry(
         "INSERT INTO {table} \
             (id, financial_account_id, category_id, amount, currency, occurred_at, \
              description, counterparty, reference_no, account_movement_id, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7, $8, $9, 'posted', $10, $11, $12) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             {number_col}) \
+         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7, $8, $9, 'posted', $10, $11, $12, $13, \
+             allocate_document_number($13, '{table}.{number_col}')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, {number_col}"
     ))
     .bind(entry_id)
@@ -558,24 +624,33 @@ pub async fn post_entry(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(IncomeExpenseCommandError::Database)?;
 
     let Some((id, number)) = inserted else {
         // Concurrent replay: the other transaction already posted under
         // this key — roll back our attempt and return theirs.
+        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(&format!(
+            "SELECT id, {number_col}, idempotency_fingerprint FROM {table} \
+             WHERE idempotency_key = $1 AND cooperative_id IS NOT DISTINCT FROM $2"
+        ))
+        .bind(&command.idempotency_key)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(IncomeExpenseCommandError::Database)?;
         tx.rollback()
             .await
             .map_err(IncomeExpenseCommandError::Database)?;
-        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(&format!(
-            "SELECT id, {number_col}, idempotency_fingerprint FROM {table} \
-             WHERE idempotency_key = $1"
-        ))
-        .bind(&command.idempotency_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(IncomeExpenseCommandError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(IncomeExpenseCommandError::NotFound);
         };
@@ -605,90 +680,51 @@ pub async fn post_entry(
 /// would take the account below zero is rejected (the funds were
 /// spent; restore them first). Replays return `(true, number)`.
 pub async fn reverse_entry(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     kind: EntryKind,
     entry_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), IncomeExpenseCommandError> {
-    let table = table_of(kind);
-    let number_col = number_column_of(kind);
-    let mut tx = pool
+    let mut tx = db
         .begin()
         .await
         .map_err(IncomeExpenseCommandError::Database)?;
 
-    let entry: Option<(String, i64, Uuid, Decimal)> = sqlx::query_as(&format!(
-        "SELECT status, {number_col}, financial_account_id, amount \
-         FROM {table} WHERE id = $1 FOR UPDATE"
-    ))
-    .bind(entry_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(IncomeExpenseCommandError::Database)?;
-    let Some((status, entry_number, account_id, amount)) = entry else {
-        return Err(IncomeExpenseCommandError::NotFound);
+    // R3C: the complete reversal package (entry lock + status, account
+    // lock + scope assertion, balance/reservation checks for income
+    // reversals, compensating movement flip, entry flip) is ONE
+    // permission-checked definer call — a partial reversal is no
+    // longer callable by the runtime role.
+    let reverse_fn = match kind {
+        EntryKind::Income => "public.app_income_entry_reverse_tx",
+        EntryKind::Expense => "public.app_expense_entry_reverse_tx",
     };
-    if status != "posted" {
-        tx.rollback()
-            .await
-            .map_err(IncomeExpenseCommandError::Database)?;
-        return Ok((true, entry_number));
-    }
-
-    // Same deterministic account lock prefix as every balance command.
-    account_repo::lock_accounts(&mut tx, &[account_id])
-        .await
-        .map_err(account_to_entry_error)?;
-
-    // Removing an Income inflow decreases the balance — refuse if the
-    // money is no longer there (docs/19 reversal safety). The
-    // post-reversal balance must also still cover the Social Aid
-    // reservation held in the account (PILOT-FIX-001).
-    if kind == EntryKind::Income {
-        let balance = account_repo::locked_balance(&mut tx, account_id)
-            .await
-            .map_err(account_to_entry_error)?;
-        if balance - amount < Decimal::ZERO {
-            return Err(IncomeExpenseCommandError::InsufficientFunds);
-        }
-        let reserved = account_repo::locked_reserved_social_aid(&mut tx, account_id)
-            .await
-            .map_err(account_to_entry_error)?;
-        if balance - amount < reserved {
-            return Err(IncomeExpenseCommandError::InsufficientUnrestrictedFunds);
-        }
-    }
-
-    account_repo::reverse_movements_of_source(
-        &mut tx,
-        kind.movement_source(),
-        entry_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await
-    .map_err(account_to_entry_error)?;
-
-    sqlx::query(&format!(
-        "UPDATE {table} SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1"
+    let (replayed, entry_number): (bool, i64) = sqlx::query_as(&format!(
+        "SELECT replayed, entry_number FROM {reverse_fn}($1, $2, $3, $4, $5)"
     ))
     .bind(entry_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(IncomeExpenseCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => IncomeExpenseCommandError::NotFound,
+        Some("insufficient_funds") => IncomeExpenseCommandError::InsufficientFunds,
+        Some("insufficient_unrestricted_funds") => {
+            IncomeExpenseCommandError::InsufficientUnrestrictedFunds
+        }
+        _ => IncomeExpenseCommandError::Database(error),
+    })?;
 
     tx.commit()
         .await
         .map_err(IncomeExpenseCommandError::Database)?;
-    Ok((false, entry_number))
+    Ok((replayed, entry_number))
 }
 
 /// The STEP-008 account layer reports its own error enum — translate

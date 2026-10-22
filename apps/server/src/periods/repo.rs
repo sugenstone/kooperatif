@@ -9,7 +9,6 @@
 //! current state at read time.
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -58,12 +57,19 @@ LEFT JOIN ( \
 /// Period list: substring over the name or an exact period number when
 /// the term is a positive integer. Stable ordering by business number
 /// (ADR-010; small administrative dataset → offset pagination).
+///
+/// `cooperative_id` is the verified business context (M1-P2-C3):
+/// `Some` scopes to that cooperative; `None` is reachable only in the
+/// proven never-bootstrapped lane and matches only legacy NULL rows
+/// (`IS NOT DISTINCT FROM`) — never a global listing.
 pub async fn list_periods(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<PeriodRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let raw = search.map(str::trim).filter(|s| !s.is_empty());
     let folded: Option<String> = raw.map(|term| format!("%{}%", party_model::fold_search(term)));
     let number: Option<i64> = raw
@@ -71,7 +77,9 @@ pub async fn list_periods(
         .filter(|n| *n > 0);
 
     let sql = format!(
-        "SELECT *, count(*) OVER () AS total_count FROM ({PERIOD_SELECT}) base \
+        "SELECT *, count(*) OVER () AS total_count FROM (\
+            {PERIOD_SELECT} WHERE p.cooperative_id IS NOT DISTINCT FROM $5\
+         ) base \
          WHERE ( \
             $1::text IS NULL \
             OR lower(base.name) LIKE $1 \
@@ -85,16 +93,28 @@ pub async fn list_periods(
         .bind(number)
         .bind((page - 1) * page_size)
         .bind(page_size)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
-pub async fn find_period(pool: &PgPool, id: Uuid) -> Result<Option<PeriodRow>, sqlx::Error> {
-    let sql =
-        format!("SELECT *, 0::bigint AS total_count FROM ({PERIOD_SELECT} WHERE p.id = $1) base");
+/// Cooperative-scoped detail (C3): foreign period ids return `None`.
+pub async fn find_period(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<PeriodRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
+    let sql = format!(
+        "SELECT *, 0::bigint AS total_count FROM (\
+            {PERIOD_SELECT} WHERE p.id = $1 \
+            AND p.cooperative_id IS NOT DISTINCT FROM $2\
+         ) base"
+    );
     sqlx::query_as::<_, PeriodRow>(&sql)
         .bind(id)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *conn)
         .await
 }
 
@@ -141,13 +161,18 @@ LEFT JOIN ( \
 /// Assessment list for one Period (§61): canonical identity on every
 /// row; search folds over shareholder name, guardian name or an exact
 /// family number; stable ordering by folded name + assessment id.
+/// `cooperative_id` scopes the obligation rows themselves (C3): a
+/// foreign cooperative's period_id yields an empty list rather than a
+/// disclosure — assessments of that period carry its cooperative.
 pub async fn list_assessments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     period_id: Uuid,
     search: Option<&str>,
     page: i64,
     page_size: i64,
 ) -> Result<Vec<AssessmentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let raw = search.map(str::trim).filter(|s| !s.is_empty());
     let folded: Option<String> = raw.map(|term| format!("%{}%", party_model::fold_search(term)));
     let number: Option<i64> = raw
@@ -155,7 +180,9 @@ pub async fn list_assessments(
         .filter(|n| *n > 0);
 
     let sql = format!(
-        "SELECT *, count(*) OVER () AS total_count FROM ({ASSESSMENT_SELECT}) base \
+        "SELECT *, count(*) OVER () AS total_count FROM (\
+            {ASSESSMENT_SELECT} WHERE a.cooperative_id IS NOT DISTINCT FROM $6\
+         ) base \
          WHERE base.period_id = $1 AND ( \
             $2::text IS NULL \
             OR lower(base.first_name || ' ' || base.last_name) LIKE $2 \
@@ -172,20 +199,28 @@ pub async fn list_assessments(
         .bind(number)
         .bind((page - 1) * page_size)
         .bind(page_size)
-        .fetch_all(pool)
+        .bind(cooperative_id)
+        .fetch_all(&mut *conn)
         .await
 }
 
+/// Cooperative-scoped detail (C3): foreign assessment ids return `None`.
 pub async fn find_assessment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<AssessmentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     let sql = format!(
-        "SELECT *, 0::bigint AS total_count FROM ({ASSESSMENT_SELECT} WHERE a.id = $1) base"
+        "SELECT *, 0::bigint AS total_count FROM (\
+            {ASSESSMENT_SELECT} WHERE a.id = $1 \
+            AND a.cooperative_id IS NOT DISTINCT FROM $2\
+         ) base"
     );
     sqlx::query_as::<_, AssessmentRow>(&sql)
         .bind(id)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *conn)
         .await
 }
 
@@ -200,10 +235,15 @@ pub struct AssessmentSourceRow {
     pub ownership_started_at: OffsetDateTime,
 }
 
+/// Cooperative-scoped provenance (C3): sources of a foreign assessment
+/// yield an empty list — joined shares/ownerships are bound to the same
+/// cooperative by the C2 composite keys.
 pub async fn assessment_sources(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     assessment_id: Uuid,
 ) -> Result<Vec<AssessmentSourceRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, AssessmentSourceRow>(
         "SELECT src.share_id, sh.share_number, src.amount_component, \
             o.started_at AS ownership_started_at \
@@ -211,10 +251,12 @@ pub async fn assessment_sources(
          JOIN shares sh ON sh.id = src.share_id \
          JOIN share_ownerships o ON o.id = src.ownership_id \
          WHERE src.assessment_id = $1 \
+           AND src.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY sh.share_number",
     )
     .bind(assessment_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -235,10 +277,14 @@ pub struct ShareholderAssessmentRow {
     pub generated_at: OffsetDateTime,
 }
 
+/// Cooperative-scoped history (C3): a foreign shareholder id yields an
+/// empty list — never their obligations.
 pub async fn list_assessments_by_shareholder(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     shareholder_id: Uuid,
 ) -> Result<Vec<ShareholderAssessmentRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, ShareholderAssessmentRow>(
         "SELECT a.id, a.period_id, p.period_number, p.name AS period_name, \
             p.due_date, a.rule_type, a.amount, a.currency, a.generated_at, \
@@ -250,10 +296,12 @@ pub async fn list_assessments_by_shareholder(
              FROM assessment_share_sources GROUP BY assessment_id \
          ) src ON src.assessment_id = a.id \
          WHERE a.shareholder_id = $1 \
+           AND a.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY p.period_number DESC, a.id",
     )
     .bind(shareholder_id)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -273,8 +321,12 @@ pub struct EligibleRow {
 /// Active Shareholders with canonical identity — the per_shareholder
 /// eligible population (§25: active only; inactive/voided never
 /// receive obligations).
+/// `cooperative_id` confines eligibility to the period's cooperative
+/// (C3): generation can never write obligations for another
+/// cooperative's shareholders.
 async fn eligible_shareholders(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
 ) -> Result<Vec<ShareholderIdentityRow>, sqlx::Error> {
     sqlx::query_as::<_, ShareholderIdentityRow>(
         "SELECT s.id AS shareholder_id, p.first_name, p.last_name, \
@@ -287,8 +339,10 @@ async fn eligible_shareholders(
              ON m.shareholder_id = s.id AND m.ended_at IS NULL \
          LEFT JOIN families f ON f.id = m.family_id \
          WHERE s.status = 'active' \
+           AND s.cooperative_id IS NOT DISTINCT FROM $1 \
          ORDER BY p.search_name, s.id",
     )
+    .bind(cooperative_id)
     .fetch_all(tx.as_mut())
     .await
 }
@@ -309,6 +363,7 @@ async fn eligible_shareholders(
 /// finalized.
 async fn eligible_share_ownerships(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     effective_date: Date,
 ) -> Result<Vec<EligibleRow>, sqlx::Error> {
     #[derive(sqlx::FromRow)]
@@ -335,9 +390,11 @@ async fn eligible_share_ownerships(
          WHERE so.started_at < (($1::date + 1)::timestamp AT TIME ZONE 'Europe/Istanbul') \
            AND (so.ended_at IS NULL \
                 OR so.ended_at >= (($1::date + 1)::timestamp AT TIME ZONE 'Europe/Istanbul')) \
+           AND so.cooperative_id IS NOT DISTINCT FROM $2 \
          ORDER BY p.search_name, s.id, sh.share_number",
     )
     .bind(effective_date)
+    .bind(cooperative_id)
     .fetch_all(tx.as_mut())
     .await?;
     Ok(rows
@@ -355,11 +412,12 @@ async fn eligible_share_ownerships(
 /// generated.
 async fn resolve_eligible(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     rule_type: AssessmentRuleType,
     effective_date: Date,
 ) -> Result<Vec<EligibleRow>, sqlx::Error> {
     match rule_type {
-        AssessmentRuleType::PerShareholder => Ok(eligible_shareholders(tx)
+        AssessmentRuleType::PerShareholder => Ok(eligible_shareholders(tx, cooperative_id)
             .await?
             .into_iter()
             .map(|shareholder| EligibleRow {
@@ -368,7 +426,9 @@ async fn resolve_eligible(
                 ownership_id: None,
             })
             .collect()),
-        AssessmentRuleType::PerShare => eligible_share_ownerships(tx, effective_date).await,
+        AssessmentRuleType::PerShare => {
+            eligible_share_ownerships(tx, cooperative_id, effective_date).await
+        }
     }
 }
 
@@ -407,33 +467,41 @@ pub enum PeriodCommandError {
 /// Period never exists without its explicit rule (§13/§65). No
 /// obligations are generated here.
 pub async fn create_period(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreatePeriod,
 ) -> Result<(Uuid, i64), PeriodCommandError> {
-    let mut tx = pool.begin().await.map_err(PeriodCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PeriodCommandError::Database)?;
 
     let (period_id, period_number): (Uuid, i64) = sqlx::query_as(
-        "INSERT INTO periods (name, collection_start_date, due_date, created_by) \
-         VALUES ($1, $2, $3, $4) RETURNING id, period_number",
+        "INSERT INTO periods \
+            (name, collection_start_date, due_date, created_by, cooperative_id, \
+             period_number) \
+         VALUES ($1, $2, $3, $4, $5, \
+            allocate_document_number($5, 'periods.period_number')) \
+         RETURNING id, period_number",
     )
     .bind(&command.name)
     .bind(command.collection_start_date)
     .bind(command.due_date)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_one(tx.as_mut())
     .await
     .map_err(PeriodCommandError::Database)?;
 
     sqlx::query(
         "INSERT INTO assessment_rules \
-             (period_id, rule_type, base_amount, currency, assessment_effective_date) \
-         VALUES ($1, $2, $3, 'TRY', $4)",
+             (period_id, rule_type, base_amount, currency, assessment_effective_date, \
+              cooperative_id) \
+         VALUES ($1, $2, $3, 'TRY', $4, $5)",
     )
     .bind(period_id)
     .bind(command.rule_type.as_str())
     .bind(command.base_amount)
     .bind(command.assessment_effective_date)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await
     .map_err(PeriodCommandError::Database)?;
@@ -457,19 +525,24 @@ pub struct UpdatePeriod {
 /// finalized periods reject updates entirely so generated obligations
 /// can never be silently reinterpreted.
 pub async fn update_period(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
     command: UpdatePeriod,
     now: OffsetDateTime,
 ) -> Result<(), PeriodCommandError> {
-    let mut tx = pool.begin().await.map_err(PeriodCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PeriodCommandError::Database)?;
 
-    let row: Option<(String, OffsetDateTime)> =
-        sqlx::query_as("SELECT status, updated_at FROM periods WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(PeriodCommandError::Database)?;
+    // Scoped lock (C3): a foreign period id is NotFound.
+    let row: Option<(String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT status, updated_at FROM periods WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(PeriodCommandError::Database)?;
     let Some((status, updated_at)) = row else {
         return Err(PeriodCommandError::NotFound);
     };
@@ -482,26 +555,29 @@ pub async fn update_period(
 
     sqlx::query(
         "UPDATE periods SET name = $2, collection_start_date = $3, due_date = $4, \
-            updated_at = $5 WHERE id = $1",
+            updated_at = $5 WHERE id = $1 AND cooperative_id IS NOT DISTINCT FROM $6",
     )
     .bind(id)
     .bind(&command.name)
     .bind(command.collection_start_date)
     .bind(command.due_date)
     .bind(now)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await
     .map_err(PeriodCommandError::Database)?;
 
     sqlx::query(
         "UPDATE assessment_rules SET rule_type = $2, base_amount = $3, \
-            assessment_effective_date = $4, updated_at = $5 WHERE period_id = $1",
+            assessment_effective_date = $4, updated_at = $5 WHERE period_id = $1 \
+            AND cooperative_id IS NOT DISTINCT FROM $6",
     )
     .bind(id)
     .bind(command.rule_type.as_str())
     .bind(command.base_amount)
     .bind(command.assessment_effective_date)
     .bind(now)
+    .bind(cooperative_id)
     .execute(tx.as_mut())
     .await
     .map_err(PeriodCommandError::Database)?;
@@ -513,15 +589,23 @@ pub async fn update_period(
 /// a draft carries no assessments by construction, so nothing durable
 /// is lost. Open/closed periods are financial history and cannot be
 /// deleted through the product surface (§38).
-pub async fn delete_period(pool: &PgPool, id: Uuid) -> Result<i64, PeriodCommandError> {
-    let mut tx = pool.begin().await.map_err(PeriodCommandError::Database)?;
+pub async fn delete_period(
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<i64, PeriodCommandError> {
+    let mut tx = db.begin().await.map_err(PeriodCommandError::Database)?;
 
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, period_number FROM periods WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(PeriodCommandError::Database)?;
+    // Scoped lock (C3): a foreign period id is NotFound.
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status, period_number FROM periods WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(PeriodCommandError::Database)?;
     let Some((status, period_number)) = row else {
         return Err(PeriodCommandError::NotFound);
     };
@@ -529,13 +613,18 @@ pub async fn delete_period(pool: &PgPool, id: Uuid) -> Result<i64, PeriodCommand
         return Err(PeriodCommandError::NotDraft);
     }
 
-    sqlx::query("DELETE FROM assessment_rules WHERE period_id = $1")
+    sqlx::query(
+        "DELETE FROM assessment_rules WHERE period_id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(cooperative_id)
+    .execute(tx.as_mut())
+    .await
+    .map_err(PeriodCommandError::Database)?;
+    sqlx::query("DELETE FROM periods WHERE id = $1 AND cooperative_id IS NOT DISTINCT FROM $2")
         .bind(id)
-        .execute(tx.as_mut())
-        .await
-        .map_err(PeriodCommandError::Database)?;
-    sqlx::query("DELETE FROM periods WHERE id = $1")
-        .bind(id)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(PeriodCommandError::Database)?;
@@ -547,18 +636,23 @@ pub async fn delete_period(pool: &PgPool, id: Uuid) -> Result<i64, PeriodCommand
 /// Explicit `open -> closed` transition (docs/16): locks ordinary
 /// mutation without deleting or rewriting obligations.
 pub async fn close_period(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
     now: OffsetDateTime,
 ) -> Result<i64, PeriodCommandError> {
-    let mut tx = pool.begin().await.map_err(PeriodCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PeriodCommandError::Database)?;
 
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, period_number FROM periods WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(PeriodCommandError::Database)?;
+    // Scoped lock (C3): a foreign period id is NotFound.
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT status, period_number FROM periods WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(PeriodCommandError::Database)?;
     let Some((status, period_number)) = row else {
         return Err(PeriodCommandError::NotFound);
     };
@@ -566,9 +660,10 @@ pub async fn close_period(
         return Err(PeriodCommandError::NotOpen);
     }
 
-    sqlx::query("UPDATE periods SET status = 'closed', updated_at = $2 WHERE id = $1")
+    sqlx::query("SELECT public.app_period_close($1, $2, $3)")
         .bind(id)
         .bind(now)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(PeriodCommandError::Database)?;
@@ -655,15 +750,20 @@ fn plan_of(
     }
 }
 
+/// Scope is asserted again here (C3): the rule row must live in the
+/// verified cooperative of the period the caller already locked.
 async fn load_rule(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     period_id: Uuid,
 ) -> Result<(AssessmentRuleType, Decimal, Date), PeriodCommandError> {
     let row: Option<(String, Decimal, Date)> = sqlx::query_as(
         "SELECT rule_type, base_amount, assessment_effective_date \
-         FROM assessment_rules WHERE period_id = $1",
+         FROM assessment_rules WHERE period_id = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(period_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(PeriodCommandError::Database)?;
@@ -678,16 +778,21 @@ async fn load_rule(
 /// exactly as generation would, inside a transaction so the picture is
 /// consistent, then ROLLS BACK — preview never persists obligations.
 pub async fn preview_assessments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     period_id: Uuid,
 ) -> Result<PreviewPlan, PeriodCommandError> {
-    let mut tx = pool.begin().await.map_err(PeriodCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PeriodCommandError::Database)?;
 
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM periods WHERE id = $1")
-        .bind(period_id)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(PeriodCommandError::Database)?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM periods WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(period_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(PeriodCommandError::Database)?;
     let Some(status) = status else {
         return Err(PeriodCommandError::NotFound);
     };
@@ -695,8 +800,9 @@ pub async fn preview_assessments(
         return Err(PeriodCommandError::NotDraft);
     }
 
-    let (rule_type, base_amount, effective_date) = load_rule(&mut tx, period_id).await?;
-    let eligible = resolve_eligible(&mut tx, rule_type, effective_date)
+    let (rule_type, base_amount, effective_date) =
+        load_rule(&mut tx, cooperative_id, period_id).await?;
+    let eligible = resolve_eligible(&mut tx, cooperative_id, rule_type, effective_date)
         .await
         .map_err(PeriodCommandError::Database)?;
     let plan = plan_of(rule_type, base_amount, effective_date, eligible);
@@ -723,18 +829,23 @@ pub struct GenerationSummary {
 /// generation impossible (§84/§85). Any failure rolls the whole set
 /// back — no half-generated Period (§31/§92).
 pub async fn generate_assessments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     period_id: Uuid,
 ) -> Result<GenerationSummary, PeriodCommandError> {
-    let mut tx = pool.begin().await.map_err(PeriodCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(PeriodCommandError::Database)?;
 
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM periods WHERE id = $1 FOR UPDATE")
-            .bind(period_id)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(PeriodCommandError::Database)?;
+    // Scoped lock (C3): a foreign period id is NotFound.
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM periods WHERE id = $1 \
+         AND cooperative_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+    )
+    .bind(period_id)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
+    .await
+    .map_err(PeriodCommandError::Database)?;
     let Some(status) = status else {
         return Err(PeriodCommandError::NotFound);
     };
@@ -742,8 +853,9 @@ pub async fn generate_assessments(
         return Err(PeriodCommandError::AlreadyFinalized);
     }
 
-    let (rule_type, base_amount, effective_date) = load_rule(&mut tx, period_id).await?;
-    let eligible = resolve_eligible(&mut tx, rule_type, effective_date)
+    let (rule_type, base_amount, effective_date) =
+        load_rule(&mut tx, cooperative_id, period_id).await?;
+    let eligible = resolve_eligible(&mut tx, cooperative_id, rule_type, effective_date)
         .await
         .map_err(PeriodCommandError::Database)?;
     let plan = plan_of(rule_type, base_amount, effective_date, eligible);
@@ -753,8 +865,8 @@ pub async fn generate_assessments(
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO assessments \
                  (period_id, shareholder_id, rule_type, base_amount, amount, currency, \
-                  status, assessment_effective_date, generated_by) \
-             VALUES ($1, $2, $3, $4, $5, 'TRY', 'active', $6, $7) \
+                  status, assessment_effective_date, generated_by, cooperative_id) \
+             VALUES ($1, $2, $3, $4, $5, 'TRY', 'active', $6, $7, $8) \
              RETURNING id",
         )
         .bind(period_id)
@@ -764,6 +876,7 @@ pub async fn generate_assessments(
         .bind(amount)
         .bind(effective_date)
         .bind(actor)
+        .bind(cooperative_id)
         .fetch_one(tx.as_mut())
         .await;
         match inserted {
@@ -782,13 +895,15 @@ pub async fn generate_assessments(
     for (row_index, share_id, ownership_id) in &plan.sources {
         sqlx::query(
             "INSERT INTO assessment_share_sources \
-                 (assessment_id, share_id, ownership_id, amount_component) \
-             VALUES ($1, $2, $3, $4)",
+                 (assessment_id, share_id, ownership_id, amount_component, \
+                  cooperative_id) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(assessment_ids[*row_index])
         .bind(share_id)
         .bind(ownership_id)
         .bind(base_amount)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(PeriodCommandError::Database)?;
@@ -806,17 +921,25 @@ pub async fn generate_assessments(
         .zip(assessment_ids.iter())
         .map(|((shareholder, _, _), id)| (*id, shareholder.shareholder_id))
         .collect();
-    let credit_applied = credit_repo::auto_apply_to_assessments(&mut tx, actor, &targets)
-        .await
-        .map_err(|error| match error {
-            credit_repo::CreditCommandError::Database(db) => PeriodCommandError::Database(db),
-            _ => PeriodCommandError::Database(sqlx::Error::Protocol(
-                "unexpected credit engine error during generation".into(),
-            )),
-        })?;
+    // Cross-module helper (C3): `targets` are the JUST-INSERTED,
+    // scope-verified assessments of THIS period; the engine now also
+    // takes the authenticated cooperative so its credit locks, reads
+    // and application inserts can never cross the boundary.
+    let credit_applied =
+        credit_repo::auto_apply_to_assessments(&mut tx, cooperative_id, actor, &targets)
+            .await
+            .map_err(|error| match error {
+                credit_repo::CreditCommandError::Database(db) => PeriodCommandError::Database(db),
+                _ => PeriodCommandError::Database(sqlx::Error::Protocol(
+                    "unexpected credit engine error during generation".into(),
+                )),
+            })?;
 
-    sqlx::query("UPDATE periods SET status = 'open', updated_at = now() WHERE id = $1")
+    // R3C: the open transition refuses a period with no generated
+    // assessments — a bare flip is impossible at runtime.
+    sqlx::query("SELECT public.app_period_open_tx($1, $2)")
         .bind(period_id)
+        .bind(cooperative_id)
         .execute(tx.as_mut())
         .await
         .map_err(PeriodCommandError::Database)?;

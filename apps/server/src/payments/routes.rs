@@ -30,10 +30,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::credits::repo as credit_repo;
 use crate::http::error::ApiError;
@@ -41,6 +39,7 @@ use crate::http::AppState;
 use crate::parties::repo as party_repo;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
 use crate::shares::routes::{identity_dto, ShareholderIdentityDto};
+use crate::tenant::extractor::BusinessAuth;
 
 use super::model as payment_model;
 use super::repo as payment_repo;
@@ -84,12 +83,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Payment mutations share this prologue (CSRF layers + permission).
 macro_rules! payments_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::PAYMENTS_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::PAYMENTS_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -565,22 +564,42 @@ fn validated_payment(
 
 pub async fn list_payments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<PaymentListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&query)?;
-    let rows = payment_repo::list_payments(pool, query.search.as_deref(), page, page_size)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&query)?;
+        let rows = payment_repo::list_payments(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
+            page,
+            page_size,
+        )
         .await
         .map_err(db_err("payment listing failed"))?;
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(payment_item).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(payment_item).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Person lookup for payer selection — the payer may be any Person,
@@ -589,35 +608,49 @@ pub async fn list_payments(
 /// management rights.
 pub async fn payer_persons(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PayerQuery>,
 ) -> Result<Json<Vec<PayerCandidateDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    if query.search.trim().is_empty() {
-        return Ok(Json(Vec::new()));
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        if query.search.trim().is_empty() {
+            return Ok(Json(Vec::new()));
+        }
+        let limit = query.limit.unwrap_or(10).clamp(1, 25);
+        let rows = party_repo::search_persons(&mut tx, ctx.cooperative_id(), &query.search, limit)
+            .await
+            .map_err(db_err("payer search failed"))?;
+        Ok(Json(
+            rows.iter()
+                .map(|r| PayerCandidateDto {
+                    person_id: r.id,
+                    full_name: format!("{} {}", r.first_name, r.last_name),
+                    shareholder_id: r.shareholder_id,
+                    shareholder_status: r.shareholder_status.clone(),
+                    default_account: r.default_account_id.map(|id| {
+                        crate::parties::routes::DefaultAccountDto {
+                            id,
+                            name: r.default_account_name.clone().unwrap_or_default(),
+                            status: r.default_account_status.clone().unwrap_or_default(),
+                        }
+                    }),
+                })
+                .collect(),
+        ))
     }
-    let limit = query.limit.unwrap_or(10).clamp(1, 25);
-    let rows = party_repo::search_persons(pool, &query.search, limit)
-        .await
-        .map_err(db_err("payer search failed"))?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| PayerCandidateDto {
-                person_id: r.id,
-                full_name: format!("{} {}", r.first_name, r.last_name),
-                shareholder_id: r.shareholder_id,
-                shareholder_status: r.shareholder_status.clone(),
-                default_account: r.default_account_id.map(|id| {
-                    crate::parties::routes::DefaultAccountDto {
-                        id,
-                        name: r.default_account_name.clone().unwrap_or_default(),
-                        status: r.default_account_status.clone().unwrap_or_default(),
-                    }
-                }),
-            })
-            .collect(),
-    ))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// THE collection command: ONE atomic transaction persists the posted
@@ -627,99 +660,101 @@ pub async fn payer_persons(
 pub async fn create_payment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreatePaymentRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let validated = validated_payment(body, now)?;
-    let fingerprint = payment_model::idempotency_fingerprint(&payment_model::PaymentFingerprint {
-        payer_person_id: validated.payer_person_id,
-        payer_first_name: validated.payer_first_name.as_deref(),
-        payer_last_name: validated.payer_last_name.as_deref(),
-        amount: validated.amount,
-        method: validated.method,
-        received_at: validated.received_at_intent,
-        note: validated.note.as_deref(),
-        destination_account_id: validated.destination_account_id,
-        allocations: &validated
-            .allocations
-            .iter()
-            .map(|a| (a.assessment_id, a.amount))
-            .collect::<Vec<_>>(),
-    });
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let validated = validated_payment(body, now)?;
+        let fingerprint =
+            payment_model::idempotency_fingerprint(&payment_model::PaymentFingerprint {
+                payer_person_id: validated.payer_person_id,
+                payer_first_name: validated.payer_first_name.as_deref(),
+                payer_last_name: validated.payer_last_name.as_deref(),
+                amount: validated.amount,
+                method: validated.method,
+                received_at: validated.received_at_intent,
+                note: validated.note.as_deref(),
+                destination_account_id: validated.destination_account_id,
+                allocations: &validated
+                    .allocations
+                    .iter()
+                    .map(|a| (a.assessment_id, a.amount))
+                    .collect::<Vec<_>>(),
+            });
 
-    let outcome = payment_repo::create_payment(
-        pool,
-        auth.user_id,
-        payment_repo::CreatePayment {
-            payer_person_id: validated.payer_person_id,
-            payer_first_name: validated.payer_first_name,
-            payer_last_name: validated.payer_last_name,
-            amount: validated.amount,
-            method: validated.method.as_str().to_owned(),
-            received_at: validated.received_at,
-            note: validated.note.clone(),
-            destination_account_id: validated.destination_account_id,
-            idempotency_key: validated.idempotency_key,
-            fingerprint,
-            allocations: validated.allocations,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+        let outcome = payment_repo::create_payment(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            payment_repo::CreatePayment {
+                payer_person_id: validated.payer_person_id,
+                payer_first_name: validated.payer_first_name,
+                payer_last_name: validated.payer_last_name,
+                amount: validated.amount,
+                method: validated.method.as_str().to_owned(),
+                received_at: validated.received_at,
+                note: validated.note.clone(),
+                destination_account_id: validated.destination_account_id,
+                idempotency_key: validated.idempotency_key,
+                fingerprint,
+                allocations: validated.allocations,
+            },
+        )
+        .await
+        .map_err(command_error)?;
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::PaymentPosted,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "payment_id": outcome.payment_id,
-                "payment_number": outcome.payment_number,
-                "payer_person_id": outcome.payer_person_id,
-                "created_person": outcome.created_person,
-                "amount": payment_model::canonical_amount(validated.amount),
-                "method": validated.method.as_str(),
-                "destination_account_id": validated.destination_account_id,
-                "allocation_count": outcome.allocation_count,
-                "allocated_amount": payment_model::canonical_amount(outcome.allocated_amount),
-                "unallocated_amount": payment_model::canonical_amount(outcome.unallocated_amount),
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "payment_posted", id = %outcome.payment_id,
+                number = outcome.payment_number,
+                allocations = outcome.allocation_count, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = load_detail(&mut tx, ctx.cooperative_id(), outcome.payment_id).await?;
+        Ok((
+            if outcome.replayed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
+            Json(CreatePaymentResponse {
+                replayed: outcome.replayed,
+                payment: detail,
             }),
         )
-        .await;
-        tracing::info!(
-            outcome = "payment_posted", id = %outcome.payment_id,
-            number = outcome.payment_number,
-            allocations = outcome.allocation_count, actor = %auth.user_id
-        );
+            .into_response())
     }
-
-    let detail = load_detail(pool, outcome.payment_id).await?;
-    Ok((
-        if outcome.replayed {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        },
-        Json(CreatePaymentResponse {
-            replayed: outcome.replayed,
-            payment: detail,
-        }),
-    )
-        .into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
-async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentDetailDto, ApiError> {
-    let row = payment_repo::find_payment(pool, id)
+async fn load_detail(
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<PaymentDetailDto, ApiError> {
+    let row = payment_repo::find_payment(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("payment reload failed"))?
         .ok_or(ApiError::Internal)?;
-    let allocations = payment_repo::payment_allocations(pool, id)
+    let allocations = payment_repo::payment_allocations(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("payment allocations failed"))?;
-    let credits = credit_repo::list_payment_credits(pool, id)
+    let credits = credit_repo::list_payment_credits(&mut *db, cooperative_id, id)
         .await
         .map_err(db_err("payment credits failed"))?;
     Ok(PaymentDetailDto {
@@ -756,17 +791,33 @@ async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentDetailDto, 
 
 pub async fn get_payment(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists = payment_repo::find_payment(pool, id)
-        .await
-        .map_err(db_err("payment load failed"))?
-        .ok_or(ApiError::NotFound)?;
-    let _ = exists;
-    load_detail(pool, id).await.map(Json)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists = payment_repo::find_payment(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("payment load failed"))?
+            .ok_or(ApiError::NotFound)?;
+        let _ = exists;
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map(Json)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Apply (part of) the unallocated remainder to further obligations.
@@ -774,41 +825,51 @@ pub async fn get_payment(
 pub async fn add_allocations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<AddAllocationsRequest>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
-    if body.allocations.is_empty() || body.allocations.len() > 500 {
-        return Err(ApiError::ValidationFailed);
-    }
-    let mut allocations = Vec::with_capacity(body.allocations.len());
-    for allocation in &body.allocations {
-        let amount = payment_model::validate_positive_amount(&allocation.amount)
-            .map_err(|_| ApiError::ValidationFailed)?;
-        allocations.push(payment_repo::NewAllocation {
-            assessment_id: allocation.assessment_id,
-            amount,
-        });
-    }
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        if body.allocations.is_empty() || body.allocations.len() > 500 {
+            return Err(ApiError::ValidationFailed);
+        }
+        let mut allocations = Vec::with_capacity(body.allocations.len());
+        for allocation in &body.allocations {
+            let amount = payment_model::validate_positive_amount(&allocation.amount)
+                .map_err(|_| ApiError::ValidationFailed)?;
+            allocations.push(payment_repo::NewAllocation {
+                assessment_id: allocation.assessment_id,
+                amount,
+            });
+        }
 
-    let outcome = payment_repo::add_allocations(pool, auth.user_id, id, allocations)
+        let _outcome = payment_repo::add_allocations(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            allocations,
+        )
         .await
         .map_err(command_error)?;
-    audit::record(
-        pool,
-        SecurityEventType::PaymentAllocationsAdded,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({
-            "payment_id": id,
-            "added_allocation_count": outcome.allocation_count,
-            "allocated_amount": payment_model::canonical_amount(outcome.allocated_amount),
-            "unallocated_amount": payment_model::canonical_amount(outcome.unallocated_amount),
-        }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map(Json)
+    }
     .await;
-    load_detail(pool, id).await.map(Json)
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Full reversal (docs/19): the Payment and every active allocation
@@ -816,34 +877,44 @@ pub async fn add_allocations(
 pub async fn reverse_payment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
-    let reason = payment_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let outcome =
-        payment_repo::reverse_payment(pool, auth.user_id, id, reason, state.auth.clock.now())
-            .await
-            .map_err(command_error)?;
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::PaymentReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "payment_id": id,
-                "payment_number": outcome.payment_number,
-                "reversed_allocation_count": outcome.reversed_allocation_count,
-                "reason": body.reason.trim(),
-            }),
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = payment_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let outcome = payment_repo::reverse_payment(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            reason,
+            state.auth.clock.now(),
         )
-        .await;
-        tracing::info!(outcome = "payment_reversed", id = %id, actor = %auth.user_id);
+        .await
+        .map_err(command_error)?;
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(outcome = "payment_reversed", id = %id, actor = %ctx.auth.user_id);
+        }
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map(Json)
     }
-    load_detail(pool, id).await.map(Json)
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Fine-grained correction: reverse ONE allocation line; the rest of
@@ -851,79 +922,102 @@ pub async fn reverse_payment(
 pub async fn reverse_allocation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path((id, allocation_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<ReverseRequest>,
 ) -> Result<Json<PaymentDetailDto>, ApiError> {
-    let pool = payments_mutation!(&state, &headers, &auth, &Method::POST);
-    let reason = payment_model::validate_reversal_reason(&body.reason)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let outcome = payment_repo::reverse_allocation(
-        pool,
-        auth.user_id,
-        id,
-        allocation_id,
-        reason,
-        state.auth.clock.now(),
-    )
-    .await
-    .map_err(command_error)?;
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::PaymentAllocationReversed,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "payment_id": id,
-                "allocation_id": allocation_id,
-                "reason": body.reason.trim(),
-            }),
+    let pool = payments_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason = payment_model::validate_reversal_reason(&body.reason)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let outcome = payment_repo::reverse_allocation(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            allocation_id,
+            reason,
+            state.auth.clock.now(),
         )
-        .await;
+        .await
+        .map_err(command_error)?;
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map(Json)
     }
-    load_detail(pool, id).await.map(Json)
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Payment history of one Assessment — the "who paid, when, how much,
 /// still valid?" surface (docs/06 §64).
 pub async fn assessment_payments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<AssessmentPaymentDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assessments WHERE id = $1)")
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assessments WHERE id = $1 AND cooperative_id = $2)",
+        )
         .bind(id)
-        .fetch_one(pool)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err("assessment check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let rows = payment_repo::assessment_payments(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("assessment payments failed"))?;
+        Ok(Json(
+            rows.iter()
+                .map(|r| AssessmentPaymentDto {
+                    allocation_id: r.allocation_id,
+                    payment_id: r.payment_id,
+                    payment_number: r.payment_number,
+                    payment_status: r.payment_status.clone(),
+                    amount: payment_model::canonical_amount(r.amount),
+                    currency: r.currency.clone(),
+                    allocation_status: r.allocation_status.clone(),
+                    received_at: r.received_at,
+                    payer_full_name: r.payer_full_name.clone(),
+                    payer_shareholder_id: r.payer_shareholder_id,
+                    created_at: r.created_at,
+                    reversed_at: r.reversed_at,
+                    reversal_reason: r.reversal_reason.clone(),
+                })
+                .collect(),
+        ))
     }
-    let rows = payment_repo::assessment_payments(pool, id)
-        .await
-        .map_err(db_err("assessment payments failed"))?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| AssessmentPaymentDto {
-                allocation_id: r.allocation_id,
-                payment_id: r.payment_id,
-                payment_number: r.payment_number,
-                payment_status: r.payment_status.clone(),
-                amount: payment_model::canonical_amount(r.amount),
-                currency: r.currency.clone(),
-                allocation_status: r.allocation_status.clone(),
-                received_at: r.received_at,
-                payer_full_name: r.payer_full_name.clone(),
-                payer_shareholder_id: r.payer_shareholder_id,
-                created_at: r.created_at,
-                reversed_at: r.reversed_at,
-                reversal_reason: r.reversal_reason.clone(),
-            })
-            .collect(),
-    ))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Debtor-selection context for the collection flow AND the
@@ -931,70 +1025,110 @@ pub async fn assessment_payments(
 /// remaining amounts.
 pub async fn shareholder_open_assessments(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(shareholder_id): Path<Uuid>,
 ) -> Result<Json<Vec<OpenAssessmentDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
-            .bind(shareholder_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err("shareholder check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
-    let rows = payment_repo::shareholder_open_assessments(pool, shareholder_id)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1 AND cooperative_id = $2)",
+        )
+        .bind(shareholder_id)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err("shareholder check failed"))?;
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let rows = payment_repo::shareholder_open_assessments(
+            &mut tx,
+            ctx.cooperative_id(),
+            shareholder_id,
+        )
         .await
         .map_err(db_err("open assessments failed"))?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| OpenAssessmentDto {
-                id: r.id,
-                period_id: r.period_id,
-                period_number: r.period_number,
-                period_name: r.period_name.clone(),
-                due_date: r.due_date,
-                amount: payment_model::canonical_amount(r.amount),
-                currency: r.currency.clone(),
-                paid_amount: payment_model::canonical_amount(r.paid_amount),
-                remaining_amount: payment_model::canonical_amount(r.remaining_amount),
-                generated_at: r.generated_at,
-            })
-            .collect(),
-    ))
+        Ok(Json(
+            rows.iter()
+                .map(|r| OpenAssessmentDto {
+                    id: r.id,
+                    period_id: r.period_id,
+                    period_number: r.period_number,
+                    period_name: r.period_name.clone(),
+                    due_date: r.due_date,
+                    amount: payment_model::canonical_amount(r.amount),
+                    currency: r.currency.clone(),
+                    paid_amount: payment_model::canonical_amount(r.paid_amount),
+                    remaining_amount: payment_model::canonical_amount(r.remaining_amount),
+                    generated_at: r.generated_at,
+                })
+                .collect(),
+        ))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Shareholder-level money picture: obligations vs settled value —
 /// always derived, never a stored balance.
 pub async fn shareholder_financial_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(shareholder_id): Path<Uuid>,
 ) -> Result<Json<FinancialSummaryDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1)")
-            .bind(shareholder_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err("shareholder check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
-    }
-    let row = payment_repo::shareholder_financial_summary(pool, shareholder_id)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shareholders WHERE id = $1 AND cooperative_id = $2)",
+        )
+        .bind(shareholder_id)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err("shareholder check failed"))?;
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let row = payment_repo::shareholder_financial_summary(
+            &mut tx,
+            ctx.cooperative_id(),
+            shareholder_id,
+        )
         .await
         .map_err(db_err("financial summary failed"))?;
-    Ok(Json(FinancialSummaryDto {
-        assessment_count: row.assessment_count,
-        open_assessment_count: row.open_assessment_count,
-        total_assessed: payment_model::canonical_amount(row.total_assessed),
-        total_paid: payment_model::canonical_amount(row.total_paid),
-        total_remaining: payment_model::canonical_amount(row.total_remaining),
-        currency: "TRY".to_owned(),
-    }))
+        Ok(Json(FinancialSummaryDto {
+            assessment_count: row.assessment_count,
+            open_assessment_count: row.open_assessment_count,
+            total_assessed: payment_model::canonical_amount(row.total_assessed),
+            total_paid: payment_model::canonical_amount(row.total_paid),
+            total_remaining: payment_model::canonical_amount(row.total_remaining),
+            currency: "TRY".to_owned(),
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Period-level collection summary (docs/06 §68): assessed vs settled
@@ -1002,31 +1136,48 @@ pub async fn shareholder_financial_summary(
 /// silently attributed across periods.
 pub async fn period_financial_summary(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(period_id): Path<Uuid>,
 ) -> Result<Json<PeriodFinancialSummaryDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM periods WHERE id = $1)")
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM periods WHERE id = $1 AND cooperative_id = $2)",
+        )
         .bind(period_id)
-        .fetch_one(pool)
+        .bind(ctx.cooperative_id())
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err("period check failed"))?;
-    if !exists {
-        return Err(ApiError::NotFound);
+        if !exists {
+            return Err(ApiError::NotFound);
+        }
+        let row = payment_repo::period_financial_summary(&mut tx, ctx.cooperative_id(), period_id)
+            .await
+            .map_err(db_err("period summary failed"))?;
+        Ok(Json(PeriodFinancialSummaryDto {
+            period_id,
+            assessment_count: row.assessment_count,
+            total_assessed: payment_model::canonical_amount(row.total_assessed),
+            total_collected: payment_model::canonical_amount(row.total_collected),
+            total_remaining: payment_model::canonical_amount(row.total_remaining),
+            contributing_payment_count: row.contributing_payment_count,
+            currency: "TRY".to_owned(),
+        }))
     }
-    let row = payment_repo::period_financial_summary(pool, period_id)
-        .await
-        .map_err(db_err("period summary failed"))?;
-    Ok(Json(PeriodFinancialSummaryDto {
-        period_id,
-        assessment_count: row.assessment_count,
-        total_assessed: payment_model::canonical_amount(row.total_assessed),
-        total_collected: payment_model::canonical_amount(row.total_collected),
-        total_remaining: payment_model::canonical_amount(row.total_remaining),
-        contributing_payment_count: row.contributing_payment_count,
-        currency: "TRY".to_owned(),
-    }))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Family collection context (docs/06 §26): current members with
@@ -1034,48 +1185,63 @@ pub async fn period_financial_summary(
 /// collection flow; the Family itself is never the debtor.
 pub async fn family_collection_context(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(family_id): Path<Uuid>,
 ) -> Result<Json<FamilyCollectionContextDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::PAYMENTS_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::PAYMENTS_READ).await?;
     let pool = pool_of(&state)?;
-    let family = party_repo::find_family(pool, family_id)
-        .await
-        .map_err(db_err("family check failed"))?
-        .ok_or(ApiError::NotFound)?;
-    let members = payment_repo::family_collection_context(pool, family_id)
-        .await
-        .map_err(db_err("family context failed"))?;
-    let total_remaining: Decimal = members.iter().map(|m| m.remaining_amount).sum();
-    Ok(Json(FamilyCollectionContextDto {
-        family_id,
-        sequence_number: family.sequence_number,
-        members: members
-            .iter()
-            .map(|m| FamilyMemberContextDto {
-                member: identity_dto(
-                    Some(m.member.shareholder_id),
-                    &Some(m.member.first_name.clone()),
-                    &Some(m.member.last_name.clone()),
-                    &m.member.guardian_first_name,
-                    &m.member.guardian_last_name,
-                    m.member.family_sequence,
-                    Some(m.member.shareholder_status.as_str()),
-                )
-                .expect("member row always carries a shareholder"),
-                open_assessment_count: m.open_assessment_count,
-                remaining_amount: payment_model::canonical_amount(m.remaining_amount),
-                credit_available: payment_model::canonical_amount(m.credit_available),
-                default_account: m.default_account_id.map(|id| {
-                    crate::parties::routes::DefaultAccountDto {
-                        id,
-                        name: m.default_account_name.clone().unwrap_or_default(),
-                        status: m.default_account_status.clone().unwrap_or_default(),
-                    }
-                }),
-            })
-            .collect(),
-        total_remaining: payment_model::canonical_amount(total_remaining),
-        currency: "TRY".to_owned(),
-    }))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let family = party_repo::find_family(&mut tx, ctx.cooperative_id(), family_id)
+            .await
+            .map_err(db_err("family check failed"))?
+            .ok_or(ApiError::NotFound)?;
+        let members =
+            payment_repo::family_collection_context(&mut tx, ctx.cooperative_id(), family_id)
+                .await
+                .map_err(db_err("family context failed"))?;
+        let total_remaining: Decimal = members.iter().map(|m| m.remaining_amount).sum();
+        Ok(Json(FamilyCollectionContextDto {
+            family_id,
+            sequence_number: family.sequence_number,
+            members: members
+                .iter()
+                .map(|m| FamilyMemberContextDto {
+                    member: identity_dto(
+                        Some(m.member.shareholder_id),
+                        &Some(m.member.first_name.clone()),
+                        &Some(m.member.last_name.clone()),
+                        &m.member.guardian_first_name,
+                        &m.member.guardian_last_name,
+                        m.member.family_sequence,
+                        Some(m.member.shareholder_status.as_str()),
+                    )
+                    .expect("member row always carries a shareholder"),
+                    open_assessment_count: m.open_assessment_count,
+                    remaining_amount: payment_model::canonical_amount(m.remaining_amount),
+                    credit_available: payment_model::canonical_amount(m.credit_available),
+                    default_account: m.default_account_id.map(|id| {
+                        crate::parties::routes::DefaultAccountDto {
+                            id,
+                            name: m.default_account_name.clone().unwrap_or_default(),
+                            status: m.default_account_status.clone().unwrap_or_default(),
+                        }
+                    }),
+                })
+                .collect(),
+            total_remaining: payment_model::canonical_amount(total_remaining),
+            currency: "TRY".to_owned(),
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

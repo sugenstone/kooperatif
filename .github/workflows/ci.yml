@@ -70,24 +70,33 @@ jobs:
   database:
     name: Database (clean-database migration + readiness)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:17-alpine
         env:
           POSTGRES_USER: kooperatif
           POSTGRES_PASSWORD: kooperatif_ci_password
-          POSTGRES_DB: kooperatif_ci
+          POSTGRES_DB: kooperatif_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U kooperatif -d kooperatif_ci"
+          --health-cmd "pg_isready -U kooperatif -d kooperatif_test"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
     env:
-      KOOPERATIF_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci
+      KOOPERATIF_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_test
     steps:
       - uses: actions/checkout@v4
+
+      # M1-P8-A: restricted-principal credential for this job only. A
+      # fresh random password is generated per run and never printed;
+      # the development password is never used in CI.
+      - name: Generate CI-only restricted-role password
+        run: |
+          pw="kooperatif_ci_app_$(openssl rand -hex 12)"
+          echo "KOOPERATIF_APP_TEST_PASSWORD=${pw}" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -101,6 +110,19 @@ jobs:
       - name: Re-run migrations (idempotency)
         run: cargo run --manifest-path apps/server/Cargo.toml -- migrate
 
+      # Migration 0032 creates `kooperatif_app` (LOGIN, NOSUPERUSER,
+      # NOBYPASSRLS) without a password by design. Restricted-lane test
+      # suites derive their connection URL from
+      # KOOPERATIF_TEST_DATABASE_URL plus KOOPERATIF_APP_TEST_PASSWORD,
+      # so the cluster-global role must receive the CI-only password
+      # after migrations and before any test runs.
+      - name: Provision restricted role password for this job
+        run: |
+          printf "ALTER ROLE kooperatif_app PASSWORD '%s'\n" \
+            "$KOOPERATIF_APP_TEST_PASSWORD" \
+            | docker run --rm -i --network host postgres:17-alpine \
+              psql "$KOOPERATIF_DATABASE_URL" -v ON_ERROR_STOP=1 >/dev/null
+
       - name: Migration ledger records every migration
         run: |
           count=$(docker run --rm --network host postgres:17-alpine \
@@ -108,10 +130,32 @@ jobs:
           echo "recorded migrations: ${count}"
           test "$count" -ge 1
 
+      # M1-P8-A Batch 4: non-destructive permission/RLS drift gate.
+      # `backup:regrants --check` runs SELECTs only against this job's
+      # ephemeral service database and compares the live ACL and RLS
+      # fingerprints with the baseline recorded in
+      # scripts/backup/regrants.sql. Drift — missing or extra grants,
+      # SECURITY DEFINER EXECUTE permission changes, an over-privileged
+      # or missing kooperatif_app role, RLS policy changes, FORCE
+      # regressions — fails the job with an explicit diff dump before
+      # the expensive test suite starts. Nothing is granted, revoked,
+      # or altered.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Regrants baseline verification (read-only)
+        run: >
+          node scripts/backup/regrants.mjs --check
+          --target-db kooperatif_test --confirm kooperatif_test
+
       - name: DB-gated integration tests (database + full auth security matrix)
         run: cargo test --manifest-path apps/server/Cargo.toml -- --nocapture
         env:
-          KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci
+          KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_test
+          KOOPERATIF_APP_TEST_PASSWORD: ${{ env.KOOPERATIF_APP_TEST_PASSWORD }}
 
   backup:
     name: Backup/restore (unit tests + recovery drill, ADR-013)
@@ -154,3 +198,105 @@ jobs:
 
       - name: Failure-injection tests
         run: node scripts/backup/failure-test.mjs
+
+  # M1-P8-A Batch 2: isolated real-browser E2E for the authorization /
+  # session / platform-lifecycle journeys. Runs the three supported
+  # scripts against an ephemeral compose-managed PostgreSQL — the same
+  # docker/compose.yaml the scripts drive locally, with CI-only
+  # generated credentials flowing through POSTGRES_* (compose) and
+  # E2E_* (scripts) environment variables. Nothing production-shaped is
+  # provisioned and no credential is ever printed.
+  e2e:
+    name: Browser E2E (P6-B5, P7-A, P7-B)
+    runs-on: ubuntu-latest
+    # Cold-path budget (INFERRED — GitHub Actions timing is unverified):
+    # pnpm install ~1-2m, playwright install ~2-4m, cold cargo build
+    # ~4-8m, 3 suites ~2-4m each. 20m leaves no margin; 30m does.
+    timeout-minutes: 30
+    env:
+      # compose.yaml picks these up via ${VAR:-default} expansion.
+      POSTGRES_USER: kooperatif
+      POSTGRES_DB: kooperatif
+      POSTGRES_PORT: "5494"
+      # Script-side connection configuration (generated per run below).
+      E2E_PG_USER: kooperatif
+      E2E_DB_HOST: localhost
+      E2E_DB_PORT: "5494"
+      # Ephemeral-instance proof: scripts stamp+verify a per-run marker
+      # inside the cluster before trusting it (M1-P8-A Batch 3).
+      E2E_EPHEMERAL: "1"
+      # Child-process logs mirrored here and uploaded on failure.
+      E2E_LOG_DIR: artifacts/e2e
+      # Surface backend/web stderr in the job log for failure triage.
+      E2E_VERBOSE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium for Playwright
+        run: pnpm --dir apps/web exec playwright install --with-deps chromium
+
+      # CI-only credentials: fresh random passwords per run, written to
+      # GITHUB_ENV (never echoed). POSTGRES_PASSWORD feeds the compose
+      # service; E2E_PG_PASSWORD feeds the scripts' connection strings;
+      # E2E_APP_PASSWORD is provisioned onto the migration-created
+      # kooperatif_app role by each script after its migrate step.
+      - name: Generate CI-only credentials
+        run: |
+          pg="kooperatif_ci_pg_$(openssl rand -hex 12)"
+          app="kooperatif_ci_app_$(openssl rand -hex 12)"
+          {
+            echo "POSTGRES_PASSWORD=${pg}"
+            echo "E2E_PG_PASSWORD=${pg}"
+            echo "E2E_APP_PASSWORD=${app}"
+            echo "E2E_APP_ROLE_PASSWORD=${app}"
+          } >> "$GITHUB_ENV"
+
+      - name: Pre-build the backend
+        run: cargo build --manifest-path apps/server/Cargo.toml
+
+      # POSIX process-group cleanup semantics are only verifiable on
+      # Linux (the local dev host is Windows and exercises the taskkill
+      # branch instead).
+      - name: Process-group cleanup tests
+        run: node --test scripts/lib/proc-group.test.mjs
+
+      - name: E2E — M1-P6-B5 grants & membership
+        run: node scripts/e2e-m1p6-b5.mjs
+
+      - name: E2E — M1-P7-A session/tenant safety
+        run: node scripts/e2e-m1p7-a.mjs
+
+      - name: E2E — M1-P7-B platform cooperative UI
+        run: node scripts/e2e-m1p7-b.mjs
+
+      - name: Collect postgres logs on failure
+        if: failure()
+        run: |
+          mkdir -p artifacts/e2e
+          docker compose -f docker/compose.yaml logs --no-color postgres \
+            > artifacts/e2e/postgres.log 2>&1 || true
+
+      - name: Upload E2E logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/e2e/
+          if-no-files-found: ignore
+          retention-days: 14

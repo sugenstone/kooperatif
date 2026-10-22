@@ -34,10 +34,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::governance::model as gov_model;
 use crate::governance::repo as gov_repo;
@@ -46,6 +44,7 @@ use crate::http::error::ApiError;
 use crate::http::AppState;
 use crate::parties::repo as party_repo;
 use crate::parties::routes::{page_of, ListQuery, PaginatedDto};
+use crate::tenant::extractor::BusinessAuth;
 
 pub fn governance_router() -> Router<AppState> {
     Router::new()
@@ -88,12 +87,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Governance mutations share the full CSRF + permission prologue.
 macro_rules! governance_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::GOVERNANCE_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::GOVERNANCE_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -372,93 +371,122 @@ pub struct BodyListQuery {
 
 pub async fn list_bodies(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<BodyListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::GOVERNANCE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::GOVERNANCE_READ).await?;
     let pool = pool_of(&state)?;
-    let list = ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    };
-    let (page, page_size) = page_of(&list)?;
-    let status = query
-        .status
-        .as_deref()
-        .map(|s| {
-            gov_model::BodyStatus::parse(s)
-                .map(|v| v.as_str().to_string())
-                .ok_or(ApiError::ValidationFailed)
-        })
-        .transpose()?;
-    let search = list
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let list = ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        };
+        let (page, page_size) = page_of(&list)?;
+        let status = query
+            .status
+            .as_deref()
+            .map(|s| {
+                gov_model::BodyStatus::parse(s)
+                    .map(|v| v.as_str().to_string())
+                    .ok_or(ApiError::ValidationFailed)
+            })
+            .transpose()?;
+        let search = list
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
-    let rows = gov_repo::list_bodies(
-        pool,
-        &gov_repo::BodyFilter {
-            status,
-            search,
+        let rows = gov_repo::list_bodies(
+            &mut tx,
+            ctx.cooperative_id(),
+            &gov_repo::BodyFilter {
+                status,
+                search,
+                page,
+                page_size,
+            },
+        )
+        .await
+        .map_err(db_err("governance body list query failed"))?;
+
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows
+                .iter()
+                .map(|r| BodyListItemDto {
+                    id: r.id,
+                    body_number: r.body_number,
+                    name: r.name.clone(),
+                    body_type: r.body_type.clone(),
+                    status: r.status.clone(),
+                    active_members: r.active_members,
+                    created_at: r.created_at,
+                })
+                .collect(),
             page,
             page_size,
-        },
-    )
-    .await
-    .map_err(db_err("governance body list query failed"))?;
-
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows
-            .iter()
-            .map(|r| BodyListItemDto {
-                id: r.id,
-                body_number: r.body_number,
-                name: r.name.clone(),
-                body_type: r.body_type.clone(),
-                status: r.status.clone(),
-                active_members: r.active_members,
-                created_at: r.created_at,
-            })
-            .collect(),
-        page,
-        page_size,
-        total_count,
-    })
-    .into_response())
+            total_count,
+        })
+        .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_body(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::GOVERNANCE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::GOVERNANCE_READ).await?;
     let pool = pool_of(&state)?;
-    gov_repo::get_body_detail(pool, id)
-        .await
-        .map_err(db_err("governance body detail query failed"))?
-        .map(|d| {
-            Json(BodyDetailDto {
-                id: d.body.id,
-                body_number: d.body.body_number,
-                name: d.body.name,
-                body_type: d.body.body_type,
-                description: d.body.description,
-                status: d.body.status,
-                closed_at: d.body.closed_at,
-                memberships: d.memberships.iter().map(membership_dto).collect(),
-                created_at: d.body.created_at,
-                updated_at: d.body.updated_at,
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        gov_repo::get_body_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance body detail query failed"))?
+            .map(|d| {
+                Json(BodyDetailDto {
+                    id: d.body.id,
+                    body_number: d.body.body_number,
+                    name: d.body.name,
+                    body_type: d.body.body_type,
+                    description: d.body.description,
+                    status: d.body.status,
+                    closed_at: d.body.closed_at,
+                    memberships: d.memberships.iter().map(membership_dto).collect(),
+                    created_at: d.body.created_at,
+                    updated_at: d.body.updated_at,
+                })
+                .into_response()
             })
-            .into_response()
-        })
-        .ok_or(ApiError::NotFound)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,99 +502,129 @@ pub struct CreateBodyRequest {
 pub async fn create_body(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateBodyRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let name = gov_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
-    let body_type =
-        gov_model::validate_body_type(&body.body_type).map_err(|_| ApiError::ValidationFailed)?;
-    let description = gov_model::validate_description(body.description.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = gov_model::create_body_fingerprint(&name, &body_type, &description);
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let name = gov_model::validate_name(&body.name).map_err(|_| ApiError::ValidationFailed)?;
+        let body_type = gov_model::validate_body_type(&body.body_type)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let description = gov_model::validate_description(body.description.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = gov_model::create_body_fingerprint(&name, &body_type, &description);
 
-    let outcome = gov_repo::create_body(
-        pool,
-        auth.user_id,
-        gov_repo::CreateBody {
-            name,
-            body_type,
-            description,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+        let outcome = gov_repo::create_body(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            gov_repo::CreateBody {
+                name,
+                body_type,
+                description,
+                idempotency_key,
+                fingerprint,
+            },
+        )
+        .await
+        .map_err(command_error)?;
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::GovernanceBodyCreated,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "bodyId": outcome.body_id,
-                "bodyNumber": outcome.body_number,
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+            tracing::info!(
+                outcome = "governance_body_created", id = %outcome.body_id,
+                number = outcome.body_number, actor = %ctx.auth.user_id
+            );
+        }
+
+        let detail = gov_repo::get_body_detail(&mut tx, ctx.cooperative_id(), outcome.body_id)
+            .await
+            .map_err(db_err("governance body detail query failed"))?
+            .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((
+            status,
+            Json(BodyDetailDto {
+                id: detail.body.id,
+                body_number: detail.body.body_number,
+                name: detail.body.name,
+                body_type: detail.body.body_type,
+                description: detail.body.description,
+                status: detail.body.status,
+                closed_at: detail.body.closed_at,
+                memberships: detail.memberships.iter().map(membership_dto).collect(),
+                created_at: detail.body.created_at,
+                updated_at: detail.body.updated_at,
             }),
         )
-        .await;
-        tracing::info!(
-            outcome = "governance_body_created", id = %outcome.body_id,
-            number = outcome.body_number, actor = %auth.user_id
-        );
+            .into_response())
     }
-
-    let detail = gov_repo::get_body_detail(pool, outcome.body_id)
-        .await
-        .map_err(db_err("governance body detail query failed"))?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((
-        status,
-        Json(BodyDetailDto {
-            id: detail.body.id,
-            body_number: detail.body.body_number,
-            name: detail.body.name,
-            body_type: detail.body.body_type,
-            description: detail.body.description,
-            status: detail.body.status,
-            closed_at: detail.body.closed_at,
-            memberships: detail.memberships.iter().map(membership_dto).collect(),
-            created_at: detail.body.created_at,
-            updated_at: detail.body.updated_at,
-        }),
-    )
-        .into_response())
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn close_body(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    gov_repo::close_body(pool, auth.user_id, id)
-        .await
-        .map_err(command_error)?;
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        gov_repo::close_body(&mut tx, ctx.cooperative_id(), ctx.auth.user_id, id)
+            .await
+            .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::GovernanceBodyClosed,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "bodyId": id }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+
+        gov_repo::get_body_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance body detail query failed"))?
+            .map(|d| {
+                Json(BodyDetailDto {
+                    id: d.body.id,
+                    body_number: d.body.body_number,
+                    name: d.body.name,
+                    body_type: d.body.body_type,
+                    description: d.body.description,
+                    status: d.body.status,
+                    closed_at: d.body.closed_at,
+                    memberships: d.memberships.iter().map(membership_dto).collect(),
+                    created_at: d.body.created_at,
+                    updated_at: d.body.updated_at,
+                })
+                .into_response()
+            })
+            .ok_or(ApiError::NotFound)
+    }
     .await;
-
-    get_body(State(state), auth, Path(id)).await
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -586,68 +644,72 @@ pub struct CreateMembershipRequest {
 pub async fn create_membership(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(body_id): Path<Uuid>,
     Json(body): Json<CreateMembershipRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let title = gov_model::validate_membership_title(body.title.as_deref())
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let started_at = parse_timestamp(&body.started_at)?;
-    gov_model::validate_not_future(
-        started_at,
-        now,
-        gov_model::GovernanceError::InvalidStartedAt,
-    )
-    .map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint =
-        gov_model::create_membership_fingerprint(body_id, body.person_id, &title, started_at);
-
-    let outcome = gov_repo::create_membership(
-        pool,
-        auth.user_id,
-        gov_repo::CreateMembership {
-            body_id,
-            person_id: body.person_id,
-            title,
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let title = gov_model::validate_membership_title(body.title.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let started_at = parse_timestamp(&body.started_at)?;
+        gov_model::validate_not_future(
             started_at,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::GovernanceMembershipStarted,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "membershipId": outcome.membership_id,
-                "bodyId": body_id,
-                "personId": body.person_id,
-            }),
+            now,
+            gov_model::GovernanceError::InvalidStartedAt,
         )
-        .await;
-    }
+        .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint =
+            gov_model::create_membership_fingerprint(body_id, body.person_id, &title, started_at);
 
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((
-        status,
-        Json(serde_json::json!({
-            "membershipId": outcome.membership_id,
-        })),
-    )
-        .into_response())
+        let outcome = gov_repo::create_membership(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            gov_repo::CreateMembership {
+                body_id,
+                person_id: body.person_id,
+                title,
+                started_at,
+                idempotency_key,
+                fingerprint,
+            },
+        )
+        .await
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((
+            status,
+            Json(serde_json::json!({
+                "membershipId": outcome.membership_id,
+            })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -661,32 +723,46 @@ pub struct EndMembershipRequest {
 pub async fn end_membership(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<EndMembershipRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let now = state.auth.clock.now();
-    let ended_at = parse_timestamp(&body.ended_at)?;
-    gov_model::validate_not_future(ended_at, now, gov_model::GovernanceError::InvalidEndedAt)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let reason =
-        gov_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let now = state.auth.clock.now();
+        let ended_at = parse_timestamp(&body.ended_at)?;
+        gov_model::validate_not_future(ended_at, now, gov_model::GovernanceError::InvalidEndedAt)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let reason =
+            gov_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
 
-    gov_repo::end_membership(pool, auth.user_id, id, ended_at, &reason)
+        gov_repo::end_membership(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            id,
+            ended_at,
+            &reason,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::GovernanceMembershipEnded,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "membershipId": id }),
-    )
-    .await;
+        // R4: audit row minted by the DB transition trigger.
 
-    Ok(StatusCode::OK.into_response())
+        Ok(StatusCode::OK.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -705,82 +781,111 @@ pub struct DecisionListQuery {
 
 pub async fn list_decisions(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<DecisionListQuery>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::GOVERNANCE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::GOVERNANCE_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = page_of(&ListQuery {
-        search: query.search.clone(),
-        page: query.page,
-        page_size: query.page_size,
-        default_account_id: None,
-    })?;
-    let status = query
-        .status
-        .as_deref()
-        .map(|s| {
-            gov_model::DecisionStatus::parse(s)
-                .map(|v| v.as_str().to_string())
-                .ok_or(ApiError::ValidationFailed)
-        })
-        .transpose()?;
-    let search = query
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = page_of(&ListQuery {
+            search: query.search.clone(),
+            page: query.page,
+            page_size: query.page_size,
+            default_account_id: None,
+        })?;
+        let status = query
+            .status
+            .as_deref()
+            .map(|s| {
+                gov_model::DecisionStatus::parse(s)
+                    .map(|v| v.as_str().to_string())
+                    .ok_or(ApiError::ValidationFailed)
+            })
+            .transpose()?;
+        let search = query
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
-    let rows = gov_repo::list_decisions(
-        pool,
-        &gov_repo::DecisionFilter {
-            body_id: query.body_id,
-            status,
-            search,
+        let rows = gov_repo::list_decisions(
+            &mut tx,
+            ctx.cooperative_id(),
+            &gov_repo::DecisionFilter {
+                body_id: query.body_id,
+                status,
+                search,
+                page,
+                page_size,
+            },
+        )
+        .await
+        .map_err(db_err("governance decision list query failed"))?;
+
+        let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows
+                .iter()
+                .map(|r| DecisionListItemDto {
+                    id: r.id,
+                    decision_number: r.decision_number,
+                    body_id: r.body_id,
+                    body_name: r.body_name.clone(),
+                    title: r.title.clone(),
+                    status: r.status.clone(),
+                    decision_on: r.decision_on,
+                    effective_on: r.effective_on,
+                    vote_count: r.vote_count,
+                    created_at: r.created_at,
+                })
+                .collect(),
             page,
             page_size,
-        },
-    )
-    .await
-    .map_err(db_err("governance decision list query failed"))?;
-
-    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows
-            .iter()
-            .map(|r| DecisionListItemDto {
-                id: r.id,
-                decision_number: r.decision_number,
-                body_id: r.body_id,
-                body_name: r.body_name.clone(),
-                title: r.title.clone(),
-                status: r.status.clone(),
-                decision_on: r.decision_on,
-                effective_on: r.effective_on,
-                vote_count: r.vote_count,
-                created_at: r.created_at,
-            })
-            .collect(),
-        page,
-        page_size,
-        total_count,
-    })
-    .into_response())
+            total_count,
+        })
+        .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_decision(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    authz::require(&state, &auth, authz::catalog::GOVERNANCE_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::GOVERNANCE_READ).await?;
     let pool = pool_of(&state)?;
-    gov_repo::get_decision_detail(pool, id)
-        .await
-        .map_err(db_err("governance decision detail query failed"))?
-        .map(|d| Json(decision_detail_dto(d)).into_response())
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        gov_repo::get_decision_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance decision detail query failed"))?
+            .map(|d| Json(decision_detail_dto(d)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,66 +905,72 @@ pub struct CreateDecisionRequest {
 pub async fn create_decision(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateDecisionRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let title = gov_model::validate_title(&body.title).map_err(|_| ApiError::ValidationFailed)?;
-    let decision_text = gov_model::validate_decision_text(&body.decision_text)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let decision_on = parse_business_date(&body.decision_on)?;
-    let effective_on = parse_optional_business_date(body.effective_on.as_deref())?;
-    let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = gov_model::create_decision_fingerprint(
-        body.body_id,
-        &title,
-        &decision_text,
-        decision_on,
-        effective_on,
-    );
-
-    let outcome = gov_repo::create_decision(
-        pool,
-        auth.user_id,
-        gov_repo::CreateDecision {
-            body_id: body.body_id,
-            title,
-            decision_text,
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let title =
+            gov_model::validate_title(&body.title).map_err(|_| ApiError::ValidationFailed)?;
+        let decision_text = gov_model::validate_decision_text(&body.decision_text)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let decision_on = parse_business_date(&body.decision_on)?;
+        let effective_on = parse_optional_business_date(body.effective_on.as_deref())?;
+        let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = gov_model::create_decision_fingerprint(
+            body.body_id,
+            &title,
+            &decision_text,
             decision_on,
             effective_on,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+        );
 
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::GovernanceDecisionCreated,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "decisionId": outcome.decision_id,
-                "decisionNumber": outcome.decision_number,
-                "bodyId": body.body_id,
-            }),
+        let outcome = gov_repo::create_decision(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            gov_repo::CreateDecision {
+                body_id: body.body_id,
+                title,
+                decision_text,
+                decision_on,
+                effective_on,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-    }
-
-    let detail = gov_repo::get_decision_detail(pool, outcome.decision_id)
         .await
-        .map_err(db_err("governance decision detail query failed"))?
-        .ok_or(ApiError::Internal)?;
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(decision_detail_dto(detail))).into_response())
+        .map_err(command_error)?;
+
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+
+        let detail =
+            gov_repo::get_decision_detail(&mut tx, ctx.cooperative_id(), outcome.decision_id)
+                .await
+                .map_err(db_err("governance decision detail query failed"))?
+                .ok_or(ApiError::Internal)?;
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(decision_detail_dto(detail))).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -877,54 +988,85 @@ pub struct UpdateDecisionRequest {
 pub async fn update_decision(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateDecisionRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let title = gov_model::validate_title(&body.title).map_err(|_| ApiError::ValidationFailed)?;
-    let decision_text = gov_model::validate_decision_text(&body.decision_text)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let decision_on = parse_business_date(&body.decision_on)?;
-    let effective_on = parse_optional_business_date(body.effective_on.as_deref())?;
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let title =
+            gov_model::validate_title(&body.title).map_err(|_| ApiError::ValidationFailed)?;
+        let decision_text = gov_model::validate_decision_text(&body.decision_text)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let decision_on = parse_business_date(&body.decision_on)?;
+        let effective_on = parse_optional_business_date(body.effective_on.as_deref())?;
 
-    gov_repo::update_decision(pool, id, &title, &decision_text, decision_on, effective_on)
+        gov_repo::update_decision(
+            &mut tx,
+            ctx.cooperative_id(),
+            id,
+            &title,
+            &decision_text,
+            decision_on,
+            effective_on,
+        )
         .await
         .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::GovernanceDecisionUpdated,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "decisionId": id }),
-    )
-    .await;
+        // R4: audit row minted by the DB transition trigger.
 
-    get_decision(State(state), auth, Path(id)).await
+        gov_repo::get_decision_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance decision detail query failed"))?
+            .map(|d| Json(decision_detail_dto(d)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn open_decision(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    gov_repo::open_decision(pool, auth.user_id, id)
-        .await
-        .map_err(command_error)?;
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        gov_repo::open_decision(&mut tx, ctx.cooperative_id(), ctx.auth.user_id, id)
+            .await
+            .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::GovernanceDecisionOpened,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "decisionId": id }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+
+        gov_repo::get_decision_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance decision detail query failed"))?
+            .map(|d| Json(decision_detail_dto(d)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
     .await;
-
-    get_decision(State(state), auth, Path(id)).await
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -939,28 +1081,39 @@ pub struct CancelDecisionRequest {
 pub async fn cancel_decision(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CancelDecisionRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let reason =
-        gov_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let reason =
+            gov_model::validate_reason(&body.reason).map_err(|_| ApiError::ValidationFailed)?;
 
-    gov_repo::cancel_decision(pool, auth.user_id, id, &reason)
-        .await
-        .map_err(command_error)?;
+        gov_repo::cancel_decision(&mut tx, ctx.cooperative_id(), ctx.auth.user_id, id, &reason)
+            .await
+            .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::GovernanceDecisionCancelled,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({ "decisionId": id }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+
+        gov_repo::get_decision_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance decision detail query failed"))?
+            .map(|d| Json(decision_detail_dto(d)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
     .await;
-
-    get_decision(State(state), auth, Path(id)).await
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -982,59 +1135,63 @@ pub struct CastVoteRequest {
 pub async fn cast_vote(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<CastVoteRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let choice = gov_model::VoteChoice::parse(&body.choice).ok_or(ApiError::ValidationFailed)?;
-    let note =
-        gov_model::validate_note(body.note.as_deref()).map_err(|_| ApiError::ValidationFailed)?;
-    let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
-        .map_err(|_| ApiError::ValidationFailed)?;
-    let fingerprint = gov_model::cast_vote_fingerprint(id, body.person_id, choice, &note);
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let choice =
+            gov_model::VoteChoice::parse(&body.choice).ok_or(ApiError::ValidationFailed)?;
+        let note = gov_model::validate_note(body.note.as_deref())
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let idempotency_key = gov_model::validate_idempotency_key(&body.idempotency_key)
+            .map_err(|_| ApiError::ValidationFailed)?;
+        let fingerprint = gov_model::cast_vote_fingerprint(id, body.person_id, choice, &note);
 
-    let outcome = gov_repo::cast_vote(
-        pool,
-        auth.user_id,
-        gov_repo::CastVote {
-            decision_id: id,
-            person_id: body.person_id,
-            choice,
-            note,
-            idempotency_key,
-            fingerprint,
-        },
-    )
-    .await
-    .map_err(command_error)?;
-
-    if !outcome.replayed {
-        audit::record(
-            pool,
-            SecurityEventType::GovernanceVoteRecorded,
-            Some(auth.user_id),
-            None,
-            serde_json::json!({
-                "voteId": outcome.vote_id,
-                "decisionId": id,
-                "personId": body.person_id,
-                "choice": choice.as_str(),
-            }),
+        let outcome = gov_repo::cast_vote(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            gov_repo::CastVote {
+                decision_id: id,
+                person_id: body.person_id,
+                choice,
+                note,
+                idempotency_key,
+                fingerprint,
+            },
         )
-        .await;
-    }
+        .await
+        .map_err(command_error)?;
 
-    let status = if outcome.replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((
-        status,
-        Json(serde_json::json!({ "voteId": outcome.vote_id })),
-    )
-        .into_response())
+        if !outcome.replayed {
+            // R4: audit row minted by the DB transition trigger.
+        }
+
+        let status = if outcome.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((
+            status,
+            Json(serde_json::json!({ "voteId": outcome.vote_id })),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1050,38 +1207,47 @@ pub struct FinalizeDecisionRequest {
 pub async fn finalize_decision(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<FinalizeDecisionRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = governance_mutation!(&state, &headers, &auth, &Method::POST);
-    let outcome =
-        gov_model::DecisionOutcome::parse(&body.outcome).ok_or(ApiError::ValidationFailed)?;
+    let pool = governance_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let outcome =
+            gov_model::DecisionOutcome::parse(&body.outcome).ok_or(ApiError::ValidationFailed)?;
 
-    gov_repo::finalize_decision(
-        pool,
-        auth.user_id,
-        gov_repo::FinalizeDecision {
-            decision_id: id,
-            outcome,
-        },
-    )
-    .await
-    .map_err(command_error)?;
+        gov_repo::finalize_decision(
+            &mut tx,
+            ctx.cooperative_id(),
+            ctx.auth.user_id,
+            gov_repo::FinalizeDecision {
+                decision_id: id,
+                outcome,
+            },
+        )
+        .await
+        .map_err(command_error)?;
 
-    audit::record(
-        pool,
-        SecurityEventType::GovernanceDecisionFinalized,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({
-            "decisionId": id,
-            "outcome": outcome.as_str(),
-        }),
-    )
+        // R4: audit row minted by the DB transition trigger.
+
+        gov_repo::get_decision_detail(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(db_err("governance decision detail query failed"))?
+            .map(|d| Json(decision_detail_dto(d)).into_response())
+            .ok_or(ApiError::NotFound)
+    }
     .await;
-
-    get_decision(State(state), auth, Path(id)).await
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1110,28 +1276,42 @@ pub struct PersonLookupDto {
 
 pub async fn person_lookup(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<PersonLookupQuery>,
 ) -> Result<Json<Vec<PersonLookupDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::GOVERNANCE_MANAGE).await?;
+    authz::require_business(&state, &ctx, authz::catalog::GOVERNANCE_MANAGE).await?;
     let pool = pool_of(&state)?;
-    let search = query.search.as_deref().unwrap_or_default();
-    if search.trim().is_empty() {
-        return Ok(Json(Vec::new()));
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let search = query.search.as_deref().unwrap_or_default();
+        if search.trim().is_empty() {
+            return Ok(Json(Vec::new()));
+        }
+        let limit = query.limit.unwrap_or(10).clamp(1, 25);
+        let rows = party_repo::search_persons(&mut tx, ctx.cooperative_id(), search.trim(), limit)
+            .await
+            .map_err(db_err("governance person lookup failed"))?;
+        Ok(Json(
+            rows.iter()
+                .map(|r| PersonLookupDto {
+                    id: r.id,
+                    first_name: r.first_name.clone(),
+                    last_name: r.last_name.clone(),
+                    shareholder_id: r.shareholder_id,
+                    shareholder_status: r.shareholder_status.clone(),
+                })
+                .collect(),
+        ))
     }
-    let limit = query.limit.unwrap_or(10).clamp(1, 25);
-    let rows = party_repo::search_persons(pool, search.trim(), limit)
-        .await
-        .map_err(db_err("governance person lookup failed"))?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| PersonLookupDto {
-                id: r.id,
-                first_name: r.first_name.clone(),
-                last_name: r.last_name.clone(),
-                shareholder_id: r.shareholder_id,
-                shareholder_status: r.shareholder_status.clone(),
-            })
-            .collect(),
-    ))
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

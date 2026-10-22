@@ -80,15 +80,82 @@ async fn main() -> ExitCode {
     }
 }
 
+/// M1-P2 B1 opt-in guard: when `KOOPERATIF_EXPECTED_DATABASE` is set,
+/// refuse to proceed unless the pool is actually connected to the
+/// expected database — checked before any migration or provisioning
+/// write. Unset preserves the previous behavior.
+async fn database_identity_guard(pool: &sqlx::PgPool, expected: Option<&str>) -> Result<(), ()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    db::verify_expected_database(pool, expected)
+        .await
+        .map_err(|error| eprintln!("{error}"))
+}
+
 async fn run_server(config: Config) -> ExitCode {
     tracing::info!(environment = %config.env, "starting kooperatif api server");
+
+    // M1-P4-P2A: the API runtime must connect as the restricted
+    // `kooperatif_app` principal. The admin/migration URL is used only
+    // when the operator explicitly opted in via
+    // `KOOPERATIF_ALLOW_ADMIN_RUNTIME` — there is no silent privileged
+    // fallback. Admin CLI paths keep using `database_url` exclusively.
+    let admin_fallback = config.app_database_url.is_none() && config.database_url.is_some();
+    if admin_fallback && !config.allow_admin_runtime {
+        eprintln!(
+            "KOOPERATIF_APP_DATABASE_URL is unset and KOOPERATIF_ALLOW_ADMIN_RUNTIME is not \
+             enabled — refusing to serve on the administrative principal"
+        );
+        return ExitCode::FAILURE;
+    }
+    let runtime_url = config
+        .app_database_url
+        .clone()
+        .or_else(|| config.database_url.clone());
 
     // A failed database connection degrades readiness instead of killing
     // the process: /health stays 200 (process alive) while /ready reports
     // the dependency as unavailable (ADR-011 semantics).
-    let database = match &config.database_url {
+    let database = match &runtime_url {
         Some(url) => match db::connect(url).await {
             Ok(pool) => {
+                if database_identity_guard(&pool, config.expected_database.as_deref())
+                    .await
+                    .is_err()
+                {
+                    return ExitCode::FAILURE;
+                }
+                // Verify the ACTUAL connected principal — a mispointed
+                // URL must fail closed, not merely be presumed safe.
+                match db::inspect_runtime_principal(&pool).await {
+                    Ok(principal) if principal.privileged => {
+                        if admin_fallback && config.allow_admin_runtime {
+                            tracing::warn!(
+                                principal = %principal.name,
+                                "serving on a privileged PostgreSQL principal — \
+                                 explicit KOOPERATIF_ALLOW_ADMIN_RUNTIME opt-in"
+                            );
+                        } else {
+                            eprintln!(
+                                "runtime principal '{}' is privileged (superuser/bypassrls/\
+                                 escalation flag/table owner) — refusing to serve",
+                                principal.name
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    Ok(principal) => {
+                        tracing::info!(
+                            principal = %principal.name,
+                            "restricted runtime principal verified"
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("runtime principal inspection failed: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
                 tracing::info!("database pool connected");
                 Some(pool)
             }
@@ -107,7 +174,7 @@ async fn run_server(config: Config) -> ExitCode {
     // its own dedicated PG connection (not a pool checkout) and LISTENs
     // for transactional trigger notifications; reconnects are
     // self-healing and bounded (see realtime::listen_loop).
-    if let Some(url) = config.database_url.clone() {
+    if let Some(url) = runtime_url.clone() {
         tokio::spawn(kooperatif_server::realtime::listen_loop(url));
     }
 
@@ -279,6 +346,12 @@ async fn run_create_user(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if database_identity_guard(&pool, config.expected_database.as_deref())
+        .await
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
 
     // Hash with the configured (floor-enforced) Argon2id parameters.
     let runtime = AuthRuntime::new(config.auth.clone(), Arc::new(SystemClock));
@@ -289,9 +362,16 @@ async fn run_create_user(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    drop(password);
 
-    match users::create_user(&pool, &username, display_name.trim(), &password_hash).await {
+    match users::create_user(
+        &pool,
+        &username,
+        display_name.trim(),
+        &password_hash,
+        &password,
+    )
+    .await
+    {
         Ok(user) => {
             audit::record(
                 &pool,
@@ -376,6 +456,12 @@ async fn run_grant_role(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if database_identity_guard(&pool, config.expected_database.as_deref())
+        .await
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
 
     let user = match users::find_by_normalized_username(&pool, &username).await {
         Ok(Some(user)) => user,
@@ -455,8 +541,10 @@ async fn run_grant_role(args: impl Iterator<Item = String>) -> ExitCode {
 ///   kooperatif-server bootstrap-cooperative --name "Ana Kooperatif"
 ///       One-time initial cooperative for the existing installation:
 ///       unique is_bootstrap row (active + enabled) plus an active
-///       membership for every user. Repeat calls only fill gaps —
-///       never duplicate the cooperative or reassign records.
+///       membership for every ACTIVE user (disabled users get none,
+///       so reactivation cannot silently grant cooperative access).
+///       Repeat calls only fill gaps — never duplicate the cooperative
+///       or reassign records.
 async fn run_tenant_cli(command: &str, args: impl Iterator<Item = String>) -> ExitCode {
     use kooperatif_server::tenant::repo;
 
@@ -501,6 +589,12 @@ async fn run_tenant_cli(command: &str, args: impl Iterator<Item = String>) -> Ex
             return ExitCode::FAILURE;
         }
     };
+    if database_identity_guard(&pool, config.expected_database.as_deref())
+        .await
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
 
     match command {
         "create-cooperative" => {
@@ -632,6 +726,12 @@ async fn run_migrate(config: &Config) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if database_identity_guard(&pool, config.expected_database.as_deref())
+        .await
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
 
     if let Err(error) = db::run_migrations(&pool).await {
         tracing::error!(error = %error, "migration failed");

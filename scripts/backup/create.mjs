@@ -24,6 +24,7 @@ import {
 	safeConnLabel,
 	sha256File,
 	tmpDir,
+	verifyExpectedDatabase,
 	writeStatus
 } from './lib.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -45,6 +46,10 @@ async function main() {
 	});
 
 	try {
+		// B1 opt-in guard: refuse to dump unless the source connection's
+		// actual current_database() matches KOOPERATIF_EXPECTED_DATABASE.
+		verifyExpectedDatabase(cfg);
+
 		// pg_dump's custom format is a consistent snapshot of the database
 		// as of dump start (single transaction per docs). --no-owner /
 		// --no-privileges keep the artifact restorable onto clusters where

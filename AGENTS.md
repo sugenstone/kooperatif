@@ -144,3 +144,39 @@ Before declaring a milestone involving material financial production data produc
 Do not treat a successful backup command/job as proof of recoverability. Restore verification evidence is required.
 
 Do not use disaster-recovery rollback to correct ordinary business mistakes; use the specified reversal/correction model.
+
+## Test execution policy (permanent)
+
+Detailed rationale and timings: `docs/31-TEST-EXECUTION-POLICY.md`.
+
+### During development
+- Run focused tests for the modified component only: `cargo test --test <binary>` (or `--lib` for unit tests) plus directly related regression suites.
+- Always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and frontend `tsc`/vitest when the corresponding surface changed.
+- Do NOT re-run the full backend suite after small, well-scoped edits.
+
+### At batch completion
+- Run all directly affected test binaries plus related integration, RLS, authorization, audit and financial regression suites.
+- Schema changes: run a clean migration replay in a NEW disposable database (never reset an existing one) and verify restricted-role (`kooperatif_app`) behavior.
+- Authorization contract changes: verify grants/regrants fingerprint.
+- Run the full suite only when the change's blast radius makes focused testing insufficient to establish confidence; say why.
+
+### At milestone completion
+- Full backend suite (`cargo test --all-targets`), frontend tests + static checks, clean migration replay, and backup/restore verification when applicable.
+
+### Gate reporting
+- Report every gate as exactly one of PASS / FAIL / NOT RUN / BLOCKED, with evidence.
+- A passing focused suite is NEVER equivalent to a passing full suite — state scope explicitly.
+
+## Test infrastructure rules (permanent)
+
+- Disposable test databases are created as clones of the migrated template cache (`kooperatif_tpl_<hash>`; `KOOPERATIF_TEST_TEMPLATE=0` opts out). Per-test isolation is unchanged.
+- Test parallelism is bounded by `.cargo/config.toml` (`RUST_TEST_THREADS = 6`, `jobs = 4`) — derived from `max_connections=100` (~16 conns/test chain). Do not raise without redoing this math against the live server limit.
+- `cargo fmt` is the formatting gate; do not hand-format.
+- `KOOPERATIF_TEST_DATABASE_URL` (local dev: `postgres://kooperatif:kooperatif_dev_password@localhost:5494/<db>`): template-cloning suites accept any base DB, but direct-connect suites (`tests/auth.rs`, `tests/db.rs`) enforce the identity guard and require `kooperatif_test` or a fresh `kooperatif_test_<32hex>` you created yourself — never point them at `postgres`.
+
+## Database safety (permanent)
+
+- Agents NEVER run manual `DROP DATABASE`, bulk cleanup, or destructive recovery commands. Automated deletion is permitted ONLY for disposable databases positively proven to belong to the current test run (the test's own `cleanup()`/`drop_probe` teardown of its claimed database).
+- There is NO environment variable, test helper, or GC path through which an ordinary agent execution or automated test run can delete historical databases. The harness GC only demotes/marks stale `kooperatif_test_<32hex>` candidates and retains them; the test-only authorized helpers are confined to databases the current process itself registered (created or claimed) this run.
+- Marker-tagged or stale databases from previous runs are NEVER deleted programmatically. Historical cleanup is a separate operator procedure (see docs/31 §2): review the exact target inventory first, obtain explicit authorization, then execute — never via the test harness.
+- Protected: `kooperatif`, `kooperatif_dev`, `kooperatif_e2e_*`, backup/drill/regrant/baseline databases, `kooperatif_tpl_*` caches, historical and stale test databases (including marker-tagged ones), backup files, migration history, and every database whose ownership cannot be proven. When in doubt: preserve and report.

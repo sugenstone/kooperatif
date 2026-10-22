@@ -15,6 +15,7 @@
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
+	import { live } from '$lib/realtime/realtime.svelte';
 	import { ROLES_PATH, userRolesPath, type Role } from '@kooperatif/contracts';
 
 	let { data } = $props<{ data: { id: string } }>();
@@ -75,6 +76,9 @@
 
 	$effect(() => {
 		void refresh();
+		return live.onInvalidate((domains) => {
+			if (domains === '*' || domains.has('authz')) void refresh();
+		});
 	});
 </script>
 

@@ -24,10 +24,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::auth::audit::{self, SecurityEventType};
 use crate::auth::authz;
 use crate::auth::csrf;
-use crate::auth::extractor::CurrentAuth;
 use crate::auth::routes::csrf_rejection_to_api_error;
 use crate::http::error::ApiError;
 use crate::http::AppState;
@@ -35,6 +33,7 @@ use crate::parties::routes::{ListQuery, PaginatedDto};
 use crate::shares::model as share_model;
 use crate::shares::repo as share_repo;
 use crate::shares::repo::ShareEventRow;
+use crate::tenant::extractor::BusinessAuth;
 
 const EVENT_HISTORY_LIMIT: i64 = 200;
 
@@ -163,12 +162,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 /// Share mutations share this prologue (CSRF layers + permission).
 macro_rules! shares_mutation {
-    ($state:expr, $headers:expr, $auth:expr, $method:expr) => {{
+    ($state:expr, $headers:expr, $ctx:expr, $method:expr) => {{
         csrf::validate_origin($headers, $method, &$state.auth.config.allowed_origins)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        csrf::validate_csrf_token($headers, &$auth.csrf_token)
+        csrf::validate_csrf_token($headers, &$ctx.auth.csrf_token)
             .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
-        authz::require($state, $auth, authz::catalog::SHARES_MANAGE).await?;
+        authz::require_business($state, $ctx, authz::catalog::SHARES_MANAGE).await?;
         pool_of($state)?
     }};
 }
@@ -239,49 +238,89 @@ fn list_item_dto(row: &share_repo::ShareListRow) -> ShareListItemDto {
 
 pub async fn list_shares(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<PaginatedDto<ShareListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHARES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHARES_READ).await?;
     let pool = pool_of(&state)?;
-    let (page, page_size) = crate::parties::routes::page_of(&query)?;
-    let rows = share_repo::list_shares(pool, query.search.as_deref(), page, page_size)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let (page, page_size) = crate::parties::routes::page_of(&query)?;
+        let rows = share_repo::list_shares(
+            &mut tx,
+            ctx.cooperative_id(),
+            query.search.as_deref(),
+            page,
+            page_size,
+        )
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "share listing failed");
             ApiError::Internal
         })?;
-    let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
-    Ok(Json(PaginatedDto {
-        items: rows.iter().map(list_item_dto).collect(),
-        page,
-        page_size,
-        total_count,
-    }))
+        let total_count = rows.first().map(|row| row.total_count).unwrap_or(0);
+        Ok(Json(PaginatedDto {
+            items: rows.iter().map(list_item_dto).collect(),
+            page,
+            page_size,
+            total_count,
+        }))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn get_share(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ShareDetailDto>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHARES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHARES_READ).await?;
     let pool = pool_of(&state)?;
-    load_detail(pool, id)
-        .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        load_detail(&mut tx, ctx.cooperative_id(), id)
+            .await?
+            .map(Json)
+            .ok_or(ApiError::NotFound)
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
-async fn load_detail(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<ShareDetailDto>, ApiError> {
-    let Some(row) = share_repo::find_share(pool, id).await.map_err(|error| {
-        tracing::error!(error = %error, "share load failed");
-        ApiError::Internal
-    })?
+async fn load_detail(
+    db: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<ShareDetailDto>, ApiError> {
+    let Some(row) = share_repo::find_share(&mut *db, cooperative_id, id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "share load failed");
+            ApiError::Internal
+        })?
     else {
         return Ok(None);
     };
-    let events = share_repo::share_event_history(pool, id, EVENT_HISTORY_LIMIT)
+    let events = share_repo::share_event_history(&mut *db, cooperative_id, id, EVENT_HISTORY_LIMIT)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, "share history failed");
@@ -350,10 +389,12 @@ fn parse_amount(raw: Option<&String>) -> Result<Option<Decimal>, ApiError> {
 pub async fn create_share(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Json(body): Json<CreateShareRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = shares_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = shares_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
 
     let acquisition_type = share_model::AcquisitionType::parse_initial(&body.acquisition_type)
         .ok_or(ApiError::ValidationFailed)?;
@@ -365,8 +406,9 @@ pub async fn create_share(
     let now = state.auth.clock.now();
 
     let (share_id, share_number) = share_repo::create_share(
-        pool,
-        auth.user_id,
+        &mut tx,
+        ctx.cooperative_id(),
+        ctx.auth.user_id,
         share_repo::CreateShare {
             shareholder_id: body.shareholder_id,
             acquisition_type,
@@ -390,27 +432,26 @@ pub async fn create_share(
 
     // Audit: share created + initial ownership allocated + fee
     // condition — one durable event (§52).
-    audit::record(
-        pool,
-        SecurityEventType::ShareCreated,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({
-            "share_id": share_id,
-            "share_number": share_number,
-            "to_shareholder_id": body.shareholder_id,
-            "acquisition_type": acquisition_type.as_str(),
-            "acquisition_fee": fee.map(share_model::canonical_amount),
-            "effective_at": effective_at,
-        }),
-    )
-    .await;
-    tracing::info!(outcome = "share_created", id = %share_id, number = share_number, actor = %auth.user_id);
+    // R4: audit row minted by the DB transition trigger.
+    tracing::info!(outcome = "share_created", id = %share_id, number = share_number, actor = %ctx.auth.user_id);
 
-    let detail = load_detail(pool, share_id)
+    let detail = load_detail(&mut tx,
+        ctx.cooperative_id(), share_id)
         .await?
         .ok_or(ApiError::Internal)?;
     Ok((StatusCode::CREATED, Json(detail)).into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Parsed owner-change inputs (transfer and sale converge here).
@@ -427,19 +468,22 @@ struct OwnerChange {
 async fn change_owner_impl(
     state: &AppState,
     headers: &HeaderMap,
-    auth: &CurrentAuth,
+    ctx: &BusinessAuth,
     change: OwnerChange,
 ) -> Result<Response, ApiError> {
-    let pool = shares_mutation!(state, headers, auth, &Method::POST);
+    let pool = shares_mutation!(state, headers, ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
     let reason = share_model::validate_reason(change.reason.as_deref())
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
     let effective_at = change.effective_at.unwrap_or(now);
     let amount = change.amount;
 
-    let (from_id, share_number) = share_repo::change_owner(
-        pool,
-        auth.user_id,
+    let (from_id, _share_number) = share_repo::change_owner(
+        &mut tx,
+        ctx.cooperative_id(),
+        ctx.auth.user_id,
         share_repo::ChangeOwner {
             share_id: change.share_id,
             to_shareholder_id: change.to_shareholder_id,
@@ -468,31 +512,25 @@ async fn change_owner_impl(
         }
     })?;
 
-    audit::record(
-        pool,
-        match change.kind {
-            share_model::AcquisitionType::Transfer => SecurityEventType::ShareTransferred,
-            _ => SecurityEventType::ShareSold,
-        },
-        Some(auth.user_id),
-        None,
-        serde_json::json!({
-            "share_id": change.share_id,
-            "share_number": share_number,
-            "from_shareholder_id": from_id,
-            "to_shareholder_id": change.to_shareholder_id,
-            "amount": amount.map(share_model::canonical_amount),
-            "reason": reason,
-            "effective_at": effective_at,
-        }),
-    )
-    .await;
+    // R4: audit row minted by the DB transition trigger.
     tracing::info!(
         outcome = "share_ownership_changed", id = %change.share_id, kind = event_type_str(change.kind),
-        from = %from_id, to = %change.to_shareholder_id, actor = %auth.user_id
+        from = %from_id, to = %change.to_shareholder_id, actor = %ctx.auth.user_id
     );
 
     Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn event_type_str(kind: share_model::AcquisitionType) -> &'static str {
@@ -502,14 +540,14 @@ fn event_type_str(kind: share_model::AcquisitionType) -> &'static str {
 pub async fn transfer_share(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<OwnershipChangeRequest>,
 ) -> Result<Response, ApiError> {
     change_owner_impl(
         &state,
         &headers,
-        &auth,
+        &ctx,
         OwnerChange {
             share_id: id,
             to_shareholder_id: body.to_shareholder_id,
@@ -526,14 +564,14 @@ pub async fn transfer_share(
 pub async fn sell_share(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<SaleRequest>,
 ) -> Result<Response, ApiError> {
     change_owner_impl(
         &state,
         &headers,
-        &auth,
+        &ctx,
         OwnerChange {
             share_id: id,
             to_shareholder_id: body.to_shareholder_id,
@@ -550,18 +588,20 @@ pub async fn sell_share(
 pub async fn change_share_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
     Json(body): Json<ShareStatusChangeRequest>,
 ) -> Result<Response, ApiError> {
-    let pool = shares_mutation!(&state, &headers, &auth, &Method::POST);
+    let pool = shares_mutation!(&state, &headers, &ctx, &Method::POST);
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
     let target = share_model::ShareStatus::parse(&body.to).ok_or(ApiError::ValidationFailed)?;
     let reason = share_model::validate_reason(body.reason.as_deref())
         .map_err(|_| ApiError::ValidationFailed)?;
     let now = state.auth.clock.now();
 
-    let share_number =
-        share_repo::change_status(pool, auth.user_id, id, target, reason.clone(), now)
+    let _share_number =
+        share_repo::change_status(&mut tx, ctx.cooperative_id(), ctx.auth.user_id, id, target, reason.clone(), now)
             .await
             .map_err(|error| match error {
                 share_repo::StatusChangeError::ShareNotFound => ApiError::NotFound,
@@ -573,38 +613,52 @@ pub async fn change_share_status(
                 }
             })?;
 
-    audit::record(
-        pool,
-        SecurityEventType::ShareStatusChanged,
-        Some(auth.user_id),
-        None,
-        serde_json::json!({
-            "share_id": id,
-            "share_number": share_number,
-            "to": target.as_str(),
-            "reason": reason,
-        }),
-    )
-    .await;
-    tracing::info!(outcome = "share_status_changed", id = %id, to = target.as_str(), actor = %auth.user_id);
+    // R4: audit row minted by the DB transition trigger.
+    tracing::info!(outcome = "share_status_changed", id = %id, to = target.as_str(), actor = %ctx.auth.user_id);
 
     Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Current shares of one shareholder (§66): focused endpoint so the
 /// Shareholder page renders its "Hisseler" section without N requests.
 pub async fn shareholder_shares(
     State(state): State<AppState>,
-    auth: CurrentAuth,
+    ctx: BusinessAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ShareListItemDto>>, ApiError> {
-    authz::require(&state, &auth, authz::catalog::SHARES_READ).await?;
+    authz::require_business(&state, &ctx, authz::catalog::SHARES_READ).await?;
     let pool = pool_of(&state)?;
-    let rows = share_repo::list_shares_by_shareholder(pool, id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "shareholder shares failed");
-            ApiError::Internal
-        })?;
-    Ok(Json(rows.iter().map(list_item_dto).collect()))
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let rows = share_repo::list_shares_by_shareholder(&mut tx, ctx.cooperative_id(), id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "shareholder shares failed");
+                ApiError::Internal
+            })?;
+        Ok(Json(rows.iter().map(list_item_dto).collect()))
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
 }

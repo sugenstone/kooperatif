@@ -18,7 +18,6 @@
 //! entitlement row. Valuations write NO movement at all.
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -87,9 +86,11 @@ pub struct InvestmentListRow {
 /// Server-side list (ADR-010): status/type/search filters, stable
 /// `investment_number DESC` ordering, derived financial columns.
 pub async fn list_investments(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     filter: &InvestmentFilter,
 ) -> Result<Vec<InvestmentListRow>, sqlx::Error> {
+    let mut conn = db.conn().await?;
     sqlx::query_as::<_, InvestmentListRow>(&format!(
         "SELECT i.id, i.investment_number, i.name, i.investment_type, i.status, \
                 i.acquired_at, \
@@ -106,7 +107,8 @@ pub async fn list_investments(
                 i.created_at, \
                 count(*) OVER () AS total_count \
          FROM investments i \
-         WHERE ($1::text IS NULL OR i.status = $1) \
+         WHERE i.cooperative_id IS NOT DISTINCT FROM $4 \
+           AND ($1::text IS NULL OR i.status = $1) \
            AND ($2::text IS NULL OR i.investment_type = $2) \
            AND ($3::text IS NULL OR i.name ILIKE '%' || $3 || '%' \
                 OR i.reference ILIKE '%' || $3 || '%' \
@@ -119,7 +121,8 @@ pub async fn list_investments(
     .bind(&filter.status)
     .bind(&filter.investment_type)
     .bind(&filter.search)
-    .fetch_all(pool)
+    .bind(cooperative_id)
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -233,23 +236,31 @@ pub struct InvestmentDetail {
     pub total_proceeds: Decimal,
 }
 
-pub async fn get_investment(pool: &PgPool, id: Uuid) -> Result<Option<InvestmentRow>, sqlx::Error> {
+pub async fn get_investment(
+    executor: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<InvestmentRow>, sqlx::Error> {
     sqlx::query_as::<_, InvestmentRow>(
         "SELECT id, investment_number, name, investment_type, description, \
                 location, reference, counterparty_name, acquired_at, status, \
                 disposed_at, cancelled_at, cancellation_reason, created_at, updated_at \
-         FROM investments WHERE id = $1",
+         FROM investments WHERE id = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *executor)
     .await
 }
 
 pub async fn get_investment_detail(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<InvestmentDetail>, sqlx::Error> {
-    let Some(investment) = get_investment(pool, id).await? else {
+    let mut conn = db.conn().await?;
+    let Some(investment) = get_investment(&mut conn, cooperative_id, id).await? else {
         return Ok(None);
     };
 
@@ -265,7 +276,7 @@ pub async fn get_investment_detail(
          ORDER BY f.funding_number",
     )
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let valuations = sqlx::query_as::<_, ValuationRow>(
@@ -277,7 +288,7 @@ pub async fn get_investment_detail(
          ORDER BY valuation_date DESC, valuation_number DESC",
     )
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let incomes = sqlx::query_as::<_, IncomeRow>(
@@ -293,7 +304,7 @@ pub async fn get_investment_detail(
          ORDER BY n.income_number",
     )
     .bind(id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let disposal = sqlx::query_as::<_, DisposalHeadRow>(
@@ -303,7 +314,7 @@ pub async fn get_investment_detail(
          FROM investment_disposals WHERE investment_id = $1",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let disposal = match disposal {
@@ -319,7 +330,7 @@ pub async fn get_investment_detail(
                  ORDER BY p.amount DESC, p.id",
             )
             .bind(head.id)
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await?;
             Some(DisposalRow {
                 id: head.id,
@@ -414,16 +425,20 @@ pub struct InvestmentOutcome {
 /// Investment identity creation — deliberately moves ZERO money
 /// (docs/08: acquisition is a separate funding event).
 pub async fn create_investment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: CreateInvestment,
 ) -> Result<InvestmentOutcome, InvestmentCommandError> {
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, investment_number, idempotency_fingerprint \
-         FROM investments WHERE idempotency_key = $1",
+         FROM investments WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(InvestmentCommandError::Database)?;
     if let Some((id, number, fingerprint)) = existing {
@@ -437,13 +452,18 @@ pub async fn create_investment(
         });
     }
 
+    // M1-P3-B5: the allocator runs inside the INSERT's own transaction
+    // — a concurrent idempotency loser rolls its allocation back with
+    // the tx, so a replay never consumes a document number.
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO investments \
             (name, investment_type, description, location, reference, \
              counterparty_name, acquired_at, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9, $10) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             investment_number) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9, $10, $11, \
+             allocate_document_number($11, 'investments.investment_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, investment_number",
     )
     .bind(&command.name)
@@ -456,19 +476,32 @@ pub async fn create_investment(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(InvestmentCommandError::Database)?;
 
     let Some((id, number)) = inserted else {
         let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
             "SELECT id, investment_number, idempotency_fingerprint \
-             FROM investments WHERE idempotency_key = $1",
+             FROM investments WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
         )
         .bind(&command.idempotency_key)
-        .fetch_optional(pool)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(InvestmentCommandError::Database)?;
+        tx.rollback()
+            .await
+            .map_err(InvestmentCommandError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(InvestmentCommandError::NotFound);
         };
@@ -482,6 +515,9 @@ pub async fn create_investment(
         });
     };
 
+    tx.commit()
+        .await
+        .map_err(InvestmentCommandError::Database)?;
     Ok(InvestmentOutcome {
         investment_id: id,
         investment_number: number,
@@ -493,11 +529,13 @@ pub async fn create_investment(
 /// step of every investment-level command (canonical lock prefix).
 async fn lock_investment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cooperative_id: Option<Uuid>,
     investment_id: Uuid,
 ) -> Result<String, InvestmentCommandError> {
     let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM investments WHERE id = $1 FOR UPDATE")
+        sqlx::query_scalar("SELECT status FROM public.app_lock_investment($1, $2)")
             .bind(investment_id)
+            .bind(cooperative_id)
             .fetch_optional(tx.as_mut())
             .await
             .map_err(InvestmentCommandError::Database)?;
@@ -508,59 +546,33 @@ async fn lock_investment(
 /// has never carried a financial event (no fundings, no incomes, no
 /// disposal). Valuations are informational and do not block.
 pub async fn cancel_investment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     investment_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<i64, InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT status, investment_number FROM investments WHERE id = $1 FOR UPDATE",
-    )
-    .bind(investment_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
-    let Some((status, number)) = row else {
-        return Err(InvestmentCommandError::NotFound);
-    };
-    if status != model::InvestmentStatus::Active.as_str() {
-        tx.rollback()
-            .await
-            .map_err(InvestmentCommandError::Database)?;
-        return Ok(number);
-    }
-
-    let has_events: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM investment_fundings WHERE investment_id = $1) \
-            OR EXISTS (SELECT 1 FROM investment_incomes WHERE investment_id = $1) \
-            OR EXISTS (SELECT 1 FROM investment_disposals WHERE investment_id = $1)",
-    )
-    .bind(investment_id)
-    .fetch_one(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
-    if has_events {
-        return Err(InvestmentCommandError::HasFinancialEvents);
-    }
-
-    sqlx::query(
-        "UPDATE investments SET status = 'cancelled', cancelled_at = $2, \
-            cancelled_by = $3, cancellation_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: one atomic definer — investment lock, the no-financial-
+    // events guard and the flip are indivisible.
+    let (_replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, investment_number \
+         FROM public.app_investment_cancel_tx($1, $2, $3, $4, $5)",
     )
     .bind(investment_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(InvestmentCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => InvestmentCommandError::NotFound,
+        Some("has_financial_events") => InvestmentCommandError::HasFinancialEvents,
+        _ => InvestmentCommandError::Database(error),
+    })?;
 
     tx.commit()
         .await
@@ -594,21 +606,21 @@ pub struct EventOutcome {
 /// so movement provenance and the 1:1 binding are established in one
 /// transaction.
 pub async fn post_funding(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: PostFunding,
 ) -> Result<EventOutcome, InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
     // 1. Idempotent replay short-circuit.
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, funding_number, idempotency_fingerprint \
-         FROM investment_fundings WHERE idempotency_key = $1",
+         FROM investment_fundings WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(InvestmentCommandError::Database)?;
@@ -627,7 +639,7 @@ pub async fn post_funding(
     }
 
     // 2. Lock the Investment: funding only an ACTIVE investment.
-    let status = lock_investment(&mut tx, command.investment_id).await?;
+    let status = lock_investment(&mut tx, cooperative_id, command.investment_id).await?;
     if status != model::InvestmentStatus::Active.as_str() {
         return Err(InvestmentCommandError::InvalidState);
     }
@@ -636,9 +648,14 @@ pub async fn post_funding(
     let locked = account_repo::lock_accounts(&mut tx, &[command.financial_account_id])
         .await
         .map_err(account_to_error)?;
-    let Some((account_status, _currency)) = locked.get(&command.financial_account_id) else {
+    let Some((account_status, _currency, account_coop)) = locked.get(&command.financial_account_id)
+    else {
         return Err(InvestmentCommandError::NotFound);
     };
+    // Same-cooperative only: a foreign account resolves as absent.
+    if *account_coop != cooperative_id {
+        return Err(InvestmentCommandError::NotFound);
+    }
     if *account_status != AccountStatus::Active.as_str() {
         return Err(InvestmentCommandError::InactiveAccount);
     }
@@ -647,15 +664,20 @@ pub async fn post_funding(
     //    PILOT-FIX-001 hard reservation: funding is an ordinary
     //    outflow — only the UNRESTRICTED portion of the physical
     //    balance may be spent on an asset.
-    let balance = account_repo::locked_balance(&mut tx, command.financial_account_id)
-        .await
-        .map_err(account_to_error)?;
+    let balance =
+        account_repo::locked_balance(&mut tx, *account_coop, command.financial_account_id)
+            .await
+            .map_err(account_to_error)?;
     if command.amount > balance {
         return Err(InvestmentCommandError::InsufficientFunds);
     }
-    let reserved = account_repo::locked_reserved_social_aid(&mut tx, command.financial_account_id)
-        .await
-        .map_err(account_to_error)?;
+    let reserved = account_repo::locked_reserved_social_aid(
+        &mut tx,
+        *account_coop,
+        command.financial_account_id,
+    )
+    .await
+    .map_err(account_to_error)?;
     if command.amount > balance - reserved {
         return Err(InvestmentCommandError::InsufficientUnrestrictedFunds);
     }
@@ -672,6 +694,7 @@ pub async fn post_funding(
             source_id: funding_id,
             occurred_at: command.occurred_at,
             actor,
+            cooperative_id: *account_coop,
         },
     )
     .await
@@ -681,9 +704,11 @@ pub async fn post_funding(
         "INSERT INTO investment_fundings \
             (id, investment_id, financial_account_id, amount, currency, \
              occurred_at, reference, note, account_movement_id, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7, $8, 'posted', $9, $10, $11) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_key, idempotency_fingerprint, created_by, cooperative_id, \
+             funding_number) \
+         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7, $8, 'posted', $9, $10, $11, $12, \
+             allocate_document_number($12, 'investment_fundings.funding_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, funding_number",
     )
     .bind(funding_id)
@@ -697,15 +722,24 @@ pub async fn post_funding(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(InvestmentCommandError::Database)?;
 
     let Some((id, number)) = inserted else {
+        let replayed = replay_existing_funding(&mut tx, cooperative_id, &command).await;
         tx.rollback()
             .await
             .map_err(InvestmentCommandError::Database)?;
-        return replay_existing_funding(pool, &command).await;
+        return replayed;
     };
 
     tx.commit()
@@ -719,15 +753,18 @@ pub async fn post_funding(
 }
 
 async fn replay_existing_funding(
-    pool: &PgPool,
+    executor: &mut sqlx::PgConnection,
+    cooperative_id: Option<Uuid>,
     command: &PostFunding,
 ) -> Result<EventOutcome, InvestmentCommandError> {
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, funding_number, idempotency_fingerprint \
-         FROM investment_fundings WHERE idempotency_key = $1",
+         FROM investment_fundings WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
-    .fetch_optional(pool)
+    .bind(cooperative_id)
+    .fetch_optional(&mut *executor)
     .await
     .map_err(InvestmentCommandError::Database)?;
     let Some((id, number, fingerprint)) = existing else {
@@ -748,72 +785,39 @@ async fn replay_existing_funding(
 /// refused once the Investment is disposed (the asset is gone; the
 /// deferred disposal-correction path must run first).
 pub async fn reverse_funding(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     funding_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
-    let row: Option<(String, i64, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT status, funding_number, investment_id, financial_account_id \
-         FROM investment_fundings WHERE id = $1 FOR UPDATE",
-    )
-    .bind(funding_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
-    let Some((status, number, investment_id, account_id)) = row else {
-        return Err(InvestmentCommandError::NotFound);
-    };
-    if status != "posted" {
-        tx.rollback()
-            .await
-            .map_err(InvestmentCommandError::Database)?;
-        return Ok((true, number));
-    }
-
-    let investment_status = lock_investment(&mut tx, investment_id).await?;
-    if investment_status == model::InvestmentStatus::Disposed.as_str() {
-        return Err(InvestmentCommandError::InvalidState);
-    }
-
-    account_repo::lock_accounts(&mut tx, &[account_id])
-        .await
-        .map_err(account_to_error)?;
-
-    account_repo::reverse_movements_of_source(
-        &mut tx,
-        MovementSource::InvestmentFunding,
-        funding_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await
-    .map_err(account_to_error)?;
-
-    sqlx::query(
-        "UPDATE investment_fundings SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: one atomic definer — funding lock + status, investment
+    // not-disposed precondition, account lock and the compensating
+    // movement flip are indivisible.
+    let (replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, funding_number \
+         FROM public.app_investment_funding_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(funding_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(InvestmentCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => InvestmentCommandError::NotFound,
+        Some("invalid_state") => InvestmentCommandError::InvalidState,
+        _ => InvestmentCommandError::Database(error),
+    })?;
 
     tx.commit()
         .await
         .map_err(InvestmentCommandError::Database)?;
-    Ok((false, number))
+    Ok((replayed, number))
 }
 
 // ------------------------------------------------------------------
@@ -835,20 +839,20 @@ pub struct RecordValuation {
 /// no movement, no income/expense (docs/08: "Valuation gain is not
 /// automatically realized profit/cash").
 pub async fn record_valuation(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: RecordValuation,
 ) -> Result<EventOutcome, InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, valuation_number, idempotency_fingerprint \
-         FROM investment_valuations WHERE idempotency_key = $1",
+         FROM investment_valuations WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(InvestmentCommandError::Database)?;
@@ -866,7 +870,7 @@ pub async fn record_valuation(
         });
     }
 
-    let status = lock_investment(&mut tx, command.investment_id).await?;
+    let status = lock_investment(&mut tx, cooperative_id, command.investment_id).await?;
     if status != model::InvestmentStatus::Active.as_str() {
         return Err(InvestmentCommandError::InvalidState);
     }
@@ -874,9 +878,11 @@ pub async fn record_valuation(
     let inserted: Option<(Uuid, i64)> = sqlx::query_as(
         "INSERT INTO investment_valuations \
             (investment_id, valuation_date, amount, currency, method, source, \
-             note, status, idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, 'TRY', $4, $5, $6, 'recorded', $7, $8, $9) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             note, status, idempotency_key, idempotency_fingerprint, created_by, \
+             cooperative_id, valuation_number) \
+         VALUES ($1, $2, $3, 'TRY', $4, $5, $6, 'recorded', $7, $8, $9, $10, \
+             allocate_document_number($10, 'investment_valuations.valuation_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, valuation_number",
     )
     .bind(command.investment_id)
@@ -888,22 +894,32 @@ pub async fn record_valuation(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(InvestmentCommandError::Database)?;
 
     let Some((id, number)) = inserted else {
+        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
+            "SELECT id, valuation_number, idempotency_fingerprint \
+             FROM investment_valuations WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(&command.idempotency_key)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(InvestmentCommandError::Database)?;
         tx.rollback()
             .await
             .map_err(InvestmentCommandError::Database)?;
-        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
-            "SELECT id, valuation_number, idempotency_fingerprint \
-             FROM investment_valuations WHERE idempotency_key = $1",
-        )
-        .bind(&command.idempotency_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(InvestmentCommandError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(InvestmentCommandError::NotFound);
         };
@@ -929,22 +945,21 @@ pub async fn record_valuation(
 
 /// Cancel a wrongly-recorded valuation — the row remains as history.
 pub async fn cancel_valuation(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     valuation_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
     let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT status, valuation_number FROM investment_valuations \
-         WHERE id = $1 FOR UPDATE",
+        "SELECT status, valuation_number \
+         FROM public.app_lock_investment_valuation($1, $2)",
     )
     .bind(valuation_id)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(InvestmentCommandError::Database)?;
@@ -958,19 +973,15 @@ pub async fn cancel_valuation(
         return Ok((true, number));
     }
 
-    sqlx::query(
-        "UPDATE investment_valuations SET status = 'cancelled', \
-            cancelled_at = $2, cancelled_by = $3, cancellation_reason = $4, \
-            updated_at = $2 \
-         WHERE id = $1",
-    )
-    .bind(valuation_id)
-    .bind(now)
-    .bind(actor)
-    .bind(&reason)
-    .execute(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
+    sqlx::query("SELECT public.app_investment_valuation_cancel($1, $2, $3, $4, $5)")
+        .bind(valuation_id)
+        .bind(now)
+        .bind(actor)
+        .bind(&reason)
+        .bind(cooperative_id)
+        .execute(tx.as_mut())
+        .await
+        .map_err(InvestmentCommandError::Database)?;
 
     tx.commit()
         .await
@@ -998,20 +1009,20 @@ pub struct PostIncome {
 /// ('investment_income'). No `incomes` row is created — operational
 /// income reporting stays untouched (one receipt, one movement).
 pub async fn post_income(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: PostIncome,
 ) -> Result<EventOutcome, InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
     let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
         "SELECT id, income_number, idempotency_fingerprint \
-         FROM investment_incomes WHERE idempotency_key = $1",
+         FROM investment_incomes WHERE idempotency_key = $1 \
+           AND cooperative_id IS NOT DISTINCT FROM $2",
     )
     .bind(&command.idempotency_key)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
     .map_err(InvestmentCommandError::Database)?;
@@ -1029,7 +1040,7 @@ pub async fn post_income(
         });
     }
 
-    let status = lock_investment(&mut tx, command.investment_id).await?;
+    let status = lock_investment(&mut tx, cooperative_id, command.investment_id).await?;
     if status != model::InvestmentStatus::Active.as_str() {
         return Err(InvestmentCommandError::InvalidState);
     }
@@ -1037,9 +1048,14 @@ pub async fn post_income(
     let locked = account_repo::lock_accounts(&mut tx, &[command.financial_account_id])
         .await
         .map_err(account_to_error)?;
-    let Some((account_status, _currency)) = locked.get(&command.financial_account_id) else {
+    let Some((account_status, _currency, account_coop)) = locked.get(&command.financial_account_id)
+    else {
         return Err(InvestmentCommandError::NotFound);
     };
+    // Same-cooperative only: a foreign account resolves as absent.
+    if *account_coop != cooperative_id {
+        return Err(InvestmentCommandError::NotFound);
+    }
     if *account_status != AccountStatus::Active.as_str() {
         return Err(InvestmentCommandError::InactiveAccount);
     }
@@ -1055,6 +1071,7 @@ pub async fn post_income(
             source_id: income_id,
             occurred_at: command.occurred_at,
             actor,
+            cooperative_id: *account_coop,
         },
     )
     .await
@@ -1065,9 +1082,10 @@ pub async fn post_income(
             (id, investment_id, financial_account_id, amount, currency, \
              occurred_at, description, counterparty, reference_no, \
              account_movement_id, status, idempotency_key, \
-             idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7, $8, $9, 'posted', $10, $11, $12) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
+             idempotency_fingerprint, created_by, cooperative_id, income_number) \
+         VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7, $8, $9, 'posted', $10, $11, $12, $13, \
+             allocate_document_number($13, 'investment_incomes.income_number')) \
+         ON CONFLICT (cooperative_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING \
          RETURNING id, income_number",
     )
     .bind(income_id)
@@ -1082,22 +1100,32 @@ pub async fn post_income(
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
+    .bind(cooperative_id)
     .fetch_optional(tx.as_mut())
     .await
+    .or_else(|error| {
+        if crate::db::is_idempotency_unique_violation(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    })
     .map_err(InvestmentCommandError::Database)?;
 
     let Some((id, number)) = inserted else {
+        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
+            "SELECT id, income_number, idempotency_fingerprint \
+             FROM investment_incomes WHERE idempotency_key = $1 \
+               AND cooperative_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(&command.idempotency_key)
+        .bind(cooperative_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(InvestmentCommandError::Database)?;
         tx.rollback()
             .await
             .map_err(InvestmentCommandError::Database)?;
-        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
-            "SELECT id, income_number, idempotency_fingerprint \
-             FROM investment_incomes WHERE idempotency_key = $1",
-        )
-        .bind(&command.idempotency_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(InvestmentCommandError::Database)?;
         let Some((id, number, fingerprint)) = existing else {
             return Err(InvestmentCommandError::NotFound);
         };
@@ -1125,82 +1153,41 @@ pub async fn post_income(
 /// longer fund the removal (docs/19 reversal safety, same rule as
 /// STEP-010 Income).
 pub async fn reverse_income(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     income_id: Uuid,
     reason: String,
     now: OffsetDateTime,
 ) -> Result<(bool, i64), InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
-    let row: Option<(String, i64, Uuid, Decimal)> = sqlx::query_as(
-        "SELECT status, income_number, financial_account_id, amount \
-         FROM investment_incomes WHERE id = $1 FOR UPDATE",
-    )
-    .bind(income_id)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
-    let Some((status, number, account_id, amount)) = row else {
-        return Err(InvestmentCommandError::NotFound);
-    };
-    if status != "posted" {
-        tx.rollback()
-            .await
-            .map_err(InvestmentCommandError::Database)?;
-        return Ok((true, number));
-    }
-
-    account_repo::lock_accounts(&mut tx, &[account_id])
-        .await
-        .map_err(account_to_error)?;
-
-    let balance = account_repo::locked_balance(&mut tx, account_id)
-        .await
-        .map_err(account_to_error)?;
-    if balance - amount < Decimal::ZERO {
-        return Err(InvestmentCommandError::InsufficientFunds);
-    }
-    // Reversal removes an inflow: the post-reversal physical balance
-    // must still cover the Social Aid reservation (PILOT-FIX-001).
-    let reserved = account_repo::locked_reserved_social_aid(&mut tx, account_id)
-        .await
-        .map_err(account_to_error)?;
-    if balance - amount < reserved {
-        return Err(InvestmentCommandError::InsufficientUnrestrictedFunds);
-    }
-
-    account_repo::reverse_movements_of_source(
-        &mut tx,
-        MovementSource::InvestmentIncome,
-        income_id,
-        now,
-        actor,
-        &reason,
-    )
-    .await
-    .map_err(account_to_error)?;
-
-    sqlx::query(
-        "UPDATE investment_incomes SET status = 'reversed', \
-            reversed_at = $2, reversed_by = $3, reversal_reason = $4, updated_at = $2 \
-         WHERE id = $1",
+    // R3C: one atomic definer — income lock + status, account lock,
+    // balance/reservation checks and the compensating movement flip.
+    let (replayed, number): (bool, i64) = sqlx::query_as(
+        "SELECT replayed, income_number \
+         FROM public.app_investment_income_reverse_tx($1, $2, $3, $4, $5)",
     )
     .bind(income_id)
     .bind(now)
     .bind(actor)
     .bind(&reason)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(InvestmentCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => InvestmentCommandError::NotFound,
+        Some("insufficient_funds") => InvestmentCommandError::InsufficientFunds,
+        Some("insufficient_unrestricted_funds") => {
+            InvestmentCommandError::InsufficientUnrestrictedFunds
+        }
+        _ => InvestmentCommandError::Database(error),
+    })?;
 
     tx.commit()
         .await
         .map_err(InvestmentCommandError::Database)?;
-    Ok((false, number))
+    Ok((replayed, number))
 }
 
 // ------------------------------------------------------------------
@@ -1232,73 +1219,41 @@ pub struct DisposeInvestment {
 /// STEP-012 — disposal reversal semantics are undefined (docs/08 open
 /// decisions) and deliberately not implemented.
 pub async fn dispose_investment(
-    pool: &PgPool,
+    mut db: impl crate::db::DbSource,
+    cooperative_id: Option<Uuid>,
     actor: Uuid,
     command: DisposeInvestment,
     now: OffsetDateTime,
 ) -> Result<EventOutcome, InvestmentCommandError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(InvestmentCommandError::Database)?;
+    let mut tx = db.begin().await.map_err(InvestmentCommandError::Database)?;
 
-    let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
-        "SELECT id, disposal_number, idempotency_fingerprint \
-         FROM investment_disposals WHERE idempotency_key = $1",
-    )
-    .bind(&command.idempotency_key)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
-    if let Some((id, number, fingerprint)) = existing {
-        if fingerprint != command.fingerprint {
-            return Err(InvestmentCommandError::IdempotencyConflict);
-        }
-        tx.rollback()
-            .await
-            .map_err(InvestmentCommandError::Database)?;
-        return Ok(EventOutcome {
-            event_id: id,
-            event_number: number,
-            replayed: true,
-        });
-    }
-
-    // 1. Lock the Investment: only an ACTIVE investment can be disposed.
-    let status = lock_investment(&mut tx, command.investment_id).await?;
-    if status != model::InvestmentStatus::Active.as_str() {
-        return Err(InvestmentCommandError::InvalidState);
-    }
-
-    // 2. Lock every proceeds account in canonical ascending-id order.
-    let account_ids: Vec<Uuid> = command
-        .proceeds
-        .iter()
-        .map(|leg| leg.financial_account_id)
-        .collect();
-    let locked = account_repo::lock_accounts(&mut tx, &account_ids)
-        .await
-        .map_err(account_to_error)?;
-    if account_ids.iter().any(|id| !locked.contains_key(id)) {
-        return Err(InvestmentCommandError::NotFound);
-    }
-    for leg in &command.proceeds {
-        let (account_status, _currency) = &locked[&leg.financial_account_id];
-        if *account_status != AccountStatus::Active.as_str() {
-            return Err(InvestmentCommandError::InactiveAccount);
-        }
-    }
-
-    // 3. Insert the derecognition event, then each proceeds leg with
-    //    its authoritative inflow movement.
-    let disposal: Option<(Uuid, i64)> = sqlx::query_as(
-        "INSERT INTO investment_disposals \
-            (investment_id, disposed_at, consideration_amount, currency, \
-             counterparty_name, reference, note, status, \
-             idempotency_key, idempotency_fingerprint, created_by) \
-         VALUES ($1, $2, $3, 'TRY', $4, $5, $6, 'posted', $7, $8, $9) \
-         ON CONFLICT (idempotency_key) DO NOTHING \
-         RETURNING id, disposal_number",
+    // R3C: the complete disposal package — idempotent replay,
+    // investment lock/status, per-leg account locks + validation,
+    // the derecognition row, one inflow movement per proceeds leg and
+    // the terminal status flip — runs as ONE permission-checked
+    // definer call. The runtime role cannot dispose an investment
+    // without recording its proceeds.
+    let proceeds = serde_json::Value::Array(
+        command
+            .proceeds
+            .iter()
+            .map(|leg| {
+                serde_json::json!({
+                    "account_id": leg.financial_account_id,
+                    "amount": leg.amount.to_string(),
+                    "occurred_at": leg
+                        .occurred_at
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                    "reference": leg.reference,
+                })
+            })
+            .collect(),
+    );
+    let (disposal_id, disposal_number, replayed): (Uuid, i64, bool) = sqlx::query_as(
+        "SELECT event_id, event_number, replayed \
+         FROM public.app_investment_dispose_tx(\
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(command.investment_id)
     .bind(command.disposed_at)
@@ -1306,85 +1261,21 @@ pub async fn dispose_investment(
     .bind(&command.counterparty_name)
     .bind(&command.reference)
     .bind(&command.note)
+    .bind(&proceeds)
     .bind(&command.idempotency_key)
     .bind(&command.fingerprint)
     .bind(actor)
-    .fetch_optional(tx.as_mut())
-    .await
-    .map_err(InvestmentCommandError::Database)?;
-
-    let Some((disposal_id, disposal_number)) = disposal else {
-        tx.rollback()
-            .await
-            .map_err(InvestmentCommandError::Database)?;
-        let existing: Option<(Uuid, i64, String)> = sqlx::query_as(
-            "SELECT id, disposal_number, idempotency_fingerprint \
-             FROM investment_disposals WHERE idempotency_key = $1",
-        )
-        .bind(&command.idempotency_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(InvestmentCommandError::Database)?;
-        let Some((id, number, fingerprint)) = existing else {
-            return Err(InvestmentCommandError::NotFound);
-        };
-        if fingerprint != command.fingerprint {
-            return Err(InvestmentCommandError::IdempotencyConflict);
-        }
-        return Ok(EventOutcome {
-            event_id: id,
-            event_number: number,
-            replayed: true,
-        });
-    };
-
-    for leg in &command.proceeds {
-        let leg_id = Uuid::new_v4();
-        let movement_id = account_repo::insert_movement(
-            &mut tx,
-            account_repo::NewMovement {
-                account_id: leg.financial_account_id,
-                direction: MovementDirection::Inflow,
-                amount: leg.amount,
-                source: MovementSource::InvestmentDisposal,
-                source_id: leg_id,
-                occurred_at: leg.occurred_at,
-                actor,
-            },
-        )
-        .await
-        .map_err(account_to_error)?;
-
-        sqlx::query(
-            "INSERT INTO investment_disposal_proceeds \
-                (id, disposal_id, financial_account_id, amount, currency, \
-                 occurred_at, reference, account_movement_id) \
-             VALUES ($1, $2, $3, $4, 'TRY', $5, $6, $7)",
-        )
-        .bind(leg_id)
-        .bind(disposal_id)
-        .bind(leg.financial_account_id)
-        .bind(leg.amount)
-        .bind(leg.occurred_at)
-        .bind(&leg.reference)
-        .bind(movement_id)
-        .execute(tx.as_mut())
-        .await
-        .map_err(InvestmentCommandError::Database)?;
-    }
-
-    // 4. Lifecycle transition in the same transaction (docs/16).
-    sqlx::query(
-        "UPDATE investments SET status = 'disposed', disposed_at = $2, \
-            disposed_by = $3, updated_at = $2 \
-         WHERE id = $1",
-    )
-    .bind(command.investment_id)
     .bind(now)
-    .bind(actor)
-    .execute(tx.as_mut())
+    .bind(cooperative_id)
+    .fetch_one(tx.as_mut())
     .await
-    .map_err(InvestmentCommandError::Database)?;
+    .map_err(|error| match crate::db::package_error_token(&error) {
+        Some("not_found") => InvestmentCommandError::NotFound,
+        Some("invalid_state") => InvestmentCommandError::InvalidState,
+        Some("inactive_account") => InvestmentCommandError::InactiveAccount,
+        Some("idempotency_conflict") => InvestmentCommandError::IdempotencyConflict,
+        _ => InvestmentCommandError::Database(error),
+    })?;
 
     tx.commit()
         .await
@@ -1392,6 +1283,6 @@ pub async fn dispose_investment(
     Ok(EventOutcome {
         event_id: disposal_id,
         event_number: disposal_number,
-        replayed: false,
+        replayed,
     })
 }

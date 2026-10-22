@@ -17,6 +17,7 @@
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
+	import { live } from '$lib/realtime/realtime.svelte';
 	import {
 		PERMISSIONS_PATH,
 		roleDisablePath,
@@ -141,6 +142,9 @@
 
 	$effect(() => {
 		void refresh();
+		return live.onInvalidate((domains) => {
+			if (domains === '*' || domains.has('authz')) void refresh();
+		});
 	});
 </script>
 

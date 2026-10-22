@@ -18,6 +18,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import {
 		FAMILIES_PATH,
@@ -57,6 +58,18 @@
 	let duplicates = $state<ShareholderListItem[]>([]);
 	let submitError = $state<MessageKey | null>(null);
 	let submitting = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() =>
+			firstName !== '' ||
+			lastName !== '' ||
+			existingPersonId !== '' ||
+			guardianFirstName !== '' ||
+			guardianLastName !== '' ||
+			guardianExistingId !== '' ||
+			familyExistingId !== '' ||
+			defaultAccountId !== ''
+	);
 
 	// FUNC-FIX-002: optional default collection account — active
 	// accounts only; '' means "no preference".
@@ -145,6 +158,7 @@
 					defaultCollectionAccountId: defaultAccountId || null
 				}
 			});
+			formGuard.clear();
 			goto(resolve('/hissedarlar'));
 		} catch (error) {
 			submitError = apiErrorKey(error);

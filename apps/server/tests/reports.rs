@@ -46,6 +46,7 @@ const ORIGIN: &str = "http://localhost:5173";
 const TEST_PASSWORD: &str = "domain-test-parola-1";
 
 struct TestApp {
+    _claim: app_db::TestDbClaim,
     app: axum::Router,
     pool: PgPool,
     _database_name: String,
@@ -74,15 +75,21 @@ async fn setup() -> Option<TestApp> {
     let admin = app_db::connect(&admin_url).await.expect("admin connect");
     // F11: bound per-test database accumulation (24 h cutoff, no connections).
     let _ = app_db::drop_stale_test_databases(&admin).await;
-    sqlx::query(&format!("CREATE DATABASE {database_name}"))
-        .execute(&admin)
-        .await
-        .expect("test db");
+    let claim = app_db::create_test_database(&admin, &admin_url, &database_name).await;
     admin.close().await;
     let pool = app_db::connect(&format!("{base_url}/{database_name}"))
         .await
         .expect("db");
-    app_db::run_migrations(&pool).await.expect("migrations");
+    app_db::run_test_migrations(&pool)
+        .await
+        .expect("migrations");
+    // C5-3: cooperative_id is NOT NULL on every business table — the
+    // NULL legacy lane is closed. Bootstrap up front so fixtures and
+    // API writes land in the bootstrap cooperative; user helpers add
+    // memberships explicitly.
+    let _ = kooperatif_server::tenant::repo::bootstrap_initial_cooperative(&pool, "Ana Kooperatif")
+        .await
+        .expect("bootstrap cooperative");
 
     let config = AuthConfig {
         allowed_origins: vec![ORIGIN.to_string()],
@@ -114,6 +121,7 @@ async fn setup() -> Option<TestApp> {
     );
     let octets = Uuid::new_v4().as_bytes().to_vec();
     Some(TestApp {
+        _claim: claim,
         app,
         pool,
         _database_name: database_name,
@@ -136,12 +144,21 @@ async fn create_admin(pool: &PgPool, username: &str) -> Uuid {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    let user = users::create_user(pool, username, "Test", &hash)
+    let user = users::create_user(pool, username, "Test", &hash, TEST_PASSWORD)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO user_role_assignments (user_id, role_id) \
                  SELECT $1, id FROM roles WHERE name = 'Sistem Yöneticisi'",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Post-C5-3: suites run inside the bootstrap cooperative —
+    // membership is required for the business lane.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status)          SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
     )
     .bind(user.id)
     .execute(pool)
@@ -159,7 +176,7 @@ async fn create_scoped_user(pool: &PgPool, username: &str, permission_keys: &[&s
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    let user = users::create_user(pool, username, "Scoped", &hash)
+    let user = users::create_user(pool, username, "Scoped", &hash, TEST_PASSWORD)
         .await
         .unwrap();
     let role_id: Uuid = sqlx::query_scalar(
@@ -186,6 +203,16 @@ async fn create_scoped_user(pool: &PgPool, username: &str, permission_keys: &[&s
         .execute(pool)
         .await
         .unwrap();
+    // Post-C5-3 every business request runs inside the bootstrap
+    // cooperative — membership is required for the lane to resolve.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
+         SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
+    )
+    .bind(user.id)
+    .execute(pool)
+    .await
+    .unwrap();
     user.id
 }
 
@@ -1650,9 +1677,18 @@ async fn reports_require_their_own_permission() {
         argon2::Params::new(ARGON2_M_COST_FLOOR, 1, 1, None).unwrap(),
     );
     let hash = identity::hash_password(&argon2, TEST_PASSWORD).unwrap();
-    users::create_user(&test.pool, &plain, "Plain", &hash)
+    let plain_user = users::create_user(&test.pool, &plain, "Plain", &hash, TEST_PASSWORD)
         .await
         .unwrap();
+    // Active member with no roles — lane resolves, permission denies.
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
+         SELECT id, $1, 'active' FROM cooperatives WHERE is_bootstrap",
+    )
+    .bind(plain_user.id)
+    .execute(&test.pool)
+    .await
+    .unwrap();
     let (cookie, _) = login(&test.app, test.peer(), &plain).await;
     for path in [
         "/api/reports/overview",

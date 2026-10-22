@@ -16,6 +16,7 @@
 	import { apiErrorKey } from '$lib/api-errors';
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
+	import { useDirtyForm } from '$lib/forms/dirty-forms.svelte';
 	import { SvelteURLSearchParams } from 'svelte/reactivity';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { parseTryInput } from '$lib/money';
@@ -36,6 +37,10 @@
 	let reason = $state('');
 	let submitError = $state<MessageKey | null>(null);
 	let submitting = $state(false);
+	// M1-P7-A (T7.2): unsaved input blocks cooperative switch/navigation.
+	const formGuard = useDirtyForm(
+		() => shareholderId !== '' || feeInput !== '' || effectiveAt !== '' || reason !== ''
+	);
 
 	async function searchShareholders(): Promise<void> {
 		try {
@@ -76,6 +81,7 @@
 					reason: reason.trim() || undefined
 				}
 			});
+			formGuard.clear();
 			goto(resolve('/hisseler'));
 		} catch (error) {
 			submitError = apiErrorKey(error);

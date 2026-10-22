@@ -22,6 +22,7 @@
 		"backup:create": "node scripts/backup/create.mjs",
 		"backup:verify": "node scripts/backup/verify.mjs",
 		"backup:restore": "node scripts/backup/restore.mjs",
+		"backup:regrants": "node scripts/backup/regrants.mjs",
 		"backup:status": "node scripts/backup/status.mjs",
 		"backup:retention": "node scripts/backup/retention.mjs",
 		"backup:drill": "node scripts/backup/drill.mjs",

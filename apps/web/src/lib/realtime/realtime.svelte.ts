@@ -78,6 +78,17 @@ class RealtimeClient {
 		this.status = 'idle';
 	}
 
+	/** Push a fresh permission-scope set over the live socket. Used
+	 * after an `authz` invalidation rebuilt the session's permissions —
+	 * the server intersects them with live effective permissions, so a
+	 * revoked scope stops delivering on the very next signal. */
+	refreshScopes(scopes: string[]): void {
+		this.scopes = [...new Set(scopes)];
+		if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+			this.ws.send(JSON.stringify({ type: 'subscribe', scopes: this.scopes }));
+		}
+	}
+
 	/** Resume after the attempt cap (manual retry or `online` event). */
 	resume(): void {
 		if (!this.running) return;

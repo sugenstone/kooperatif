@@ -18,7 +18,10 @@ export function apiErrorKey(error: unknown): MessageKey {
 		validation_failed: 'errors.validation_failed',
 		csrf_failed: 'auth.login.error.csrf_failed',
 		dependency_unavailable: 'auth.login.error.dependency_unavailable',
-		stale_state: 'errors.stale_state'
+		stale_state: 'errors.stale_state',
+		cooperative_context_required: 'errors.cooperative_context_required',
+		cooperative_access_denied: 'errors.cooperative_access_denied',
+		cooperative_not_ready: 'errors.cooperative_not_ready'
 	};
 	return candidates[error.code] ?? 'errors.fallback';
 }

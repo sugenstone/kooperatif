@@ -1,12 +1,17 @@
 import type { ApiErrorCode } from '@kooperatif/contracts';
 import { COOPERATIVE_HEADER } from '@kooperatif/contracts';
 import { API_BASE_URL } from '$lib/api';
+import { emitAccessDenied } from '$lib/auth/access-events';
 
 /**
- * Per-tab cooperative context key (M1-K1): sessionStorage is scoped to
- * the tab, so two tabs may legitimately operate in different
- * cooperatives at once. The backend still re-validates membership on
- * every request — this value is only a UX-level default.
+ * Cooperative ASSERTION mirror (M1-P6 B4/B5): the authoritative scope
+ * lives in the session's `active_cooperative_id` and changes only via
+ * POST /api/auth/cooperative. This value is kept in sessionStorage so
+ * every request can ASSERT the scope it was rendered for; a mismatch is
+ * rejected with 403 — it can never select a cooperative. `auth.svelte`
+ * re-syncs it from the authoritative /api/auth/me response after login,
+ * restore and every switch, so a second tab converges as soon as its
+ * auth state is rebuilt (authz invalidation).
  */
 const ACTIVE_COOPERATIVE_KEY = 'kooperatif.activeCooperativeId';
 
@@ -82,6 +87,11 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 	const payload: unknown = await response.json().catch(() => null);
 	if (!response.ok) {
 		const code = extractErrorCode(payload);
+		// M1-P7-A (T7.4): a 403 can be the first signal that this tab's
+		// cooperative access was revoked while realtime was offline.
+		// The event is an observation only — the layout revalidates
+		// through /api/auth/me; the server remains authoritative.
+		if (response.status === 403) emitAccessDenied();
 		throw new ApiError(code, response.status);
 	}
 	return payload as T;
