@@ -215,7 +215,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 34],
+			['permissions', 35],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
@@ -740,9 +740,9 @@ async function main() {
 			'1'
 		);
 		expect(
-			'Realtime: all 43 domain triggers restored',
+			'Realtime: all 44 domain triggers restored',
 			"SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'rt_%' AND NOT tgisinternal",
-			'43'
+			'44'
 		);
 		expect(
 			'Realtime: notify channel callable post-restore',

@@ -77,16 +77,16 @@ jobs:
         env:
           POSTGRES_USER: kooperatif
           POSTGRES_PASSWORD: kooperatif_ci_password
-          POSTGRES_DB: kooperatif_ci
+          POSTGRES_DB: kooperatif_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U kooperatif -d kooperatif_ci"
+          --health-cmd "pg_isready -U kooperatif -d kooperatif_test"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
     env:
-      KOOPERATIF_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci
+      KOOPERATIF_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_test
     steps:
       - uses: actions/checkout@v4
 
@@ -149,12 +149,12 @@ jobs:
       - name: Regrants baseline verification (read-only)
         run: >
           node scripts/backup/regrants.mjs --check
-          --target-db kooperatif_ci --confirm kooperatif_ci
+          --target-db kooperatif_test --confirm kooperatif_test
 
       - name: DB-gated integration tests (database + full auth security matrix)
         run: cargo test --manifest-path apps/server/Cargo.toml -- --nocapture
         env:
-          KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_ci
+          KOOPERATIF_TEST_DATABASE_URL: postgres://kooperatif:kooperatif_ci_password@localhost:5432/kooperatif_test
           KOOPERATIF_APP_TEST_PASSWORD: ${{ env.KOOPERATIF_APP_TEST_PASSWORD }}
 
   backup:
