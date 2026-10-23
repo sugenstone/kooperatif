@@ -433,8 +433,12 @@ async fn authorized_sweep_cannot_target_unregistered_databases() {
         probe_exists(&admin, &foreign).await,
         "authorized sweep must never reach unregistered databases"
     );
+    // A single pass may legitimately skip the probe (transient
+    // pg_stat_activity row, held advisory lock, racing DROP rejection)
+    // — eventual reclamation within the deadline is the contract, not
+    // first-pass deletion. Sibling tests use the same helper.
     assert!(
-        !probe_exists(&admin, &owned).await,
+        dropped_eventually(&admin, &owned).await,
         "registered current-run probe is reclaimable"
     );
 
