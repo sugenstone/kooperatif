@@ -38,11 +38,9 @@
 //!
 //! DOCUMENTED NON-EXPLOITABLE DEVIATIONS (Batch 2 carry-over, no
 //! behavior change in this batch):
-//!   - Duplicate `x-cooperative-id` fields: `HeaderMap::get` reads the
-//!     FIRST value only. Rejecting contradictory duplicates would be
-//!     stricter; that is a contract decision for a separate change —
-//!     never smuggle it into a test patch. The header can only confirm
-//!     the session scope, so ignoring later values cannot widen access.
+//!   - Duplicate `x-cooperative-id` fields: ANY second value now fails
+//!     closed with 400 (contract hardening, `fix/tenant-header-dupes`).
+//!     Previously `HeaderMap::get` read the first value only.
 //!   - `page <= 0` query values CLAMP to page 1 rather than erroring
 //!     (documented tolerance lane below); `page_size` outside
 //!     1..=100 is a hard `validation_failed`.

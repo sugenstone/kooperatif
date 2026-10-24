@@ -42,8 +42,19 @@ pub(crate) enum SessionScope {
 }
 
 /// Parse the optional `x-cooperative-id` assertion. Malformed → 400.
+///
+/// Exactly ONE header value is permitted: any duplicate field — even
+/// an identical repeat — is a malformed assertion and fails closed
+/// (contract hardening; previously `HeaderMap::get` silently read the
+/// first value only). Comma-coalesced forms still fail the UUID parse.
 fn asserted_cooperative(headers: &HeaderMap) -> Result<Option<Uuid>, ApiError> {
-    match headers.get(COOPERATIVE_HEADER) {
+    let mut values = headers.get_all(COOPERATIVE_HEADER).iter();
+    let value = values.next();
+    if values.next().is_some() {
+        tracing::warn!("cooperative context: duplicate cooperative header");
+        return Err(ApiError::CooperativeContextRequired);
+    }
+    match value {
         None => Ok(None),
         Some(value) => {
             let raw = value.to_str().map_err(|_| {
