@@ -44,10 +44,10 @@
 //!   - `page <= 0` query values CLAMP to page 1 rather than erroring
 //!     (documented tolerance lane below); `page_size` outside
 //!     1..=100 is a hard `validation_failed`.
-//!   - `Decimal::from_str` accepts scientific notation and leading `+`;
-//!     such amounts are ACCEPTED and normalized to canonical scale-2 —
-//!     tolerated representation laxness, pinned here so any future
-//!     tightening is an explicit decision.
+//!   - Financial amounts use a canonical-only wire grammar (contract
+//!     hardening P2): ASCII digits, optional '.', 1-2 fraction digits.
+//!     Previously tolerated forms (scientific notation, `+`, `_`
+//!     separators, surrounding whitespace) now fail closed.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1023,7 +1023,13 @@ async fn parsed_numeric_inputs_fail_closed_and_never_write() {
         json!("0x10"),
         json!("10,00"), // tr-TR display form — not wire format
         json!("10.00.01"),
-        json!(10), // wrong JSON type entirely
+        json!(" 50.00 "), // whitespace — canonical-only grammar (P2)
+        json!("1e2"),     // scientific notation — rejected (P2)
+        json!("+10.00"),  // leading sign — rejected (P2)
+        json!("1_000"),   // group separator — rejected (P2)
+        json!(".5"),      // missing integer part — rejected (P2)
+        json!("5."),      // empty fraction — rejected (P2)
+        json!(10),        // wrong JSON type entirely
         json!(null),
         json!(["10.00"]),
         json!({"v": "10.00"}),
@@ -1050,16 +1056,10 @@ async fn parsed_numeric_inputs_fail_closed_and_never_write() {
         );
     }
 
-    // ── Tolerated aliases: parsed and normalized to canonical scale-2.
-    //    Pinned observed semantics — tightening requires an explicit
-    //    contract decision, not a silent test change.
-    for (input, canonical) in [
-        ("50", "50.00"),      // scale-0 integer pads to scale 2
-        (" 50.00 ", "50.00"), // surrounding whitespace trims
-        ("1e2", "100.00"),    // scientific notation → canonical
-        ("+10.00", "10.00"),  // explicit sign → canonical
-        ("1_000", "1000.00"), // rust_decimal accepts '_' group separators
-    ] {
+    // ── Canonical-only wire grammar (contract hardening P2): ASCII
+    //    digits + optional '.' with 1-2 fraction digits; accepted
+    //    values still normalize to canonical scale-2.
+    for (input, canonical) in [("50", "50.00")] {
         let (status, bytes) = send(
             &test.app,
             req(
@@ -1092,8 +1092,8 @@ async fn parsed_numeric_inputs_fail_closed_and_never_write() {
             .unwrap();
     assert_eq!(
         accepted - payments_before,
-        5,
-        "exactly the five tolerated aliases may write"
+        1,
+        "exactly the one canonical alias may write"
     );
 
     // ── Hostile query numerics on a list endpoint (same-endpoint positive).

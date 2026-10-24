@@ -110,8 +110,28 @@ impl AcquisitionType {
 /// NUMERIC(19,2): non-negative, at most 2 fraction digits. `None`
 /// (absent amount) is handled by the caller — NULL ≠ 0 (§17).
 pub fn validate_amount(raw: &str) -> Result<Decimal, ShareError> {
-    let trimmed = raw.trim();
-    let parsed = Decimal::from_str(trimmed).map_err(|_| ShareError::InvalidAmount)?;
+    // Owner-approved wire grammar (contract hardening P2): the amount
+    // string itself must already be canonical — ASCII digits with an
+    // optional single '.' followed by 1-2 fraction digits. No
+    // whitespace, sign, scientific notation, grouping separators or
+    // commas; `Decimal::from_str` accepts all of those lax forms, so
+    // the shape is checked BEFORE parsing.
+    let valid_shape = {
+        let (int_part, frac_part) = match raw.split_once('.') {
+            Some((i, f)) => (i, Some(f)),
+            None => (raw, None),
+        };
+        !int_part.is_empty()
+            && int_part.bytes().all(|b| b.is_ascii_digit())
+            && match frac_part {
+                None => true,
+                Some(f) => !f.is_empty() && f.len() <= 2 && f.bytes().all(|b| b.is_ascii_digit()),
+            }
+    };
+    if !valid_shape || raw.contains('.') && raw.split('.').count() > 2 {
+        return Err(ShareError::InvalidAmount);
+    }
+    let parsed = Decimal::from_str(raw).map_err(|_| ShareError::InvalidAmount)?;
     if parsed.is_sign_negative()
         || parsed.scale() > 2
         || parsed.abs() > Decimal::from_i128_with_scale(MAX_AMOUNT_MANTISSA, 2)
