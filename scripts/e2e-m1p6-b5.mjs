@@ -439,7 +439,21 @@ for (const [child, stream, tag] of [
   });
 }
 
+// M1-P8-B follow-up: `browser` is hoisted so the finally path can close
+// it on ANY exit — success, assertion failure or throw. Without this a
+// failed journey left the Playwright driver alive, which kept the Node
+// event loop busy and hung the suite until the CI job timeout killed it
+// (observed as a 30-minute "cancelled" instead of a fast FAIL).
+let browser;
+/** Bounded browser close — cleanup must never hang nor mask the original failure. */
+const closeBrowser = async () => {
+  if (!browser) return;
+  const b = browser;
+  browser = null;
+  await Promise.race([b.close().catch(() => {}), sleep(15000)]);
+};
 const shutdown = async () => {
+  await closeBrowser();
   await killService(server);
   await killService(web);
 };
@@ -475,7 +489,7 @@ try {
   await waitFor(`${WEB}/login`, 120000, "web /login");
   log("stack ready");
 
-  const browser = await chromium.launch({
+  browser = await chromium.launch({
     headless: true,
     executablePath:
       process.env.E2E_CHROMIUM_EXECUTABLE || undefined,
@@ -776,7 +790,7 @@ try {
   check("memberships API denied for plain user (403)", deniedCode === 403);
   await ctx2.close();
 
-  await browser.close();
+  await closeBrowser();
   if (process.exitCode !== 1) log("ALL JOURNEYS PASSED");
 } catch (error) {
   fail(String(error?.stack ?? error));
