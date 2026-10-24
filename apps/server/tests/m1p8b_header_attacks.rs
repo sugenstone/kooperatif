@@ -4,7 +4,7 @@
 //! only cooperative-scope authority. The header is an ASSERTION — it
 //! must equal the session scope or the request fails closed:
 //!
-//!   malformed / non-UTF8 / empty / comma-joined → 400
+//!   malformed / non-UTF8 / empty / comma-joined / duplicate → 400
 //!     (cooperative_context_required)
 //!   any UUID ≠ session scope (foreign, unknown, stale, case-smuggled)
 //!     → 403 (cooperative_access_denied)
@@ -524,35 +524,36 @@ async fn header_name_casing_variants_are_enforced_identically() {
     test.cleanup().await;
 }
 
-/// DUPLICATE header fields: the extractor reads the FIRST value only
-/// (`HeaderMap::get`). Documented, non-exploitable deviation: a second
-/// conflicting value is never asserted. Because the header is
-/// confirm-only (never selects scope), ignoring later values cannot
-/// widen access — but this test pins the observed semantics so a
-/// future change to multi-value handling is an explicit decision.
+/// DUPLICATE header fields: exactly ONE `x-cooperative-id` value is
+/// permitted — ANY second value (identical, foreign, malformed, or
+/// scope-matching) fails closed with 400 BEFORE parsing. The header
+/// remains confirm-only; ambiguity is never silently resolved.
 #[tokio::test]
-async fn duplicate_headers_first_value_semantics_pinned() {
+async fn duplicate_headers_fail_closed_regardless_of_order_or_equality() {
     let test = setup().await;
     let c = ctx(&test, "dup").await;
-    // First = scope, second = foreign: accepted — later duplicates are
-    // silently ignored (observed contract; see test docs).
-    let (status, _) = raw_get(
-        &test.app,
-        &c.cookie,
-        &[(HDR, &c.coop_a.to_string()), (HDR, &c.coop_b.to_string())],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "first-value semantics changed");
-    // First = foreign, second = scope: denied — the ignored second
-    // value can never RESCUE a bad first assertion either.
-    let (status, body) = raw_get(
-        &test.app,
-        &c.cookie,
-        &[(HDR, &c.coop_b.to_string()), (HDR, &c.coop_a.to_string())],
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], json!("cooperative_access_denied"));
+    let a = c.coop_a.to_string();
+    let b = c.coop_b.to_string();
+    for (first, second) in [
+        (a.as_str(), a.as_str()), // identical repeat
+        (a.as_str(), b.as_str()), // scope then foreign
+        (b.as_str(), a.as_str()), // foreign then scope
+        (a.as_str(), "garbage"),  // scope then malformed
+        ("garbage", a.as_str()),  // malformed then scope
+    ] {
+        let (status, body) = raw_get(&test.app, &c.cookie, &[(HDR, first), (HDR, second)]).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "duplicate pair {first:?},{second:?} must fail closed (got {status})"
+        );
+        assert_eq!(body["error"]["code"], json!("cooperative_context_required"));
+    }
+    // Triple headers — count >1 is what matters, not which pair.
+    let (status, _) = raw_get(&test.app, &c.cookie, &[(HDR, &a), (HDR, &a), (HDR, &a)]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Session scope is unmoved after every ambiguous probe.
+    assert_eq!(resolved_scope(&test.app, &c.cookie).await, Some(c.coop_a));
     test.cleanup().await;
 }
 
