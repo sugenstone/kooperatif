@@ -69,12 +69,29 @@ export interface UserRoleSetRequest {
 }
 
 export const PERMISSIONS_PATH = '/api/permissions';
+export const AUDIT_EVENTS_PATH = '/api/audit/events';
+
+export interface AuditEvent {
+  id: string;
+  occurredAt: string;
+  eventType: string;
+  actorUserId: string | null;
+  actorUsername: string | null;
+  cooperativeId: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface AuditPage {
+  items: AuditEvent[];
+  nextCursor: string | null;
+}
 export const ROLES_PATH = '/api/roles';
 export const rolePath = (id: string): string => `/api/roles/${id}`;
 export const roleDisablePath = (id: string): string => `/api/roles/${id}/disable`;
 export const roleEnablePath = (id: string): string => `/api/roles/${id}/enable`;
 export const rolePermissionsPath = (id: string): string => `/api/roles/${id}/permissions`;
 export const USERS_PATH = '/api/users';
+export const userPath = (id: string): string => `/api/users/${id}`;
 export const userRolesPath = (id: string): string => `/api/users/${id}/roles`;
 // M1: cooperative administrators act on the membership inside their
 // verified cooperative — never on the global identity.

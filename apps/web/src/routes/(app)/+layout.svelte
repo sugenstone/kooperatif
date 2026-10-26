@@ -36,6 +36,19 @@
 	let tabSyncInFlight = $state(false);
 	let deniedResyncInFlight = $state(false);
 
+	// M2 forced rotation (PD-14): a mustChangePassword session is pinned
+	// to the password lane — the backend already refuses every other API,
+	// this only steers the user there.
+	$effect(() => {
+		if (
+			auth.status === 'authenticated' &&
+			auth.mustChangePassword &&
+			page.url.pathname !== '/parola'
+		) {
+			void goto('/parola');
+		}
+	});
+
 	// M1-P7-A (T7.2): in-app navigation is guarded while an authenticated
 	// session holds unsaved form input. The guard is advisory-only: it
 	// cancels the SvelteKit navigation, surfaces a localized confirm and

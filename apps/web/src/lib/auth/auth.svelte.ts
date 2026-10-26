@@ -64,6 +64,7 @@ class AuthState {
 	 * implies the other.
 	 */
 	platformCooperativesManage = $state<boolean>(false);
+	mustChangePassword = $state<boolean>(false);
 }
 
 export const auth = new AuthState();
@@ -90,6 +91,7 @@ function applyAuthResponse(response: AuthResponse, resolvedCooperativeId: string
 	auth.activeCooperativeId = response.activeCooperativeId;
 	auth.platformAdmin = response.platformAdmin;
 	auth.platformCooperativesManage = response.platformCooperativesManage;
+	auth.mustChangePassword = response.mustChangePassword;
 	auth.resolvedCooperativeId = resolvedCooperativeId;
 	auth.status = 'authenticated';
 	// Keep the per-tab assertion header in lockstep with the session's
@@ -108,6 +110,7 @@ function clearAuthState(): void {
 	auth.resolvedCooperativeId = null;
 	auth.platformAdmin = false;
 	auth.platformCooperativesManage = false;
+	auth.mustChangePassword = false;
 	auth.status = 'unauthenticated';
 	selfSwitch.target = null;
 	setActiveCooperativeId(null);
