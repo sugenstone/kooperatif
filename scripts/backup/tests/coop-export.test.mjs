@@ -191,7 +191,7 @@ describe('coop-export-lib', () => {
 describe('key-file', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kexp-'));
   const good = path.join(dir, 'key.bin');
-  fs.writeFileSync(good, crypto.randomBytes(32));
+  fs.writeFileSync(good, crypto.randomBytes(32)); fs.chmodSync(good, 0o600);
 
   test('loads 32-byte key and derives keyId', () => {
     const { key, keyId } = loadExportKey({ KOOPERATIF_EXPORT_KEY_FILE: good });
@@ -199,18 +199,18 @@ describe('key-file', () => {
   });
   test('loads 64-hex key', () => {
     const p = path.join(dir, 'key.hex');
-    fs.writeFileSync(p, crypto.randomBytes(32).toString('hex'));
+    fs.writeFileSync(p, crypto.randomBytes(32).toString('hex')); fs.chmodSync(p, 0o600);
     const { key } = loadExportKey({ KOOPERATIF_EXPORT_KEY_FILE: p });
     assert.equal(key.length, 32);
   });
   test('unset env fails', () => assertCode(() => loadExportKey({}), 'keyfile-unset'));
   test('missing file fails', () => assertCode(() => loadExportKey({ KOOPERATIF_EXPORT_KEY_FILE: path.join(dir, 'none') }), 'keyfile-unreadable'));
   test('wrong size fails', () => {
-    const p = path.join(dir, 'short'); fs.writeFileSync(p, Buffer.alloc(8));
+    const p = path.join(dir, 'short'); fs.writeFileSync(p, Buffer.alloc(8)); fs.chmodSync(p, 0o600);
     assertCode(() => loadExportKey({ KOOPERATIF_EXPORT_KEY_FILE: p }), 'keyfile-size');
   });
   test('bad hex fails', () => {
-    const p = path.join(dir, 'badhex'); fs.writeFileSync(p, 'z'.repeat(64));
+    const p = path.join(dir, 'badhex'); fs.writeFileSync(p, 'z'.repeat(64)); fs.chmodSync(p, 0o600);
     assertCode(() => loadExportKey({ KOOPERATIF_EXPORT_KEY_FILE: p }), 'keyfile-format');
   });
   test('symlink rejected', () => {

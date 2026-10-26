@@ -38,7 +38,7 @@
 	let expanded = $state<string | null>(null);
 
 	function buildQuery(cursor: string | null): string {
-		const params = new URLSearchParams();
+		const params = new SvelteURLSearchParams();
 		if (eventType.trim() !== '') params.set('eventType', eventType.trim());
 		if (from !== '') params.set('from', new Date(from).toISOString());
 		if (to !== '') params.set('to', new Date(to).toISOString());

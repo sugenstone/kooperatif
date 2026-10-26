@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { beforeNavigate, goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import AppHeader from '$lib/components/app-header.svelte';
 	import AppSidebar from '$lib/components/app-sidebar.svelte';
@@ -45,7 +46,7 @@
 			auth.mustChangePassword &&
 			page.url.pathname !== '/parola'
 		) {
-			void goto('/parola');
+			void goto(resolve('/parola'));
 		}
 	});
 
