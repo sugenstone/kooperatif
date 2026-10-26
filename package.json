@@ -32,7 +32,8 @@
 		"ops:test": "node --test \"scripts/ops/tests/*.test.mjs\"",
 		"e2e:ff002": "node scripts/e2e-funcfix002.mjs",
 		"e2e:dialogs": "node scripts/e2e-confirm-dialogs.mjs",
-		"verify": "bash scripts/verify.sh"
+		"verify": "bash scripts/verify.sh",
+		"backup:coop-export:test": "node --test scripts/backup/tests/coop-export.test.mjs scripts/backup/tests/coop-export-step2.test.mjs"
 	},
 	"pnpm": {
 		"overrides": {
