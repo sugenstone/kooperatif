@@ -38,7 +38,8 @@
 	let expanded = $state<string | null>(null);
 
 	function buildQuery(cursor: string | null): string {
-		const params = new SvelteURLSearchParams();
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- read-only query builder, no reactive state
+		const params = new URLSearchParams();
 		if (eventType.trim() !== '') params.set('eventType', eventType.trim());
 		if (from !== '') params.set('from', new Date(from).toISOString());
 		if (to !== '') params.set('to', new Date(to).toISOString());
