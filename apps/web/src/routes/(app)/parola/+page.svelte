@@ -26,9 +26,7 @@
 	let actionError = $state<MessageKey | null>(null);
 
 	const forced = $derived(auth.mustChangePassword);
-	const invalid = $derived(
-		current === '' || next.length < 12 || confirm !== next
-	);
+	const invalid = $derived(current === '' || next.length < 12 || confirm !== next);
 
 	async function submit(): Promise<void> {
 		if (saving || invalid) return;

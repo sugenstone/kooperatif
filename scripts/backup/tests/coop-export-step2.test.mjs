@@ -196,6 +196,8 @@ describe('runExport integration (mocked drivers)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'exp-'));
   const keyfile = path.join(dir, 'k');
   fs.writeFileSync(keyfile, crypto.randomBytes(32));
+  // key-file.mjs requires owner-only perms (Linux CI checkouts are 644).
+  fs.chmodSync(keyfile, 0o600);
   const env = { KOOPERATIF_EXPORT_KEY_FILE: keyfile };
 
   const goodDriver = () => {
