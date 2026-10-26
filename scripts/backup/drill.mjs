@@ -215,7 +215,7 @@ async function main() {
 			['users', 1],
 			['user_role_assignments', 1],
 			['user_sessions', 1],
-			['permissions', 35],
+			["permissions", 36],
 			['persons', 4],
 			['shareholders', 2],
 			['families', 2],
