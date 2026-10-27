@@ -181,6 +181,24 @@ pub struct CreateMembershipRequest {
     pub user_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub display_name: String,
+    /// Operator-provisioned initial credential. Never echoed, never
+    /// logged; hashed (Argon2id + DB bcrypt verifier) before storage.
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct UpdateUserRequest {
+    pub display_name: String,
+}
+
 /// Member-of-the-verified-cooperative read model.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,7 +275,8 @@ pub fn rbac_router() -> Router<AppState> {
             "/api/roles/{id}/permissions",
             get(get_role_permissions).put(set_role_permissions),
         )
-        .route("/api/users", get(list_users))
+        .route("/api/users", get(list_users).post(create_user))
+        .route("/api/users/{id}", axum::routing::patch(update_user))
         // M1-P6 B3: cooperative membership management. The cooperative
         // is the sealed verified scope — never a request parameter.
         .route(
@@ -301,6 +320,10 @@ pub fn platform_router() -> Router<AppState> {
         .route(
             "/api/platform/users/{id}/disable",
             post(platform_disable_user),
+        )
+        .route(
+            "/api/platform/users/{id}/reset-password",
+            post(platform_reset_password),
         )
         .route(
             "/api/platform/users/{id}/enable",
@@ -1834,6 +1857,254 @@ pub async fn set_role_permissions(
     }
 }
 
+/// Cooperative administrator provisions a NEW global identity plus its
+/// membership in the sealed scope (M2). The cooperative is derived from
+/// the verified scope — never a request field. `memberships.manage` (or
+/// the broader `users.manage`) is re-verified inside the definer; the
+/// admin-set credential lands `must_change_password = true` (PD-14
+/// recommended: operator credentials are one-time credentials).
+pub async fn create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ctx: BusinessAuth,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<Response, ApiError> {
+    let pool = guarded_business_mutation_any!(
+        &state,
+        &headers,
+        &ctx,
+        &[
+            authz::catalog::MEMBERSHIPS_MANAGE,
+            authz::catalog::USERS_MANAGE
+        ],
+        &axum::http::Method::POST
+    );
+    // Validate and hash BEFORE opening the tenant tx — cheap inputs.
+    let normalized = crate::auth::identity::normalize_and_validate_username(&body.username)
+        .map_err(|_| ApiError::ValidationFailed)?;
+    let display_name = body.display_name.trim().to_string();
+    if display_name.is_empty() || display_name.chars().count() > 120 {
+        return Err(ApiError::ValidationFailed);
+    }
+    crate::auth::identity::validate_password_policy(&body.password)
+        .map_err(|_| ApiError::ValidationFailed)?;
+    let password_hash = crate::auth::identity::hash_password(&state.auth.argon2, &body.password)
+        .map_err(|error| {
+            tracing::error!(error = %error, "argon2 hashing failed");
+            ApiError::Internal
+        })?;
+
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let scope = ctx.cooperative_id();
+        let mut guard_tx = authz::begin_guarded_transaction(&mut tx, scope)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "guard tx failed");
+                ApiError::Internal
+            })?;
+
+        let created: Option<Uuid> = match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT public.app_user_create_scoped($1, $2, $3, $4)",
+        )
+        .bind(&normalized)
+        .bind(&display_name)
+        .bind(&password_hash)
+        .bind(&body.password)
+        .fetch_one(guard_tx.as_mut())
+        .await
+        {
+            Ok(value) => value,
+            Err(sqlx::Error::Database(db_err)) if is_insufficient_privilege(&*db_err) => {
+                return Err(ApiError::PermissionDenied);
+            }
+            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                guard_tx.rollback().await.map_err(|error| {
+                    tracing::error!(error = %error, "rollback failed");
+                    ApiError::Internal
+                })?;
+                return Err(ApiError::Conflict);
+            }
+            Err(error) if is_lifecycle_violation(&error, "cooperative_not_ready") => {
+                guard_tx.rollback().await.map_err(|error| {
+                    tracing::error!(error = %error, "rollback failed");
+                    ApiError::Internal
+                })?;
+                return Err(ApiError::CooperativeNotReady);
+            }
+            Err(error)
+                if is_lifecycle_violation(&error, "password_too_short")
+                    || is_lifecycle_violation(&error, "user_fields_required")
+                    || is_lifecycle_violation(&error, "user_field_too_long") =>
+            {
+                guard_tx.rollback().await.map_err(|error| {
+                    tracing::error!(error = %error, "rollback failed");
+                    ApiError::Internal
+                })?;
+                return Err(ApiError::ValidationFailed);
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "user creation failed");
+                return Err(ApiError::Internal);
+            }
+        };
+
+        let user_id = match created {
+            Some(id) => id,
+            None => {
+                guard_tx.rollback().await.map_err(|error| {
+                    tracing::error!(error = %error, "rollback failed");
+                    ApiError::Internal
+                })?;
+                return Err(ApiError::Internal);
+            }
+        };
+
+        let row = sqlx::query_as::<_, MembershipRow>(
+            "SELECT m.user_id, u.username, u.display_name, m.status, \
+                    m.joined_at, m.ended_at \
+             FROM cooperative_memberships m \
+             JOIN users u ON u.id = m.user_id \
+             WHERE m.user_id = $1 AND m.cooperative_id = $2",
+        )
+        .bind(user_id)
+        .bind(scope)
+        .fetch_one(guard_tx.as_mut())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "created user read-back failed");
+            ApiError::Internal
+        })?;
+
+        guard_tx.commit().await.map_err(|error| {
+            tracing::error!(error = %error, "commit failed");
+            ApiError::Internal
+        })?;
+
+        tracing::info!(
+            outcome = "user_created",
+            user_id = %user_id,
+            actor = %ctx.auth.user_id
+        );
+        Ok((
+            StatusCode::CREATED,
+            Json(MembershipDto {
+                user_id: row.user_id,
+                username: row.username,
+                display_name: row.display_name,
+                status: row.status,
+                roles: Vec::new(),
+                joined_at: row.joined_at,
+                ended_at: row.ended_at,
+            }),
+        )
+            .into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cooperative-scoped profile edit (M2): display_name only. Identity
+/// fields (username), lifecycle (status) and credentials are outside
+/// this lane by design. `memberships.manage`/`users.manage` re-verified
+/// inside the definer; a non-member target returns 404 without leaking
+/// existence.
+pub async fn update_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ctx: BusinessAuth,
+    Path(user_id): Path<Uuid>,
+    Json(body): Json<UpdateUserRequest>,
+) -> Result<Response, ApiError> {
+    let pool = guarded_business_mutation_any!(
+        &state,
+        &headers,
+        &ctx,
+        &[
+            authz::catalog::MEMBERSHIPS_MANAGE,
+            authz::catalog::USERS_MANAGE
+        ],
+        &axum::http::Method::PATCH
+    );
+    let display_name = body.display_name.trim().to_string();
+    if display_name.is_empty() || display_name.chars().count() > 120 {
+        return Err(ApiError::ValidationFailed);
+    }
+
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let scope = ctx.cooperative_id();
+        let mut guard_tx = authz::begin_guarded_transaction(&mut tx, scope)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "guard tx failed");
+                ApiError::Internal
+            })?;
+
+        let updated: Option<Uuid> = match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT public.app_user_update_scoped($1, $2)",
+        )
+        .bind(user_id)
+        .bind(&display_name)
+        .fetch_one(guard_tx.as_mut())
+        .await
+        {
+            Ok(value) => value,
+            Err(sqlx::Error::Database(db_err)) if is_insufficient_privilege(&*db_err) => {
+                return Err(ApiError::PermissionDenied);
+            }
+            Err(error)
+                if is_lifecycle_violation(&error, "user_fields_required")
+                    || is_lifecycle_violation(&error, "user_field_too_long") =>
+            {
+                guard_tx.rollback().await.map_err(|error| {
+                    tracing::error!(error = %error, "rollback failed");
+                    ApiError::Internal
+                })?;
+                return Err(ApiError::ValidationFailed);
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "user update failed");
+                return Err(ApiError::Internal);
+            }
+        };
+
+        if updated.is_none() {
+            guard_tx.rollback().await.map_err(|error| {
+                tracing::error!(error = %error, "rollback failed");
+                ApiError::Internal
+            })?;
+            return Err(ApiError::NotFound);
+        }
+
+        guard_tx.commit().await.map_err(|error| {
+            tracing::error!(error = %error, "commit failed");
+            ApiError::Internal
+        })?;
+        Ok(StatusCode::NO_CONTENT.into_response())
+    }
+    .await;
+    match __result {
+        Ok(v) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok(v)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub async fn list_users(
     State(state): State<AppState>,
     ctx: BusinessAuth,
@@ -2151,4 +2422,66 @@ async fn audit_lockout_prevention(
         auth.authed_at,
     )
     .await;
+}
+
+/// M2 PD-14: platform-lane admin password reset. Generates a one-time
+/// temporary credential, forces must_change_password, and revokes every
+/// session of the target inside the definer — the temporary password
+/// is returned ONCE to the caller and never logged or written to audit
+/// metadata.
+pub async fn platform_reset_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: CurrentAuth,
+    Path(user_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    csrf::validate_csrf_token(&headers, &auth.csrf_token)
+        .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+
+    // One-time credential: 256-bit entropy, never stored in plaintext.
+    let temp = format!("r-{}", Uuid::new_v4().simple());
+    let hash =
+        crate::auth::identity::hash_password(&state.auth.argon2, &temp).map_err(|error| {
+            tracing::error!(error = %error, "argon2 hashing failed");
+            ApiError::Internal
+        })?;
+
+    let (mut tx, _seal) =
+        crate::db::request_user_tx(pool, &auth.session_token_hash, auth.authed_at)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "user tx failed");
+                ApiError::Internal
+            })?;
+    let reset: Option<Uuid> = match sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT public.app_platform_password_reset($1, $2, $3)",
+    )
+    .bind(user_id)
+    .bind(&hash)
+    .bind(&temp)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(sqlx::Error::Database(db_err)) if is_insufficient_privilege(&*db_err) => {
+            return Err(ApiError::PermissionDenied);
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "password reset failed");
+            return Err(ApiError::Internal);
+        }
+    };
+    tx.commit().await.map_err(|error| {
+        tracing::error!(error = %error, "reset commit failed");
+        ApiError::Internal
+    })?;
+    let Some(_) = reset else {
+        return Err(ApiError::NotFound);
+    };
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "temporaryPassword": temp })),
+    )
+        .into_response())
 }

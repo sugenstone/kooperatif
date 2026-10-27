@@ -48,6 +48,20 @@ pub struct CurrentAuth {
     /// is evaluated against this value — the same clock domain that
     /// wrote the session — not the database wall clock.
     pub authed_at: OffsetDateTime,
+    /// M2 forced rotation (PD-14 recommended): while set, only the
+    /// password-change lane, logout and `/api/auth/me` are reachable —
+    /// enforced here at session resolution, never by the frontend.
+    pub must_change_password: bool,
+}
+
+/// Endpoints reachable while `must_change_password` holds (M2): the
+/// rotation lane itself, a safe logout, and `me` so the frontend can
+/// surface the forced-change state.
+fn password_rotation_exempt(method: &axum::http::Method, path: &str) -> bool {
+    matches!(
+        (method.as_str(), path),
+        ("POST", "/api/auth/password") | ("POST", "/api/auth/logout") | ("GET", "/api/auth/me")
+    )
 }
 
 impl FromRequestParts<AppState> for CurrentAuth {
@@ -101,6 +115,15 @@ impl FromRequestParts<AppState> for CurrentAuth {
             tracing::warn!(error = %error, session_id = %session_row.session_id, "session touch failed");
         }
 
+        // M2 forced rotation: a must_change_password session may only
+        // reach the rotation lane — every other protected endpoint is
+        // refused at session resolution.
+        if session_row.must_change_password
+            && !password_rotation_exempt(&parts.method, parts.uri.path())
+        {
+            return Err(ApiError::PermissionDenied);
+        }
+
         Ok(CurrentAuth {
             user_id: session_row.user_id,
             username: session_row.username,
@@ -112,6 +135,7 @@ impl FromRequestParts<AppState> for CurrentAuth {
             active_cooperative_id: session_row.active_cooperative_id,
             session_token_hash: token_hash,
             authed_at: now,
+            must_change_password: session_row.must_change_password,
         })
     }
 }

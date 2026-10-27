@@ -240,6 +240,7 @@ async fn ctx_for(pool: &PgPool, user_id: Uuid, cooperative_id: Uuid) -> TenantCt
             session_expires_at: OffsetDateTime::now_utc(),
             csrf_token: "csrf".into(),
             active_cooperative_id: None,
+            must_change_password: false,
         },
         cooperative_id,
         cooperative_name: "Test".into(),

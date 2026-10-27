@@ -7,6 +7,7 @@
 //! raw rows are never serialized. `session_id` is never exposed (D5).
 
 use axum::extract::{Query, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -27,6 +28,7 @@ const MAX_PAGE_SIZE: i64 = 100;
 pub fn audit_router() -> Router<AppState> {
     Router::new()
         .route("/api/audit/events", get(list_events_scoped))
+        .route("/api/audit/events/export", get(export_events_csv))
         // Audit data is per-user sensitive: never cacheable.
         .layer(axum::middleware::from_fn(
             crate::auth::routes::no_store_cache_control,
@@ -679,5 +681,132 @@ impl From<AuditRowDb> for AuditRow {
             cooperative_id: row.cooperative_id,
             metadata: row.metadata,
         }
+    }
+}
+
+// ── M2 PD-15: CSV export (audit.export — separate from audit.read) ───
+
+/// RFC 4180 field escaping + spreadsheet-formula neutralization: a
+/// cell whose FIRST character is =, +, -, @, space, tab or a control
+/// character is prefixed with a leading apostrophe — formula loaders
+/// trim/dispatch on any of them.
+fn csv_field(value: &str) -> String {
+    let mut v = value.replace('"', "\"\"");
+    if v.starts_with(|c: char| matches!(c, '=' | '+' | '-' | '@' | ' ' | '\t') || c.is_control()) {
+        v.insert(0, '\'');
+    }
+    format!("\"{v}\"")
+}
+
+async fn export_events_csv(
+    State(state): State<AppState>,
+    ctx: BusinessAuth,
+    Query(query): Query<AuditQuery>,
+) -> Result<Response, ApiError> {
+    authz::require_business(&state, &ctx, authz::catalog::AUDIT_EXPORT).await?;
+    let parsed = parse_query(query, false)?;
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+    let scope = ctx.cooperative_id();
+
+    let mut tx = ctx.open_tx(pool).await?;
+    let __result = async {
+        let mut guard_tx = crate::auth::authz::begin_guarded_transaction(&mut tx, scope)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "guard tx failed");
+                ApiError::Internal
+            })?;
+
+        let mut out = String::from("occurred_at,event_type,actor_username,metadata\n");
+        let mut before_at = parsed.before_at;
+        let mut before_id = parsed.before_id;
+        let mut total: i64 = 0;
+        // Keyset-paged streaming through the export definer — each
+        // page is bounded (definer clamps <=100) and the cooperative
+        // is the sealed scope, never caller input.
+        loop {
+            let rows = sqlx::query_as::<_, AuditRowDb>(
+                "SELECT id, occurred_at, event_type, actor_user_id, \
+                        actor_username, cooperative_id, metadata \
+                   FROM public.app_audit_export_scoped($1,$2,$3,$4,$5,$6,$7,$8)",
+            )
+            .bind(scope)
+            .bind(&parsed.event_type)
+            .bind(parsed.actor_user_id)
+            .bind(parsed.from)
+            .bind(parsed.to)
+            .bind(before_at)
+            .bind(before_id)
+            .bind(100_i32)
+            .fetch_all(guard_tx.as_mut())
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "audit export page failed");
+                ApiError::Internal
+            })?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in &rows {
+                total += 1;
+                let meta = filter_metadata(&row.event_type, row.metadata.clone());
+                out.push_str(&format!(
+                    "{},{},{},{}\n",
+                    csv_field(&row.occurred_at.to_string()),
+                    csv_field(&row.event_type),
+                    csv_field(row.actor_username.as_deref().unwrap_or("")),
+                    csv_field(&meta.to_string()),
+                ));
+                before_at = Some(row.occurred_at);
+                before_id = Some(row.id);
+            }
+            if rows.len() < 100 || total >= 10_000 {
+                break;
+            }
+        }
+
+        // The export itself is a security event (PD-15) — minted
+        // through the definer-owned lane; app_audit_emit is not
+        // callable by the runtime principal.
+        sqlx::query("SELECT public.app_audit_export_mint($1, $2::jsonb)")
+            .bind(scope)
+            .bind(serde_json::json!({
+                "rows": total,
+                "event_type": parsed.event_type,
+            }))
+            .execute(guard_tx.as_mut())
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "export audit mint failed");
+                ApiError::Internal
+            })?;
+
+        guard_tx.commit().await.map_err(|error| {
+            tracing::error!(error = %error, "export commit failed");
+            ApiError::Internal
+        })?;
+        Ok(out)
+    }
+    .await;
+    match __result {
+        Ok(csv) => {
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "tenant tx commit failed");
+                ApiError::Internal
+            })?;
+            Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"denetim-kayitlari.csv\"",
+                    ),
+                ],
+                csv,
+            )
+                .into_response())
+        }
+        Err(e) => Err(e),
     }
 }

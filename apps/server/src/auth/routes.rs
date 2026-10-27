@@ -95,6 +95,10 @@ pub struct AuthResponse {
     /// backend enforcement is `app_has_platform_permission` inside the
     /// lifecycle definers, never this hint.
     pub platform_cooperatives_manage: bool,
+    /// M2 forced rotation: while true the session may only reach
+    /// `/api/auth/password`, logout and `/api/auth/me` — enforced at
+    /// session resolution, surfaced here for UX.
+    pub must_change_password: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +129,7 @@ pub fn auth_router() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/sessions", get(list_sessions))
         .route("/api/auth/sessions/revoke-others", post(revoke_others))
+        .route("/api/auth/password", post(change_password))
         .route("/api/auth/sessions/{id}", delete(revoke_session))
         .layer(middleware::from_fn(no_store_cache_control))
 }
@@ -246,6 +251,34 @@ pub async fn login(
         return Err(ApiError::AuthenticationFailed);
     };
 
+    // PD-14 single-use: a pending admin-reset credential is consumed by
+    // exactly ONE login. A consumed (or raced) pending reset revokes
+    // the fresh session and fails uniformly — ordinary credentials
+    // take a no-op path.
+    let consumed: Option<bool> = sqlx::query_scalar("SELECT public.app_password_consume_reset($1)")
+        .bind(session_token.hash.as_slice())
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "reset consume check failed");
+            ApiError::Internal
+        })?;
+    if consumed != Some(true) {
+        let _ = session::revoke_session(
+            pool,
+            session_token.hash,
+            created.session_id,
+            "reset_credential_consumed",
+            now,
+        )
+        .await;
+        tracing::info!(
+            outcome = "login_failed",
+            reason = "reset_credential_consumed"
+        );
+        return Err(ApiError::AuthenticationFailed);
+    }
+
     // Success: fresh session (fixation-safe: brand-new token, the
     // attacker-supplied cookie value is never reused), limiter recovery.
     state.auth.limiter.on_success(&normalized);
@@ -301,6 +334,14 @@ pub async fn login(
         active_cooperative_id: created.active_cooperative_id,
         platform_admin,
         platform_cooperatives_manage,
+        must_change_password: session::classify_session(pool, session_token.hash, now)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "post-login resolve failed");
+                ApiError::Internal
+            })?
+            .map(|s| s.must_change_password)
+            .unwrap_or(false),
     };
 
     Ok((StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(body)).into_response())
@@ -426,6 +467,7 @@ pub async fn me(
         active_cooperative_id: auth.active_cooperative_id,
         platform_admin,
         platform_cooperatives_manage,
+        must_change_password: auth.must_change_password,
     }))
 }
 
@@ -620,4 +662,105 @@ pub async fn revoke_others(
     tracing::info!(outcome = "sessions_revoked_all_others", user_id = %auth.user_id, count);
 
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangePasswordRequest {
+    #[serde(rename = "currentPassword")]
+    pub current_password: String,
+    #[serde(rename = "newPassword")]
+    pub new_password: String,
+}
+
+/// M2: self password change (0075). Verifies the CURRENT credential
+/// inside the database (`login_verifier` crypt comparison), rotates
+/// both credential columns, clears `must_change_password` and revokes
+/// EVERY session of the user — the caller's included, so the response
+/// clears the session cookie and the client must sign in again.
+///
+/// The failure audit row (`password_change_failed`) is minted inside
+/// the same sealed transaction and COMMITTED — the wrong-password path
+/// deliberately does not roll back. Passwords/hashes never touch logs
+/// or audit metadata.
+pub async fn change_password(
+    State(state): State<AppState>,
+    auth: CurrentAuth,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<Response, ApiError> {
+    csrf::validate_csrf_token(&headers, &auth.csrf_token)
+        .map_err(|rejection| csrf_rejection_to_api_error(&rejection))?;
+
+    crate::auth::identity::validate_password_policy(&body.new_password)
+        .map_err(|_| ApiError::ValidationFailed)?;
+
+    // Rate-limit wrong-current attempts on the session username — the
+    // same bucket shape the login lane uses (bounded, time-recovering).
+    let client_ip = peer.ip().to_string();
+    if !state.auth.limiter.check(&auth.username, &client_ip).allowed {
+        return Err(ApiError::RateLimited);
+    }
+
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+    let now = state.auth.clock.now();
+    let new_hash = crate::auth::identity::hash_password(&state.auth.argon2, &body.new_password)
+        .map_err(|error| {
+            tracing::error!(error = %error, "argon2 hashing failed");
+            ApiError::Internal
+        })?;
+
+    let mut tx = pool.begin().await.map_err(|error| {
+        tracing::error!(error = %error, "password tx begin failed");
+        ApiError::Internal
+    })?;
+
+    // Seal the user lane: the definer derives the principal from the
+    // session row — never a caller-supplied user id.
+    sqlx::query_scalar::<_, Option<Uuid>>("SELECT public.app_open_request_context($1, $2)")
+        .bind(auth.session_token_hash.as_slice())
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "request context seal failed");
+            ApiError::Internal
+        })?;
+
+    let verdict: Option<String> =
+        sqlx::query_scalar("SELECT public.app_password_change_self($1, $2, $3)")
+            .bind(&body.current_password)
+            .bind(&new_hash)
+            .bind(&body.new_password)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "password change definer failed");
+                ApiError::Internal
+            })?;
+
+    match verdict.as_deref() {
+        Some("ok") => {
+            tx.commit().await.map_err(|error| {
+                tracing::error!(error = %error, "password tx commit failed");
+                ApiError::Internal
+            })?;
+            state.auth.limiter.on_success(&auth.username);
+            tracing::info!(outcome = "password_changed", user_id = %auth.user_id);
+            let cleared = cookies::build_clearing_cookie(state.auth.config.cookie_secure);
+            Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, cleared)]).into_response())
+        }
+        Some("invalid_current_password") => {
+            // Commit so the failure audit row survives; the credential
+            // itself was untouched.
+            tx.commit().await.map_err(|error| {
+                tracing::error!(error = %error, "password tx commit failed");
+                ApiError::Internal
+            })?;
+            state.auth.limiter.record_failure(&auth.username);
+            Err(ApiError::AuthenticationFailed)
+        }
+        _ => Err(ApiError::Internal),
+    }
 }

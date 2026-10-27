@@ -106,6 +106,9 @@ pub struct AuthenticatedSession {
     pub last_seen_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub active_cooperative_id: Option<Uuid>,
+    /// M2: forced-rotation flag resolved inside the definer. The
+    /// extractor gates every protected API while this holds.
+    pub must_change_password: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -126,6 +129,7 @@ struct ResolveRow {
     active_cooperative_id: Option<Uuid>,
     #[allow(dead_code)]
     client_label: Option<String>,
+    must_change_password: Option<bool>,
 }
 
 /// Resolve a presented token hash through `app_session_resolve`:
@@ -139,7 +143,8 @@ pub async fn classify_session(
     let row = sqlx::query_as::<_, ResolveRow>(
         "SELECT rejection, session_id, user_id, username, display_name, \
                 user_status, csrf_token, created_at, last_seen_at, expires_at, \
-                idle_expires_at, active_cooperative_id, client_label \
+                idle_expires_at, active_cooperative_id, client_label, \
+                must_change_password \
          FROM public.app_session_resolve($1, $2)",
     )
     .bind(token_hash.as_slice())
@@ -166,6 +171,7 @@ pub async fn classify_session(
         last_seen_at: row.last_seen_at.unwrap_or(now),
         expires_at: row.expires_at.unwrap_or(now),
         active_cooperative_id: row.active_cooperative_id,
+        must_change_password: row.must_change_password.unwrap_or(false),
     }))
 }
 

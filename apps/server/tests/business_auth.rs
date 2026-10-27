@@ -516,6 +516,7 @@ async fn require_business_applies_verified_legacy_attribution() {
                 session_expires_at: OffsetDateTime::now_utc(),
                 csrf_token: "c".into(),
                 active_cooperative_id: None,
+                must_change_password: false,
             },
             scope: kooperatif_server::tenant::BusinessScope::Cooperative {
                 cooperative_id: coop,

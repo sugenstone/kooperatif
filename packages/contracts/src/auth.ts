@@ -89,6 +89,8 @@ export interface AuthResponse {
   platformAdmin: boolean;
   /** NULL-scope `cooperatives.manage` capability (M1-P7-B): gates the platform cooperative-lifecycle UI only — backend enforces in the database. */
   platformCooperativesManage: boolean;
+  /** M2 forced rotation (PD-14): while true only the password lane is reachable. */
+  mustChangePassword: boolean;
 }
 
 export interface SessionSummary {

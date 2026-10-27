@@ -2,11 +2,11 @@
 -- (M1-P4-BR1, ADR-013). Regenerate with:
 --   pnpm backup:regrants -- --generate --baseline-url postgres://…
 --
--- Generated: 2026-10-22T22:25:06.981Z
--- Baseline:  migration version 72, 607 ACL statements
--- Expected post-apply fingerprint: 940:53204261facb9afbe05a2697675a4df6
+-- Generated: 2026-10-27T06:25:32.907Z
+-- Baseline:  migration version 79, 621 ACL statements
+-- Expected post-apply fingerprint: 954:7a794e5f7a59bb738e2066dd2a04f938
 -- Expected RLS fingerprint:      178:a44e3e09c01f04667c8fb8c4e3ccd918
--- Revision:  7b36b947d6ff41b59c33d87130ab5f9139ab259e
+-- Revision:  cd051fb382bd970ea164dbc53dd2fd592a7478a8
 --
 -- Fail-closed preflight: the kooperatif_app role must exist with the
 -- hardened attribute set, and the target must be a fully-migrated
@@ -32,8 +32,8 @@ BEGIN
                    WHERE table_name = '_sqlx_migrations') THEN
         RAISE EXCEPTION 'no migration ledger — regrants only apply to a migrated kooperatif database';
     END IF;
-    IF (SELECT max(version) FROM _sqlx_migrations WHERE success) IS DISTINCT FROM 72 THEN
-        RAISE EXCEPTION 'migration ledger mismatch: expected 72, found % — regenerate regrants.sql from a matching baseline',
+    IF (SELECT max(version) FROM _sqlx_migrations WHERE success) IS DISTINCT FROM 79 THEN
+        RAISE EXCEPTION 'migration ledger mismatch: expected 79, found % — regenerate regrants.sql from a matching baseline',
             (SELECT max(version) FROM _sqlx_migrations WHERE success);
     END IF;
 END $$;
@@ -100,6 +100,8 @@ REVOKE ALL ON FUNCTION app_admin_revoke_user_sessions(uuid,timestamp with time z
 REVOKE ALL ON FUNCTION app_allocation_bound_check() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_application_bound_check() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_audit_emit(text,jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_audit_export_mint(uuid,jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_audit_export_scoped(uuid,text,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,uuid,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_audit_login_failed(jsonb,timestamp with time zone) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_audit_read_platform(bytea,timestamp with time zone,uuid,text,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,uuid,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_audit_read_scoped(bytea,uuid,timestamp with time zone,text,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,uuid,integer) FROM PUBLIC;
@@ -163,6 +165,8 @@ REVOKE ALL ON FUNCTION app_movement_source_pre() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_movements_reverse_of_source(text,uuid,timestamp with time zone,uuid,text,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_notify_verify(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_open_request_context(bytea,timestamp with time zone) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_password_change_self(text,text,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_password_consume_reset(bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_payment_number_pin() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_payment_pair_check() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_payment_reverse(uuid,timestamp with time zone,uuid,text,uuid) FROM PUBLIC;
@@ -171,6 +175,7 @@ REVOKE ALL ON FUNCTION app_period_open(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_period_open_tx(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_permission_catalog() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_platform_admin_path_count() FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_platform_password_reset(uuid,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_platform_user_set_status(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_rbac_in_scope(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_rbac_verified_scope(text) FROM PUBLIC;
@@ -233,9 +238,11 @@ REVOKE ALL ON FUNCTION app_social_aid_fund_close_tx(uuid,timestamp with time zon
 REVOKE ALL ON FUNCTION app_stamp_cooperative(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_transfer_reverse(uuid,timestamp with time zone,uuid,text,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_transfer_reverse_tx(uuid,timestamp with time zone,uuid,text,uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_user_create_scoped(text,text,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_ctx_ok() FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_roles_set(uuid,uuid[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_set_status(uuid,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_user_update_scoped(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_verify_membership(uuid,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_write_guard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION kooperatif_emit_authz_for_user(uuid) FROM PUBLIC;
@@ -250,6 +257,8 @@ REVOKE ALL ON FUNCTION reserve_document_number(uuid,text,bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION allocate_document_number(uuid,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_admin_path_count(uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_admin_revoke_user_sessions(uuid,timestamp with time zone) TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_audit_export_mint(uuid,jsonb) TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_audit_export_scoped(uuid,text,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,uuid,integer) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_audit_login_failed(jsonb,timestamp with time zone) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_audit_read_platform(bytea,timestamp with time zone,uuid,text,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,uuid,integer) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_audit_read_scoped(bytea,uuid,timestamp with time zone,text,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,uuid,integer) TO kooperatif_app;
@@ -312,6 +321,8 @@ GRANT EXECUTE ON FUNCTION app_membership_create(uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_membership_set_status(uuid,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_notify_verify(text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_open_request_context(bytea,timestamp with time zone) TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_password_change_self(text,text,text) TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_password_consume_reset(bytea) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_payment_allocation_reverse(uuid,timestamp with time zone,uuid,text,uuid) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION app_payment_allocation_reverse(uuid,timestamp with time zone,uuid,text,uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_payment_reverse_tx(uuid,timestamp with time zone,uuid,text,uuid) TO kooperatif_app;
@@ -319,6 +330,7 @@ GRANT EXECUTE ON FUNCTION app_period_close(uuid,timestamp with time zone,uuid) T
 GRANT EXECUTE ON FUNCTION app_period_close(uuid,timestamp with time zone,uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_period_open_tx(uuid,uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_permission_catalog() TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_platform_password_reset(uuid,text,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_platform_user_set_status(uuid,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_rbac_verified_scope_in(text[]) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_resolve_bootstrap() TO kooperatif_app;
@@ -365,9 +377,11 @@ GRANT EXECUTE ON FUNCTION app_social_aid_fund_cancel_tx(uuid,timestamp with time
 GRANT EXECUTE ON FUNCTION app_social_aid_fund_close_tx(uuid,timestamp with time zone,uuid,uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_stamp_cooperative(uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_transfer_reverse_tx(uuid,timestamp with time zone,uuid,text,uuid) TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_user_create_scoped(text,text,text,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_ctx_ok() TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_roles_set(uuid,uuid[]) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_set_status(uuid,text) TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_user_update_scoped(uuid,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION armor(bytea) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION armor(bytea,text[],text[]) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION cash_dist(money,money) TO PUBLIC;

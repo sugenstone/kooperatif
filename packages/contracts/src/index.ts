@@ -61,6 +61,7 @@ export type {
 	UserWithRoles
 } from './rbac';
 export {
+	AUDIT_EVENTS_PATH,
 	MEMBERSHIPS_PATH,
 	PERMISSION_KEYS,
 	PERMISSIONS_PATH,
@@ -81,8 +82,10 @@ export {
 	userMembershipEndPath,
 	userMembershipReactivatePath,
 	userMembershipSuspendPath,
+	userPath,
 	userRolesPath
 } from './rbac';
+export type { AuditEvent, AuditPage } from './rbac';
 export type {
 	CreateFamilyRequest,
 	CreateShareholderRequest,

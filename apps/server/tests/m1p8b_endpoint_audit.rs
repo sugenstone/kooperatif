@@ -281,7 +281,7 @@ fn route_inventory_is_fully_classified() {
     );
     assert_eq!(
         lanes[&Lane::Platform],
-        9,
+        10,
         "platform lane drifted: {lanes:?}"
     );
     assert_eq!(lanes[&Lane::Public], 3, "public lane drifted: {lanes:?}");

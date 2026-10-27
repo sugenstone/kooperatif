@@ -92,6 +92,9 @@ pub mod catalog {
     /// cooperative-scoped grant can never satisfy the platform lane.
     /// Deliberately not implied by `users.manage` (D2).
     pub const AUDIT_READ: &str = "audit.read";
+    /// PD-15 (0076): CSV export is a separate capability — audit.read
+    /// alone must never satisfy this grant.
+    pub const AUDIT_EXPORT: &str = "audit.export";
 
     /// M1-P6 B1 — cooperative lifecycle authority (create, activate,
     /// suspend, archive). PLATFORM-scope only: a cooperative-scoped
@@ -146,6 +149,7 @@ pub mod catalog {
         GOVERNANCE_MANAGE,
         REPORTS_READ,
         AUDIT_READ,
+        AUDIT_EXPORT,
         COOPERATIVES_MANAGE,
         MEMBERSHIPS_MANAGE,
         MEMBERSHIPS_READ,
@@ -744,8 +748,8 @@ mod tests {
     fn catalog_is_minimal_and_has_no_wildcards() {
         assert_eq!(
             catalog::ALL.len(),
-            35,
-            "STEP-003..STEP-015 + M1-P5-B4 + M1-P6-B1 + M1-P6-B4 catalog"
+            36,
+            "STEP-003..STEP-015 + M1-P5-B4 + M1-P6-B1 + M1-P6-B4 + M2 audit.export catalog"
         );
         assert!(catalog::ALL.iter().all(|key| {
             !key.contains('*') && !key.contains("superuser") && !key.contains("restore")
