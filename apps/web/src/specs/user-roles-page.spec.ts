@@ -18,7 +18,8 @@ const rolesPayload = [
 		description: '',
 		status: 'active',
 		permissions: [],
-		cooperativeId: 'coop-1', requiresPlatformAdmin: false,
+		cooperativeId: 'coop-1',
+		requiresPlatformAdmin: false,
 		createdAt: '2026-01-01T00:00:00Z',
 		updatedAt: '2026-01-01T00:00:00Z'
 	},
@@ -28,7 +29,8 @@ const rolesPayload = [
 		description: '',
 		status: 'disabled',
 		permissions: [],
-		cooperativeId: 'coop-1', requiresPlatformAdmin: false,
+		cooperativeId: 'coop-1',
+		requiresPlatformAdmin: false,
 		createdAt: '2026-01-01T00:00:00Z',
 		updatedAt: '2026-01-01T00:00:00Z'
 	},
@@ -38,7 +40,8 @@ const rolesPayload = [
 		description: '',
 		status: 'active',
 		permissions: [],
-		cooperativeId: null, requiresPlatformAdmin: false,
+		cooperativeId: null,
+		requiresPlatformAdmin: false,
 		createdAt: '2026-01-01T00:00:00Z',
 		updatedAt: '2026-01-01T00:00:00Z'
 	}

@@ -238,22 +238,22 @@
 					{#each assignableRoles ?? [] as role (role.id)}
 						{#if !role.requiresPlatformAdmin || auth.platformAdmin}
 							<label class="flex items-center gap-3 text-sm">
-							<input
-								type="checkbox"
-								class="size-4 accent-foreground"
-								checked={assigned.has(role.id)}
-								// Disabled roles cannot be newly assigned (backend rejects);
-								// an already-assigned disabled role stays visible but locked.
-								disabled={role.status !== 'active' && !assigned.has(role.id)}
-								onchange={() => toggle(role.id)}
-							/>
-							<span class="flex items-center gap-2">
-								{role.name}
-								{#if role.status !== 'active'}
-									<Badge variant="outline">{t('roles.disabled')}</Badge>
-								{/if}
-							</span>
-						</label>
+								<input
+									type="checkbox"
+									class="size-4 accent-foreground"
+									checked={assigned.has(role.id)}
+									// Disabled roles cannot be newly assigned (backend rejects);
+									// an already-assigned disabled role stays visible but locked.
+									disabled={role.status !== 'active' && !assigned.has(role.id)}
+									onchange={() => toggle(role.id)}
+								/>
+								<span class="flex items-center gap-2">
+									{role.name}
+									{#if role.status !== 'active'}
+										<Badge variant="outline">{t('roles.disabled')}</Badge>
+									{/if}
+								</span>
+							</label>
 						{/if}
 					{:else}
 						<p class="text-sm text-muted-foreground">{t('users.detail.noAssignableRoles')}</p>
