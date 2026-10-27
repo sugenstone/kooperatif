@@ -6844,8 +6844,13 @@ async fn r1_authorized_admin_mutations_work_through_definers() {
     let p = pilot_fixture(&db).await;
     let app = db.app_pool().await;
     let now = OffsetDateTime::now_utc();
-    let (_admin, token_adm) =
-        r1_principal(&db, "adm", p.coop_a, &["roles.manage", "users.manage"]).await;
+    let (_admin, token_adm) = r1_principal(
+        &db,
+        "adm",
+        p.coop_a,
+        &["roles.manage", "users.manage", "periods.read"],
+    )
+    .await;
 
     let (mut tx, _ctx) = app_db::request_tx(&app, &token_adm, p.coop_a, now)
         .await
@@ -7052,7 +7057,9 @@ async fn r1_lockout_protection_inside_boundary() {
         .expect("sealed admin tx");
     let res = sqlx::query("SELECT public.app_role_permissions_set($1, $2)")
         .bind(adm_role)
-        .bind(vec!["periods.read".to_string()])
+        // An empty set still carries no unowned keys, so the delegation
+        // guard passes and the strip reaches the lockout check.
+        .bind(Vec::<String>::new())
         .execute(&mut *tx)
         .await;
     let locked = matches!(res, Err(sqlx::Error::Database(ref e))
