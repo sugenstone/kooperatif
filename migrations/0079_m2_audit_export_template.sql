@@ -7,7 +7,7 @@
 SET LOCAL lock_timeout = '10s';
 SET LOCAL statement_timeout = '120s';
 
-INSERT INTO public.template_permissions (template_id, permission_id)
+INSERT INTO public.system_role_template_permissions (template_id, permission_id)
 SELECT t.id, p.id
 FROM public.system_role_templates t
 JOIN public.permissions p ON p.key = 'audit.export'
