@@ -1087,3 +1087,299 @@ async fn audit_export_requires_export_permission_and_masks() {
     assert_eq!(exports, 1);
     t.cleanup().await;
 }
+
+/// 0081: only a platform administrator may add/remove the canonical
+/// System Administrator role; cooperative users.manage is insufficient
+/// for either direction, and denied attempts mutate nothing.
+#[tokio::test]
+async fn sysadmin_assignment_requires_platform_admin() {
+    let t = setup().await;
+    let coop = bootstrap_coop(&t.pool).await;
+    // Canonical coop-scoped clone: name matches the system-administrator
+    // template (the linkage activation itself uses).
+    let sysadmin: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (name, description, cooperative_id) \
+         VALUES ('Sistem Yöneticisi', 'clone', $1) RETURNING id",
+    )
+    .bind(coop)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let target = create_user(&t.pool, "m2-sa-target").await;
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
+         VALUES ($1, $2, 'active')",
+    )
+    .bind(coop)
+    .bind(target)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+
+    async fn role_assigned(pool: &PgPool, target: Uuid, sysadmin: Uuid, coop: Uuid) -> bool {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM user_role_assignments \
+              WHERE user_id = $1 AND role_id = $2 AND cooperative_id = $3)",
+        )
+        .bind(target)
+        .bind(sysadmin)
+        .bind(coop)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    // Cooperative users.manage+roles.manage operator (keeps the coop's
+    // administration path non-empty so the lockout check stays quiet):
+    // still NOT a platform administrator — sysadmin writes must fail.
+    let op = create_user(&t.pool, "m2-sa-op").await;
+    grant_in_cooperative(&t.pool, coop, op, &["users.manage", "roles.manage"]).await;
+    let (_, cookie, csrf) = login_with(&t.app, t.peer, "m2-sa-op", TEST_PASSWORD).await;
+    switch_cooperative(&t.app, &cookie, coop).await;
+    let (denied_assign, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/users/{target}/roles"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "roleIds": [sysadmin] })),
+        ),
+    )
+    .await;
+    assert_eq!(denied_assign, StatusCode::FORBIDDEN);
+    assert!(
+        !role_assigned(&t.pool, target, sysadmin, coop).await,
+        "denied assign mutated state"
+    );
+
+    // Revocation denied the same way: fixture-assign, then empty the set.
+    sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role_id, cooperative_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(target)
+    .bind(sysadmin)
+    .bind(coop)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+    let (denied_revoke, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/users/{target}/roles"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "roleIds": [] })),
+        ),
+    )
+    .await;
+    assert_eq!(denied_revoke, StatusCode::FORBIDDEN);
+    assert!(
+        role_assigned(&t.pool, target, sysadmin, coop).await,
+        "denied revoke mutated state"
+    );
+
+    // Fixture-assign proved revoke is denied; clear it so the ordinary
+    // path runs on a clean assignment set (the guard only cares about
+    // the sysadmin role's diff, not unrelated roles).
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1 AND cooperative_id = $2")
+        .bind(target)
+        .bind(coop)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+
+    // Ordinary role still assignable by the same operator.
+    let ordinary: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (name, cooperative_id) VALUES ('m2-uye', $1) RETURNING id",
+    )
+    .bind(coop)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let (ordinary_ok, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/users/{target}/roles"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "roleIds": [sysadmin, ordinary] })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        ordinary_ok,
+        StatusCode::FORBIDDEN,
+        "sysadmin in set must deny"
+    );
+    // The denied set-write was atomic: ordinary role was NOT persisted.
+    assert!(!sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM user_role_assignments           WHERE user_id = $1 AND role_id = $2)",
+    )
+    .bind(target)
+    .bind(ordinary)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap());
+    let (ordinary_ok, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/users/{target}/roles"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "roleIds": [ordinary] })),
+        ),
+    )
+    .await;
+    assert_eq!(ordinary_ok, StatusCode::NO_CONTENT);
+
+    // Platform administrator (NULL users.manage + membership): allowed.
+    let padmin = create_user(&t.pool, "m2-sa-padmin").await;
+    grant_platform(&t.pool, padmin, &["users.manage"]).await;
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
+         VALUES ($1, $2, 'active')",
+    )
+    .bind(coop)
+    .bind(padmin)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+    let (_, pcookie, pcsrf) = login_with(&t.app, t.peer, "m2-sa-padmin", TEST_PASSWORD).await;
+    switch_cooperative(&t.app, &pcookie, coop).await;
+    let (allow_assign, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/users/{target}/roles"),
+            &pcookie,
+            Some(&pcsrf),
+            Some(json!({ "roleIds": [sysadmin] })),
+        ),
+    )
+    .await;
+    assert_eq!(allow_assign, StatusCode::NO_CONTENT);
+    assert!(role_assigned(&t.pool, target, sysadmin, coop).await);
+    let (allow_revoke, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/users/{target}/roles"),
+            &pcookie,
+            Some(&pcsrf),
+            Some(json!({ "roleIds": [] })),
+        ),
+    )
+    .await;
+    assert_eq!(allow_revoke, StatusCode::NO_CONTENT);
+    assert!(!role_assigned(&t.pool, target, sysadmin, coop).await);
+}
+
+/// 0081 §B: a cooperative scope admin may only delegate permissions
+/// they hold in that scope; platform-only keys and unowned keys are
+/// denied atomically; platform administrators keep the full catalog.
+#[tokio::test]
+async fn role_permission_delegation_boundary() {
+    let t = setup().await;
+    let coop = bootstrap_coop(&t.pool).await;
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (name, cooperative_id) VALUES ('m2-deleg', $1) RETURNING id",
+    )
+    .bind(coop)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    async fn keys_of(pool: &PgPool, role: Uuid) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM role_permissions WHERE role_id = $1")
+            .bind(role)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    let op = create_user(&t.pool, "m2-dg-op").await;
+    grant_in_cooperative(&t.pool, coop, op, &["users.manage", "roles.manage"]).await;
+    let (_, cookie, csrf) = login_with(&t.app, t.peer, "m2-dg-op", TEST_PASSWORD).await;
+    switch_cooperative(&t.app, &cookie, coop).await;
+
+    // Unowned permission key → denied, nothing written.
+    let (denied, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/roles/{role}/permissions"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "permissions": ["users.manage", "payments.manage"] })),
+        ),
+    )
+    .await;
+    assert_eq!(denied, StatusCode::FORBIDDEN);
+    assert_eq!(
+        keys_of(&t.pool, role).await,
+        0,
+        "denied set mutated permissions"
+    );
+
+    // Platform-only key → denied by the 0069 lane guard.
+    let (platform_denied, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/roles/{role}/permissions"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "permissions": ["cooperatives.manage"] })),
+        ),
+    )
+    .await;
+    assert_eq!(platform_denied, StatusCode::FORBIDDEN);
+    assert_eq!(keys_of(&t.pool, role).await, 0);
+
+    // Owned keys → allowed.
+    let (allowed, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/roles/{role}/permissions"),
+            &cookie,
+            Some(&csrf),
+            Some(json!({ "permissions": ["users.manage", "roles.manage"] })),
+        ),
+    )
+    .await;
+    assert_eq!(allowed, StatusCode::NO_CONTENT);
+    assert_eq!(keys_of(&t.pool, role).await, 2);
+
+    // Platform administrator: catalog stays open.
+    let padmin = create_user(&t.pool, "m2-dg-padmin").await;
+    grant_platform(&t.pool, padmin, &["users.manage", "roles.manage"]).await;
+    sqlx::query(
+        "INSERT INTO cooperative_memberships (cooperative_id, user_id, status) \
+         VALUES ($1, $2, 'active')",
+    )
+    .bind(coop)
+    .bind(padmin)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+    let (_, pcookie, pcsrf) = login_with(&t.app, t.peer, "m2-dg-padmin", TEST_PASSWORD).await;
+    switch_cooperative(&t.app, &pcookie, coop).await;
+    let (plat_ok, _) = send(
+        &t.app,
+        request_builder(
+            "PUT",
+            &format!("/api/roles/{role}/permissions"),
+            &pcookie,
+            Some(&pcsrf),
+            Some(json!({ "permissions": ["payments.manage"] })),
+        ),
+    )
+    .await;
+    assert_eq!(plat_ok, StatusCode::NO_CONTENT);
+    assert_eq!(keys_of(&t.pool, role).await, 1);
+}

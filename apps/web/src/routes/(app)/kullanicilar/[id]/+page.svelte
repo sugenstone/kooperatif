@@ -236,7 +236,8 @@
 				</CardHeader>
 				<CardContent class="flex flex-col gap-4">
 					{#each assignableRoles ?? [] as role (role.id)}
-						<label class="flex items-center gap-3 text-sm">
+						{#if !role.requiresPlatformAdmin || auth.platformAdmin}
+							<label class="flex items-center gap-3 text-sm">
 							<input
 								type="checkbox"
 								class="size-4 accent-foreground"
@@ -253,6 +254,7 @@
 								{/if}
 							</span>
 						</label>
+						{/if}
 					{:else}
 						<p class="text-sm text-muted-foreground">{t('users.detail.noAssignableRoles')}</p>
 					{/each}

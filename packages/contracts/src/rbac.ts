@@ -18,6 +18,7 @@ export interface Role {
 	status: RoleStatus;
 	permissions: string[];
 	cooperativeId: string | null;
+	requiresPlatformAdmin: boolean;
 	createdAt: string;
 	updatedAt: string;
 }

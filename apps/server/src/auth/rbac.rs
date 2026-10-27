@@ -81,6 +81,7 @@ struct RoleRow {
     description: String,
     status: String,
     cooperative_id: Option<Uuid>,
+    requires_platform_admin: bool,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
 }
@@ -96,6 +97,9 @@ pub struct RoleDto {
     /// Owning cooperative for scoped roles; NULL for platform/legacy.
     /// Needed so assignability pickers can match the verified scope.
     pub cooperative_id: Option<Uuid>,
+    /// Canonical system-administrator template link: assignment and
+    /// revocation require platform-administrator authority (0081).
+    pub requires_platform_admin: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -531,9 +535,15 @@ async fn load_role_with_permissions(
     scope: Option<Uuid>,
 ) -> Result<Option<RoleDto>, sqlx::Error> {
     let Some(role) = sqlx::query_as::<_, RoleRow>(&format!(
-        "SELECT id, name, description, status, cooperative_id, created_at, updated_at \
-         FROM roles \
-         WHERE id = $1 AND {}",
+        "SELECT r.id, r.name, r.description, r.status, r.cooperative_id, \
+                r.created_at, r.updated_at, \
+                EXISTS ( \
+                    SELECT 1 FROM system_role_templates t \
+                     WHERE lower(t.name) = lower(r.name) \
+                       AND t.key = 'system-administrator' AND t.status = 'active' \
+                ) AS requires_platform_admin \
+         FROM roles r \
+         WHERE r.id = $1 AND {}",
         scoped_visibility("cooperative_id", 2)
     ))
     .bind(role_id)
@@ -554,6 +564,7 @@ async fn load_role_with_permissions(
         description: role.description,
         status: role.status,
         cooperative_id: role.cooperative_id,
+        requires_platform_admin: role.requires_platform_admin,
         permissions,
         created_at: role.created_at,
         updated_at: role.updated_at,
