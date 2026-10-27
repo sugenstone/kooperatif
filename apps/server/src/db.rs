@@ -1283,3 +1283,15 @@ async fn gc_transition_locked(
         }
     }
 }
+
+/// Legacy-upgrade readiness: users that predate the crypt
+/// `login_verifier` lane cannot authenticate until a platform
+/// administrator performs a password reset (PD-14). Reports only the
+/// affected row count — no credential material is exposed.
+pub async fn legacy_verifier_gap(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM users WHERE login_verifier IS NULL OR btrim(login_verifier) = ''",
+    )
+    .fetch_one(pool)
+    .await
+}
