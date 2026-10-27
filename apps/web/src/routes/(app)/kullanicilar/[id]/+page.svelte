@@ -14,6 +14,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { apiErrorKey } from '$lib/api-errors';
+	import { notifySuccess, notifyError } from '$lib/notify';
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
@@ -29,6 +30,11 @@
 	let { data } = $props<{ data: { id: string } }>();
 
 	let roles = $state<Role[] | null>(null);
+	// Backend rejects NULL-scope and foreign-owned roles in a cooperative
+	// PUT — the picker must only offer roles owned by the active scope.
+	let assignableRoles = $derived(
+		roles === null ? null : roles.filter((r) => r.cooperativeId === auth.resolvedCooperativeId)
+	);
 	let assigned = new SvelteSet<string>();
 	let assignedNames = $state<string[]>([]);
 	let loadError = $state<MessageKey | null>(null);
@@ -143,8 +149,10 @@
 			});
 			await refresh();
 			savedNotice = true;
+			notifySuccess('roles.saved');
 		} catch (error) {
 			actionError = apiErrorKey(error);
+			notifyError(actionError);
 		} finally {
 			saving = false;
 		}
@@ -214,9 +222,10 @@
 			</Card>
 		{/if}
 
-		<Card class="w-full max-w-lg">
-			<CardHeader>
-				<CardTitle>{t('users.detail.available')}</CardTitle>
+		{#if can('users.manage')}
+			<Card class="w-full max-w-lg">
+				<CardHeader>
+					<CardTitle>{t('users.detail.available')}</CardTitle>
 				<CardDescription>
 					{#each assignedNames as name (name)}
 						<Badge variant="secondary" class="mr-1">{name}</Badge>
@@ -226,7 +235,7 @@
 				</CardDescription>
 			</CardHeader>
 			<CardContent class="flex flex-col gap-4">
-				{#each roles as role (role.id)}
+				{#each assignableRoles ?? [] as role (role.id)}
 					<label class="flex items-center gap-3 text-sm">
 						<input
 							type="checkbox"
@@ -244,6 +253,8 @@
 							{/if}
 						</span>
 					</label>
+				{:else}
+					<p class="text-sm text-muted-foreground">{t('users.detail.noAssignableRoles')}</p>
 				{/each}
 				<div>
 					<Button disabled={saving} onclick={() => void save()}>
@@ -252,6 +263,7 @@
 				</div>
 			</CardContent>
 		</Card>
+		{/if}
 	{/if}
 	{#if auth.platformAdmin}
 		<Card class="w-full max-w-md">

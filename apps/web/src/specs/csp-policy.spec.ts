@@ -19,7 +19,11 @@ describe('content security policy', () => {
 		const flat = Object.values(CSP_DIRECTIVES).flat();
 		expect(flat).not.toContain('*');
 		expect(CSP_DIRECTIVES['default-src']).toEqual(['self']);
-		expect(CSP_DIRECTIVES['script-src']).toEqual(['self']);
+		expect(CSP_DIRECTIVES['script-src']).toEqual([
+			'self',
+			// mode-watcher deterministic head script (no framework nonce)
+			'sha256-sxV3WjhjHTBOQef3iCo1EqzS6eCRHLGUg+dQjbWXpV0='
+		]);
 		expect(CSP_DIRECTIVES['connect-src']).toContain('self');
 	});
 

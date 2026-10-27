@@ -14,6 +14,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { apiErrorKey } from '$lib/api-errors';
+	import { notifySuccess, notifyError } from '$lib/notify';
 	import { apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
@@ -118,8 +119,13 @@
 			});
 			await refresh();
 			savedNotice = true;
+			notifySuccess('roles.saved');
+			// Confirmed persistence → return to the Roles list (owner UAT
+			// contract); failures stay on this page with the error above.
+			void goto(resolve('/roller'));
 		} catch (error) {
 			actionError = apiErrorKey(error);
+			notifyError(actionError);
 		} finally {
 			savingPermissions = false;
 		}
@@ -232,10 +238,17 @@
 						{/each}
 					</fieldset>
 				{/each}
-				<div>
+				<div class="flex flex-wrap items-center gap-3">
 					<Button disabled={savingPermissions} onclick={() => void savePermissions()}>
 						{t('roles.savePermissions')}
 					</Button>
+					{#if savedNotice}
+						<p class="text-sm text-success" role="status" aria-live="polite">
+							{t('roles.saved')}
+						</p>
+					{:else if actionError}
+						<p class="text-sm text-destructive" role="alert">{t(actionError)}</p>
+					{/if}
 				</div>
 			</CardContent>
 		</Card>

@@ -25,6 +25,7 @@
 		TableRow
 	} from '$lib/components/ui/table';
 	import { apiErrorKey } from '$lib/api-errors';
+	import { notifySuccess, notifyError } from '$lib/notify';
 	import { apiFetch } from '$lib/api-client';
 	import { auth, can } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
@@ -107,8 +108,10 @@
 			newDisplayName = '';
 			newPassword = '';
 			await refresh();
+			notifySuccess('users.create.success');
 		} catch (error) {
 			createError = apiErrorKey(error);
+			notifyError(createError);
 		} finally {
 			createSaving = false;
 		}
@@ -141,6 +144,7 @@
 			await refresh();
 		} catch (error) {
 			actionError = apiErrorKey(error);
+			notifyError(actionError);
 		} finally {
 			toggling = null;
 		}
@@ -322,9 +326,11 @@
 												</Button>
 											{/if}
 										{/if}
-										<Button variant="outline" size="sm" href="/kullanicilar/{user.id}">
-											{t('users.manageRoles')}
-										</Button>
+										{#if can('users.manage') && user.membershipStatus !== null}
+											<Button variant="outline" size="sm" href="/kullanicilar/{user.id}">
+												{t('users.manageRoles')}
+											</Button>
+										{/if}
 									</div>
 								</TableCell>
 							</TableRow>

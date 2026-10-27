@@ -30,10 +30,10 @@
 		CardHeader,
 		CardTitle
 	} from '$lib/components/ui/card';
-	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { apiErrorKey } from '$lib/api-errors';
-	import { apiFetch } from '$lib/api-client';
+	import { notifySuccess, notifyError } from '$lib/notify';
+	import { apiFetch, ApiError } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { activeIntlLocale, t, type MessageKey } from '$lib/i18n/i18n.svelte';
 	import { live } from '$lib/realtime/realtime.svelte';
@@ -45,7 +45,8 @@
 		platformCooperativeSuspendPath,
 		type ActivateCooperativeRequest,
 		type CooperativeStatus,
-		type PlatformCooperative
+		type PlatformCooperative,
+		type PlatformUser
 	} from '@kooperatif/contracts';
 
 	const coopId = $derived(page.params.id ?? '');
@@ -98,6 +99,24 @@
 	let pendingAction = $state<LifecycleAction | null>(null);
 	let adminUserId = $state('');
 	let adminIdError = $state(false);
+	// First-admin picker: the platform lane enumerates identities through
+	// its own allowlisted endpoint (0080 — NULL-scope users.read inside
+	// the definer, FORCE RLS intact). Only active identities are offered;
+	// the backend stays authoritative.
+	let adminCandidates = $state<PlatformUser[] | null>(null);
+	let adminCandidatesError = $state<'forbidden' | 'unavailable' | 'generic' | null>(null);
+
+	async function loadAdminCandidates(): Promise<void> {
+		if (adminCandidates !== null || adminCandidatesError !== null) return;
+		try {
+			const list = await apiFetch<PlatformUser[]>('/api/platform/users');
+			adminCandidates = list.filter((user) => user.status === 'active');
+		} catch (error) {
+			const status = error instanceof ApiError ? error.status : 0;
+			adminCandidatesError =
+				status === 403 ? 'forbidden' : status === 404 ? 'unavailable' : 'generic';
+		}
+	}
 
 	const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -130,6 +149,7 @@
 		adminUserId = '';
 		adminIdError = false;
 		pendingAction = action;
+		if (action === 'activate') void loadAdminCandidates();
 	}
 
 	async function confirmAction(): Promise<void> {
@@ -155,9 +175,11 @@
 			await apiFetch(ACTION_PATHS[action](id), options);
 			pendingAction = null;
 			await refresh();
+			notifySuccess('platform.coops.actionDone');
 		} catch (error) {
 			pendingAction = null;
 			actionError = apiErrorKey(error);
+			notifyError(actionError);
 		} finally {
 			busy = false;
 		}
@@ -266,13 +288,33 @@
 				{#if pendingAction === 'activate'}
 					<div class="flex flex-col gap-1.5">
 						<Label for="initial-admin-id">{t('platform.coops.adminUserId')}</Label>
-						<Input
-							id="initial-admin-id"
-							bind:value={adminUserId}
-							disabled={busy}
-							aria-invalid={adminIdError}
-						/>
-						<p class="text-xs text-muted-foreground">{t('platform.coops.adminUserIdHint')}</p>
+						{#if adminCandidates === null && adminCandidatesError === null}
+							<p class="text-xs text-muted-foreground">{t('platform.coops.adminCandidatesLoading')}</p>
+						{:else if adminCandidatesError === 'forbidden'}
+							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesForbidden')}</p>
+						{:else if adminCandidatesError === 'unavailable'}
+							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesUnavailable')}</p>
+						{:else if adminCandidatesError === 'generic'}
+							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesError')}</p>
+						{:else if adminCandidates !== null && adminCandidates.length === 0}
+							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesEmpty')}</p>
+						{:else}
+							<select
+								id="initial-admin-id"
+								class="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 disabled:cursor-not-allowed disabled:opacity-50"
+								bind:value={adminUserId}
+								disabled={busy}
+								aria-invalid={adminIdError}
+							>
+								<option value="" disabled selected>{t('platform.coops.adminSelectPlaceholder')}</option>
+								{#each adminCandidates ?? [] as candidate (candidate.id)}
+									<option value={candidate.id}>
+										{candidate.username} — {candidate.displayName}
+									</option>
+								{/each}
+							</select>
+						{/if}
+						<p class="text-xs text-muted-foreground">{t('platform.coops.adminSelectHint')}</p>
 						{#if adminIdError}
 							<p class="text-xs text-destructive" role="alert">
 								{t('platform.coops.adminUserIdInvalid')}

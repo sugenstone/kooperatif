@@ -112,7 +112,13 @@
 	// renders no cooperative-scoped data, so no staleness can leak; the
 	// backend enforces cooperatives.manage on every call regardless.
 	const isPlatformRoute = $derived(page.url.pathname.startsWith('/platform'));
-	const showRecoveryMask = $derived(!isPlatformRoute && (accessRevoked || noCooperativeAccess));
+	// Forced first-password change: the limited session cannot resolve a
+	// cooperative context — /parola must render past the recovery mask so
+	// onboarding is not blocked by the gate that protects everything else.
+	const isPasswordRoute = $derived(page.url.pathname === '/parola');
+	const showRecoveryMask = $derived(
+		!isPlatformRoute && !isPasswordRoute && (accessRevoked || noCooperativeAccess)
+	);
 	let recoverySwitching = $state<string | null>(null);
 	let recoveryError = $state<MessageKey | null>(null);
 

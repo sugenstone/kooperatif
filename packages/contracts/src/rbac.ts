@@ -17,6 +17,7 @@ export interface Role {
 	description: string;
 	status: RoleStatus;
 	permissions: string[];
+	cooperativeId: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -150,6 +151,14 @@ export interface PlatformCooperative {
 export interface CreateCooperativeRequest {
 	name: string;
 	legalName?: string;
+}
+
+/** Platform-lane identity projection (0080 `/api/platform/users`) — allowlisted fields only. */
+export interface PlatformUser {
+	id: string;
+	username: string;
+	displayName: string;
+	status: 'active' | 'disabled';
 }
 
 export interface CreateCooperativeResponse {

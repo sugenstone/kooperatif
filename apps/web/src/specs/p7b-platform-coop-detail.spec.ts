@@ -61,6 +61,12 @@ function stubFetch(responder: (url: string, init?: RequestInit) => Promise<unkno
 function responderFor(status: string, overrides?: Record<string, unknown>) {
 	return async (url: string, init?: RequestInit) => {
 		if (init?.method === 'POST') return { status: 204, ok: true, json: async () => null };
+		if (url.includes('/api/platform/users')) {
+			return jsonResponse([
+				{ id: ADMIN_ID, username: 'aday.admin', displayName: 'Aday Admin', status: 'active' },
+				{ id: 'deadbeef-0000-4000-8000-000000000001', username: 'pasif.user', displayName: 'Pasif', status: 'disabled' }
+			]);
+		}
 		if (url.endsWith(`/api/platform/cooperatives/${TARGET}`)) {
 			return jsonResponse(coopDto(status, overrides));
 		}
@@ -116,7 +122,7 @@ describe('platform cooperative lifecycle', () => {
 		expect(calls.every((c) => c.init?.method !== 'POST')).toBe(true);
 		expect(await screen.findByText(/Geçerli bir kullanıcı kimliği/)).toBeInTheDocument();
 
-		await userEvent.type(document.getElementById('initial-admin-id')!, ADMIN_ID);
+		await userEvent.selectOptions(document.getElementById('initial-admin-id')!, ADMIN_ID);
 		await userEvent.click(within(dialog).getByRole('button', { name: 'Etkinleştir' }));
 		await waitFor(() => {
 			const post = calls.find((c) => c.init?.method === 'POST');
@@ -125,6 +131,22 @@ describe('platform cooperative lifecycle', () => {
 				initialAdminUserId: ADMIN_ID
 			});
 		});
+	});
+
+	it('activation picker shows a permission error when user listing is denied', async () => {
+		stubFetch(async (url, init) => {
+			if (url.includes('/api/platform/users')) {
+				return jsonResponse({ error: { code: 'permission_denied' } }, 403);
+			}
+			return responderFor('provisioning')(url, init);
+		});
+		render(CoopDetailPage);
+
+		await userEvent.click(await screen.findByRole('button', { name: 'Etkinleştir' }));
+		expect(
+			await screen.findByText(/platform kullanıcı okuma yetkiniz yok/i)
+		).toBeInTheDocument();
+		expect(document.getElementById('initial-admin-id')).toBeNull();
 	});
 
 	it('active offers suspend and archive (never activate)', async () => {

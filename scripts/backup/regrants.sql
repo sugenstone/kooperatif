@@ -2,11 +2,11 @@
 -- (M1-P4-BR1, ADR-013). Regenerate with:
 --   pnpm backup:regrants -- --generate --baseline-url postgres://…
 --
--- Generated: 2026-10-27T06:25:32.907Z
--- Baseline:  migration version 79, 621 ACL statements
--- Expected post-apply fingerprint: 954:7a794e5f7a59bb738e2066dd2a04f938
+-- Generated: 2026-10-27T12:17:20.955Z
+-- Baseline:  migration version 80, 623 ACL statements
+-- Expected post-apply fingerprint: 956:17d7c76cda6ba1b1abc6f5ce25cc86cf
 -- Expected RLS fingerprint:      178:a44e3e09c01f04667c8fb8c4e3ccd918
--- Revision:  cd051fb382bd970ea164dbc53dd2fd592a7478a8
+-- Revision:  58391e38d91808b665fda69189f8679b48203a1f
 --
 -- Fail-closed preflight: the kooperatif_app role must exist with the
 -- hardened attribute set, and the target must be a fully-migrated
@@ -32,8 +32,8 @@ BEGIN
                    WHERE table_name = '_sqlx_migrations') THEN
         RAISE EXCEPTION 'no migration ledger — regrants only apply to a migrated kooperatif database';
     END IF;
-    IF (SELECT max(version) FROM _sqlx_migrations WHERE success) IS DISTINCT FROM 79 THEN
-        RAISE EXCEPTION 'migration ledger mismatch: expected 79, found % — regenerate regrants.sql from a matching baseline',
+    IF (SELECT max(version) FROM _sqlx_migrations WHERE success) IS DISTINCT FROM 80 THEN
+        RAISE EXCEPTION 'migration ledger mismatch: expected 80, found % — regenerate regrants.sql from a matching baseline',
             (SELECT max(version) FROM _sqlx_migrations WHERE success);
     END IF;
 END $$;
@@ -240,6 +240,7 @@ REVOKE ALL ON FUNCTION app_transfer_reverse(uuid,timestamp with time zone,uuid,t
 REVOKE ALL ON FUNCTION app_transfer_reverse_tx(uuid,timestamp with time zone,uuid,text,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_create_scoped(text,text,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_ctx_ok() FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_user_list_platform(bytea,timestamp with time zone,text,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_roles_set(uuid,uuid[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_set_status(uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_user_update_scoped(uuid,text) FROM PUBLIC;
@@ -379,6 +380,7 @@ GRANT EXECUTE ON FUNCTION app_stamp_cooperative(uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_transfer_reverse_tx(uuid,timestamp with time zone,uuid,text,uuid) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_create_scoped(text,text,text,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_ctx_ok() TO kooperatif_app;
+GRANT EXECUTE ON FUNCTION app_user_list_platform(bytea,timestamp with time zone,text,integer) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_roles_set(uuid,uuid[]) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_set_status(uuid,text) TO kooperatif_app;
 GRANT EXECUTE ON FUNCTION app_user_update_scoped(uuid,text) TO kooperatif_app;

@@ -80,6 +80,7 @@ struct RoleRow {
     name: String,
     description: String,
     status: String,
+    cooperative_id: Option<Uuid>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
 }
@@ -92,6 +93,9 @@ pub struct RoleDto {
     pub description: String,
     pub status: String,
     pub permissions: Vec<String>,
+    /// Owning cooperative for scoped roles; NULL for platform/legacy.
+    /// Needed so assignability pickers can match the verified scope.
+    pub cooperative_id: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -246,6 +250,24 @@ pub struct PlatformCooperativeQuery {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PlatformUserQuery {
+    pub search: Option<String>,
+    pub limit: Option<i32>,
+}
+
+/// Platform first-admin picker projection (0080
+/// `app_user_list_platform`) — allowlisted identity fields only; no
+/// credential, reset or session material ever crosses the boundary.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformUserDto {
+    pub id: Uuid,
+    pub username: String,
+    pub display_name: String,
+    pub status: String,
+}
+
 /// Platform read-model projection (0068 `app_cooperative_list_platform`)
 /// — allowlisted fields only; the definer hides the table entirely from
 /// the restricted role.
@@ -353,6 +375,7 @@ pub fn platform_router() -> Router<AppState> {
             "/api/platform/cooperatives/{id}/archive",
             post(platform_archive_cooperative),
         )
+        .route("/api/platform/users", get(platform_list_users))
         // Platform authorization data is sensitive: never cacheable.
         .layer(axum::middleware::from_fn(
             crate::auth::routes::no_store_cache_control,
@@ -508,7 +531,7 @@ async fn load_role_with_permissions(
     scope: Option<Uuid>,
 ) -> Result<Option<RoleDto>, sqlx::Error> {
     let Some(role) = sqlx::query_as::<_, RoleRow>(&format!(
-        "SELECT id, name, description, status, created_at, updated_at \
+        "SELECT id, name, description, status, cooperative_id, created_at, updated_at \
          FROM roles \
          WHERE id = $1 AND {}",
         scoped_visibility("cooperative_id", 2)
@@ -530,6 +553,7 @@ async fn load_role_with_permissions(
         name: role.name,
         description: role.description,
         status: role.status,
+        cooperative_id: role.cooperative_id,
         permissions,
         created_at: role.created_at,
         updated_at: role.updated_at,
@@ -1683,6 +1707,38 @@ pub async fn platform_get_cooperative(
 ) -> Result<Json<PlatformCooperativeDto>, ApiError> {
     let rows = platform_read_cooperatives(&state, &auth, Some(cooperative_id), None).await?;
     rows.into_iter().next().map(Json).ok_or(ApiError::NotFound)
+}
+
+/// 0080: platform-lane user enumeration for the first-administrator
+/// picker. The definer verifies the session and the NULL-scope
+/// `users.read` grant inside the database — FORCE RLS stays intact and
+/// cooperative-scoped `/api/users` is untouched.
+pub async fn platform_list_users(
+    State(state): State<AppState>,
+    auth: CurrentAuth,
+    Query(query): Query<PlatformUserQuery>,
+) -> Result<Json<Vec<PlatformUserDto>>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::DependencyUnavailable)?;
+    let rows = sqlx::query_as::<_, PlatformUserDto>(
+        "SELECT id, username, display_name, status \
+           FROM public.app_user_list_platform($1, $2, $3, $4)",
+    )
+    .bind(&auth.session_token_hash[..])
+    .bind(auth.authed_at)
+    .bind(query.search.as_deref())
+    .bind(query.limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::Database(db_err) if is_insufficient_privilege(&*db_err) => {
+            ApiError::PermissionDenied
+        }
+        _ => {
+            tracing::error!(error = %error, "platform user list failed");
+            ApiError::Internal
+        }
+    })?;
+    Ok(Json(rows))
 }
 
 pub async fn get_role_permissions(
