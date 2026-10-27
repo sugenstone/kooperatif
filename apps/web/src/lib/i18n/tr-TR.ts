@@ -212,6 +212,8 @@ export const trTR = {
 	'roles.savePermissions': 'Yetkileri Kaydet',
 	'roles.saveSettings': 'Bilgileri Kaydet',
 	'roles.saved': 'Kaydedildi.',
+	'roles.created': 'Rol oluşturuldu.',
+	'platform.coops.actionDone': 'İşlem tamamlandı.',
 	'roles.loading': 'Yükleniyor…',
 	'roles.error': 'Roller yüklenemedi.',
 	'roles.empty': 'Henüz rol oluşturulmamış.',
@@ -279,6 +281,7 @@ export const trTR = {
 	'users.detail.available': 'Atanabilir roller',
 	'users.detail.save': 'Rolleri Kaydet',
 	'users.detail.noRoles': 'Atanmış rol yok.',
+	'users.detail.noAssignableRoles': 'Bu kooperatifte atanabilir rol yok. Yeni rol oluşturun.',
 	'users.loading': 'Yükleniyor…',
 	'users.error': 'Kullanıcılar yüklenemedi.',
 	'users.status': 'Hesap Durumu',
@@ -1595,7 +1598,17 @@ export const trTR = {
 		'Arşivlenen kooperatif iş modülünü kapatır. Kayıtlar korunur; kooperatif daha sonra geri yüklenebilir.',
 	'platform.coops.adminUserId': 'İlk Yönetici Kullanıcı Kimliği',
 	'platform.coops.adminUserIdHint': 'UUID biçiminde kullanıcı kimliği girin (ör. 3f6c…-…-…-…-…).',
-	'platform.coops.adminUserIdInvalid': 'Geçerli bir kullanıcı kimliği (UUID) girin.'
+	'platform.coops.adminUserIdInvalid': 'Geçerli bir kullanıcı kimliği (UUID) girin.',
+	'platform.coops.adminSelectHint':
+		'Aktivasyon, seçilen kullanıcıya bu kooperatifte yönetici üyeliği ve yönetici rolü atar.',
+	'platform.coops.adminSelectPlaceholder': 'İlk yöneticiyi seçin',
+	'platform.coops.adminCandidatesLoading': 'Kullanıcılar yükleniyor…',
+	'platform.coops.adminCandidatesError': 'Kullanıcılar yüklenemedi.',
+	'platform.coops.adminCandidatesEmpty': 'Seçilebilir aktif kullanıcı yok.',
+	'platform.coops.adminCandidatesForbidden':
+		'Bu listeyi görüntülemek için platform kullanıcı okuma yetkiniz yok.',
+	'platform.coops.adminCandidatesUnavailable':
+		'Backend sürümü bu seçiciyi desteklemiyor — güncelleme gerekli.'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

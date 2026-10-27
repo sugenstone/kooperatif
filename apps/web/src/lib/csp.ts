@@ -34,7 +34,10 @@ export function connectSources(): CspSource[] {
 
 export const CSP_DIRECTIVES: Record<string, CspSource[]> = {
 	'default-src': ['self'],
-	'script-src': ['self'],
+	// The mode-watcher theme bootstrap renders one deterministic inline
+	// <script> in the head (no framework nonce applies to it). Allow only
+	// that exact script body by hash — never 'unsafe-inline'.
+	'script-src': ['self', 'sha256-sxV3WjhjHTBOQef3iCo1EqzS6eCRHLGUg+dQjbWXpV0='],
 	'style-src': ['self', 'unsafe-inline'],
 	'img-src': ['self', 'data:'],
 	'font-src': ['self'],

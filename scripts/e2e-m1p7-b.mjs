@@ -3,7 +3,7 @@
 //   Disposable DB kooperatif_e2e_p7b (created only if absent — never
 //   dropped) → migrate → users → bootstrap cooperative → capability
 //   split fixture:
-//     p7badmin    = seeded NULL-scope `platform-lifecycle` role ONLY
+//     p7badmin    = NULL-scope platform-lifecycle + users.read (picker)
 //                   (cooperatives.manage, never users.manage) + plain
 //                   coop A membership — the least-privilege operator;
 //     p7busradmin = NULL-scope `Sistem Yöneticisi` (users.manage,
@@ -428,9 +428,9 @@ psql(
 );
 
 // Capability-split fixture (idempotent reconcile, disposable DB only):
-// - p7badmin holds ONLY the seeded NULL-scope `platform-lifecycle` role
-//   (NULL-scope cooperatives.manage, NO users.manage) plus a plain coop A
-//   membership — the intended least-privilege lifecycle operator.
+// - p7badmin holds NULL-scope `platform-lifecycle` plus a dedicated
+//   users.read-only fixture role (the activation picker's contract) —
+//   least-privilege lifecycle operator, never users.manage.
 // - p7busradmin holds ONLY NULL-scope users.manage through the legacy
 //   NULL-scope `Sistem Yöneticisi` seed — which must NOT carry
 //   cooperatives.manage (an earlier fixture revision forged it there).
@@ -447,6 +447,35 @@ psql(
   `INSERT INTO user_role_assignments (user_id, role_id, cooperative_id) \
    SELECT '${adminId}', id, NULL FROM roles \
     WHERE cooperative_id IS NULL AND lower(name) = 'platform-lifecycle'`,
+  DB_NAME,
+);
+// The activation dialog's first-admin picker reads
+// GET /api/platform/users, which requires NULL-scope users.read —
+// migration 0080 made that the real contract, so the least-privilege
+// lifecycle operator fixture needs the read grant too (still no
+// users.manage mutation authority).
+psql(
+  `INSERT INTO roles (name, description, cooperative_id) \
+   SELECT 'e2e-platform-users-read', \
+          'E2E fixture: NULL-scope users.read for the activation picker', \
+          NULL \
+   WHERE NOT EXISTS (SELECT 1 FROM roles WHERE cooperative_id IS NULL \
+     AND name = 'e2e-platform-users-read')`,
+  DB_NAME,
+);
+psql(
+  `INSERT INTO role_permissions (role_id, permission_id) \
+   SELECT r.id, p.id FROM roles r, permissions p \
+    WHERE r.cooperative_id IS NULL AND r.name = 'e2e-platform-users-read' \
+      AND p.key = 'users.read' \
+   ON CONFLICT (role_id, permission_id) DO NOTHING`,
+  DB_NAME,
+);
+psql(
+  `INSERT INTO user_role_assignments (user_id, role_id, cooperative_id) \
+   SELECT '${adminId}', id, NULL FROM roles \
+    WHERE cooperative_id IS NULL AND name = 'e2e-platform-users-read' \
+   ON CONFLICT DO NOTHING`,
   DB_NAME,
 );
 psql(
@@ -630,7 +659,12 @@ try {
     .click();
   await page.getByText(/Geçerli bir kullanıcı kimliği/).waitFor();
   check("activation rejects a missing UUID client-side", true);
-  await page.locator("#initial-admin-id").fill(plainId);
+  // The picker is a <select> fed by GET /api/platform/users — wait for
+  // the authorized options to arrive, then select the target user.
+  await page
+    .locator("#initial-admin-id option", { hasText: "p7bplain" })
+    .waitFor({ state: "attached", timeout: 15000 });
+  await page.locator("#initial-admin-id").selectOption(plainId);
   await page
     .getByRole("alertdialog")
     .getByRole("button", { name: "Etkinleştir" })

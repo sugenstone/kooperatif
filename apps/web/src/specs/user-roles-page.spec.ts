@@ -18,6 +18,8 @@ const rolesPayload = [
 		description: '',
 		status: 'active',
 		permissions: [],
+		cooperativeId: 'coop-1',
+		requiresPlatformAdmin: false,
 		createdAt: '2026-01-01T00:00:00Z',
 		updatedAt: '2026-01-01T00:00:00Z'
 	},
@@ -27,6 +29,19 @@ const rolesPayload = [
 		description: '',
 		status: 'disabled',
 		permissions: [],
+		cooperativeId: 'coop-1',
+		requiresPlatformAdmin: false,
+		createdAt: '2026-01-01T00:00:00Z',
+		updatedAt: '2026-01-01T00:00:00Z'
+	},
+	{
+		id: 'platform-role-0000-0000-000000000009',
+		name: 'Platform Rolü',
+		description: '',
+		status: 'active',
+		permissions: [],
+		cooperativeId: null,
+		requiresPlatformAdmin: false,
 		createdAt: '2026-01-01T00:00:00Z',
 		updatedAt: '2026-01-01T00:00:00Z'
 	}
@@ -52,6 +67,8 @@ beforeEach(() => {
 	auth.status = 'authenticated';
 	auth.user = { id: 'u-1', username: 'ali', displayName: 'Ali Yılmaz' };
 	auth.csrfToken = 'csrf-raw';
+	auth.activeCooperativeId = 'coop-1';
+	auth.resolvedCooperativeId = 'coop-1';
 	auth.permissions = ['users.read', 'users.manage'];
 });
 
@@ -75,6 +92,7 @@ describe('User role assignment page', () => {
 
 		// The role appears both as the assigned badge and a checkbox label.
 		expect(await screen.findAllByText('Sistem Yöneticisi')).toHaveLength(2);
+		expect(screen.queryByText('Platform Rolü')).not.toBeInTheDocument();
 		const disabledOption = screen.getByText('Kapalı Rol').closest('label');
 		expect(disabledOption).toBeInTheDocument();
 		const checkbox = disabledOption?.querySelector('input');

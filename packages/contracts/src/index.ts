@@ -54,6 +54,7 @@ export type {
 	PermissionKey,
 	PermissionSetRequest,
 	PlatformCooperative,
+	PlatformUser,
 	Role,
 	RoleStatus,
 	UpdateRoleRequest,

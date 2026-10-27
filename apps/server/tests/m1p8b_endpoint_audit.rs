@@ -279,9 +279,11 @@ fn route_inventory_is_fully_classified() {
         lanes[&Lane::Cooperative] >= 100,
         "cooperative lane implausibly small: {lanes:?}"
     );
+    // 10 lifecycle/audit routes + GET /api/platform/users (migration
+    // 0080 picker feed — NULL-scope users.read, definer-enforced).
     assert_eq!(
         lanes[&Lane::Platform],
-        10,
+        11,
         "platform lane drifted: {lanes:?}"
     );
     assert_eq!(lanes[&Lane::Public], 3, "public lane drifted: {lanes:?}");

@@ -40,7 +40,7 @@
 					newPassword: next
 				}
 			});
-			hardNavigate('/giris');
+			hardNavigate('/login');
 		} catch (error) {
 			actionError = apiErrorKey(error);
 			saving = false;

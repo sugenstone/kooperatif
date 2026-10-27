@@ -23,6 +23,7 @@
 		TableRow
 	} from '$lib/components/ui/table';
 	import { apiErrorKey } from '$lib/api-errors';
+	import { notifySuccess, notifyError } from '$lib/notify';
 	import { ApiError, apiFetch } from '$lib/api-client';
 	import { auth } from '$lib/auth/auth.svelte';
 	import { t, type MessageKey } from '$lib/i18n/i18n.svelte';
@@ -62,11 +63,13 @@
 			newName = '';
 			newDescription = '';
 			await refresh();
+			notifySuccess('roles.created');
 		} catch (error) {
 			createError =
 				error instanceof ApiError && error.code === 'conflict'
 					? 'roles.errors.nameConflict'
 					: apiErrorKey(error);
+			notifyError(createError);
 		} finally {
 			creating = false;
 		}
