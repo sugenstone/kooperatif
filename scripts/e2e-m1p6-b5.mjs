@@ -210,12 +210,35 @@ if (!published.split("\n").some((m) => m.trim().endsWith(`:${PG_PORT}`))) {
 // both belong to this container, so host TCP provably reaches THIS
 // run's ephemeral instance. Local runs never stamp the shared cluster.
 if (process.env.E2E_EPHEMERAL === "1") {
-  const runMarker = `kooperatif-e2e-run:${randomUUID()}`;
-  psql(`COMMENT ON DATABASE postgres IS '${runMarker}'`);
-  const markerBack = psql(
-    `SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = 'postgres'`,
-  );
-  if (markerBack !== runMarker)
+  // The stamp must be VERIFIED as written, not assumed: spawnSync
+  // failures (container mid-restart, transient exec refusal) used to
+  // silently yield an empty stdout and surface only as the mismatch
+  // below — an opaque flake. Check the exec status and retry once.
+  const stamp = (marker) =>
+    compose([
+      "exec",
+      "-T",
+      "postgres",
+      "psql",
+      "-U",
+      PG_USER,
+      "-d",
+      "postgres",
+      "-Atc",
+      `COMMENT ON DATABASE postgres IS '${marker}'`,
+    ]);
+  let runMarker = "";
+  let marked = false;
+  for (let attempt = 0; attempt < 2 && !marked; attempt++) {
+    runMarker = `kooperatif-e2e-run:${randomUUID()}`;
+    const wrote = stamp(runMarker);
+    if (wrote.status !== 0) continue;
+    marked =
+      psql(
+        `SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = 'postgres'`,
+      ) === runMarker;
+  }
+  if (!marked)
     die("ephemeral run-marker mismatch — target is not this run's cluster");
   log(`ephemeral instance verified (${runMarker})`);
 }
