@@ -2,11 +2,11 @@
 -- (M1-P4-BR1, ADR-013). Regenerate with:
 --   pnpm backup:regrants -- --generate --baseline-url postgres://…
 --
--- Generated: 2026-10-26T21:40:04.567Z
--- Baseline:  migration version 78, 621 ACL statements
+-- Generated: 2026-10-27T06:25:32.907Z
+-- Baseline:  migration version 79, 621 ACL statements
 -- Expected post-apply fingerprint: 954:7a794e5f7a59bb738e2066dd2a04f938
 -- Expected RLS fingerprint:      178:a44e3e09c01f04667c8fb8c4e3ccd918
--- Revision:  1a6dbd043dab38897c20cd52fc72a7f31995c3eb
+-- Revision:  cd051fb382bd970ea164dbc53dd2fd592a7478a8
 --
 -- Fail-closed preflight: the kooperatif_app role must exist with the
 -- hardened attribute set, and the target must be a fully-migrated
@@ -32,8 +32,8 @@ BEGIN
                    WHERE table_name = '_sqlx_migrations') THEN
         RAISE EXCEPTION 'no migration ledger — regrants only apply to a migrated kooperatif database';
     END IF;
-    IF (SELECT max(version) FROM _sqlx_migrations WHERE success) IS DISTINCT FROM 78 THEN
-        RAISE EXCEPTION 'migration ledger mismatch: expected 78, found % — regenerate regrants.sql from a matching baseline',
+    IF (SELECT max(version) FROM _sqlx_migrations WHERE success) IS DISTINCT FROM 79 THEN
+        RAISE EXCEPTION 'migration ledger mismatch: expected 79, found % — regenerate regrants.sql from a matching baseline',
             (SELECT max(version) FROM _sqlx_migrations WHERE success);
     END IF;
 END $$;
