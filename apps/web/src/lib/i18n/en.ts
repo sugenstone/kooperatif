@@ -568,13 +568,16 @@ export const en: Partial<Record<MessageKey, string>> = {
 	'platform.coops.adminUserId': 'Initial Administrator User ID',
 	'platform.coops.adminUserIdHint': 'Enter the user ID in UUID format (e.g. 3f6c…-…-…-…-…).',
 	'platform.coops.adminUserIdInvalid': 'Enter a valid user ID (UUID).',
-	'platform.coops.adminSelectHint': 'Activation grants the selected user administrator membership and the admin role in this cooperative.',
+	'platform.coops.adminSelectHint':
+		'Activation grants the selected user administrator membership and the admin role in this cooperative.',
 	'platform.coops.adminSelectPlaceholder': 'Select the first administrator',
 	'platform.coops.adminCandidatesLoading': 'Loading users…',
 	'platform.coops.adminCandidatesError': 'Users could not be loaded.',
 	'platform.coops.adminCandidatesEmpty': 'No selectable active users.',
-	'platform.coops.adminCandidatesForbidden': 'You lack the platform user-read permission required to list users.',
-	'platform.coops.adminCandidatesUnavailable': 'The backend version does not support this picker — an update is required.',
+	'platform.coops.adminCandidatesForbidden':
+		'You lack the platform user-read permission required to list users.',
+	'platform.coops.adminCandidatesUnavailable':
+		'The backend version does not support this picker — an update is required.',
 	'users.detail.noAssignableRoles': 'No assignable roles in this cooperative. Create a new role.',
 	'roles.created': 'Role created.',
 	'platform.coops.actionDone': 'Action completed.'

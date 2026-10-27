@@ -289,24 +289,36 @@
 					<div class="flex flex-col gap-1.5">
 						<Label for="initial-admin-id">{t('platform.coops.adminUserId')}</Label>
 						{#if adminCandidates === null && adminCandidatesError === null}
-							<p class="text-xs text-muted-foreground">{t('platform.coops.adminCandidatesLoading')}</p>
+							<p class="text-xs text-muted-foreground">
+								{t('platform.coops.adminCandidatesLoading')}
+							</p>
 						{:else if adminCandidatesError === 'forbidden'}
-							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesForbidden')}</p>
+							<p class="text-xs text-destructive" role="alert">
+								{t('platform.coops.adminCandidatesForbidden')}
+							</p>
 						{:else if adminCandidatesError === 'unavailable'}
-							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesUnavailable')}</p>
+							<p class="text-xs text-destructive" role="alert">
+								{t('platform.coops.adminCandidatesUnavailable')}
+							</p>
 						{:else if adminCandidatesError === 'generic'}
-							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesError')}</p>
+							<p class="text-xs text-destructive" role="alert">
+								{t('platform.coops.adminCandidatesError')}
+							</p>
 						{:else if adminCandidates !== null && adminCandidates.length === 0}
-							<p class="text-xs text-destructive" role="alert">{t('platform.coops.adminCandidatesEmpty')}</p>
+							<p class="text-xs text-destructive" role="alert">
+								{t('platform.coops.adminCandidatesEmpty')}
+							</p>
 						{:else}
 							<select
 								id="initial-admin-id"
-								class="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 disabled:cursor-not-allowed disabled:opacity-50"
+								class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm ring-offset-background transition-colors placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
 								bind:value={adminUserId}
 								disabled={busy}
 								aria-invalid={adminIdError}
 							>
-								<option value="" disabled selected>{t('platform.coops.adminSelectPlaceholder')}</option>
+								<option value="" disabled selected
+									>{t('platform.coops.adminSelectPlaceholder')}</option
+								>
 								{#each adminCandidates ?? [] as candidate (candidate.id)}
 									<option value={candidate.id}>
 										{candidate.username} — {candidate.displayName}

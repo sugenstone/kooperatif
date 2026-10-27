@@ -1599,13 +1599,16 @@ export const trTR = {
 	'platform.coops.adminUserId': 'İlk Yönetici Kullanıcı Kimliği',
 	'platform.coops.adminUserIdHint': 'UUID biçiminde kullanıcı kimliği girin (ör. 3f6c…-…-…-…-…).',
 	'platform.coops.adminUserIdInvalid': 'Geçerli bir kullanıcı kimliği (UUID) girin.',
-	'platform.coops.adminSelectHint': 'Aktivasyon, seçilen kullanıcıya bu kooperatifte yönetici üyeliği ve yönetici rolü atar.',
+	'platform.coops.adminSelectHint':
+		'Aktivasyon, seçilen kullanıcıya bu kooperatifte yönetici üyeliği ve yönetici rolü atar.',
 	'platform.coops.adminSelectPlaceholder': 'İlk yöneticiyi seçin',
 	'platform.coops.adminCandidatesLoading': 'Kullanıcılar yükleniyor…',
 	'platform.coops.adminCandidatesError': 'Kullanıcılar yüklenemedi.',
 	'platform.coops.adminCandidatesEmpty': 'Seçilebilir aktif kullanıcı yok.',
-	'platform.coops.adminCandidatesForbidden': 'Bu listeyi görüntülemek için platform kullanıcı okuma yetkiniz yok.',
-	'platform.coops.adminCandidatesUnavailable': 'Backend sürümü bu seçiciyi desteklemiyor — güncelleme gerekli.',
+	'platform.coops.adminCandidatesForbidden':
+		'Bu listeyi görüntülemek için platform kullanıcı okuma yetkiniz yok.',
+	'platform.coops.adminCandidatesUnavailable':
+		'Backend sürümü bu seçiciyi desteklemiyor — güncelleme gerekli.'
 } as const;
 
 export type MessageKey = keyof typeof trTR;

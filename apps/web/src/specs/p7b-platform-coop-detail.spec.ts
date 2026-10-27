@@ -64,7 +64,12 @@ function responderFor(status: string, overrides?: Record<string, unknown>) {
 		if (url.includes('/api/platform/users')) {
 			return jsonResponse([
 				{ id: ADMIN_ID, username: 'aday.admin', displayName: 'Aday Admin', status: 'active' },
-				{ id: 'deadbeef-0000-4000-8000-000000000001', username: 'pasif.user', displayName: 'Pasif', status: 'disabled' }
+				{
+					id: 'deadbeef-0000-4000-8000-000000000001',
+					username: 'pasif.user',
+					displayName: 'Pasif',
+					status: 'disabled'
+				}
 			]);
 		}
 		if (url.endsWith(`/api/platform/cooperatives/${TARGET}`)) {
@@ -143,9 +148,7 @@ describe('platform cooperative lifecycle', () => {
 		render(CoopDetailPage);
 
 		await userEvent.click(await screen.findByRole('button', { name: 'Etkinleştir' }));
-		expect(
-			await screen.findByText(/platform kullanıcı okuma yetkiniz yok/i)
-		).toBeInTheDocument();
+		expect(await screen.findByText(/platform kullanıcı okuma yetkiniz yok/i)).toBeInTheDocument();
 		expect(document.getElementById('initial-admin-id')).toBeNull();
 	});
 
